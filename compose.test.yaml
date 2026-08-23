@@ -1,0 +1,20 @@
+# Test database only — used by `make test-e2e` and CI. Host port 5434 so it
+# can run next to pdbq's e2e stack (5433). The init dir is generated from
+# testutil.FixtureSQL by the Makefile (see test-e2e).
+services:
+  db:
+    # PostGIS-enabled image: the fixture schema creates the extension.
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: pdbcore
+      POSTGRES_PASSWORD: pdbcore
+      POSTGRES_DB: pdbcore_test
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./testutil:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdbcore"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Vet
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+      - name: Tests (race)
+        run: go test -race ./...
+      - name: No GraphQL dependency
+        run: |
+          if go list -deps ./... | grep -i gqlparser; then
+            echo "pdbcore must not depend on gqlparser"; exit 1
+          fi
+
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # PostGIS-enabled: the fixture schema creates the extension.
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: pdbcore
+          POSTGRES_PASSWORD: pdbcore
+          POSTGRES_DB: pdbcore_test
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pdbcore"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Load fixture schema
+        run: |
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          go run ./testutil/cmd/fixture | PGPASSWORD=pdbcore psql -v ON_ERROR_STOP=1 -h localhost -p 5434 -U pdbcore -d pdbcore_test -f -
+      - name: DB-backed tests
+        env:
+          PDBCORE_TEST_DATABASE_URL: postgres://pdbcore:pdbcore@localhost:5434/pdbcore_test
+        run: go test -race -count=1 ./testutil/ ./pgexec/ ./watch/
