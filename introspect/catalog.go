@@ -11,7 +11,7 @@ import (
 
 // CatalogFormatVersion is bumped whenever the Catalog wire format changes
 // incompatibly; the cache layer refuses to load mismatched versions.
-const CatalogFormatVersion = 5
+const CatalogFormatVersion = 6
 
 // Catalog is the complete introspected model of the database. It is the only
 // input to API building, which keeps caching trivial and plugin transforms
@@ -314,9 +314,18 @@ const (
 )
 
 type Function struct {
-	Schema           string     `json:"schema"`
-	Name             string     `json:"name"`
-	Args             []FuncArg  `json:"args"`
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+	// Args are the input parameters (IN, INOUT and VARIADIC) in declaration
+	// order, which is also the function's identity for overloading. All are
+	// named: functions with an unnamed input parameter are not introspected.
+	Args []FuncArg `json:"args"`
+	// ReturnColumns are the output parameters (OUT, INOUT and TABLE) in
+	// declaration order; empty when there are none. With two or more,
+	// ReturnType is "record" and each result row has exactly these columns.
+	// With one, PostgreSQL returns that column's type directly (ReturnType
+	// is that type, and the column name only labels SELECT * FROM f()).
+	ReturnColumns    []FuncArg  `json:"return_columns,omitempty"`
 	ReturnType       string     `json:"return_type"`
 	ReturnTypeSchema string     `json:"return_type_schema"`
 	ReturnsSet       bool       `json:"returns_set"`
@@ -324,10 +333,54 @@ type Function struct {
 	Comment          string     `json:"comment,omitempty"`
 }
 
+// ArgMode mirrors pg_proc.proargmodes.
+type ArgMode string
+
+const (
+	// ArgModeIn is an ordinary input parameter. An empty Mode means the same.
+	ArgModeIn ArgMode = "in"
+	// ArgModeOut is an OUT parameter: a result column, never passed.
+	ArgModeOut ArgMode = "out"
+	// ArgModeInOut is an INOUT parameter: passed in and returned as a column.
+	ArgModeInOut ArgMode = "inout"
+	// ArgModeVariadic is a VARIADIC parameter. Its PGType is the array type
+	// (e.g. _int4); an array value must be passed with the VARIADIC keyword,
+	// and named notation cannot leave out any parameter of a variadic
+	// function (see [Function.CallSQL]).
+	ArgModeVariadic ArgMode = "variadic"
+	// ArgModeTable is a column of RETURNS TABLE (...).
+	ArgModeTable ArgMode = "table"
+)
+
 type FuncArg struct {
-	Name       string `json:"name"`
-	PGType     string `json:"pg_type"`
-	TypeSchema string `json:"type_schema"`
+	// Name is the parameter name. An unnamed output parameter is given the
+	// name PostgreSQL gives its result column: "column" followed by its
+	// 1-based position among the output parameters.
+	Name       string  `json:"name"`
+	PGType     string  `json:"pg_type"`
+	TypeSchema string  `json:"type_schema"`
+	Mode       ArgMode `json:"mode,omitempty"`
+	// HasDefault marks an input parameter declared with a DEFAULT, which a
+	// call may omit (see [Function.CallSQL]). PostgreSQL only allows
+	// defaults on trailing input parameters (pronargdefaults counts them),
+	// but named notation can omit any of them.
+	HasDefault bool `json:"has_default,omitempty"`
+	// Default is the DEFAULT expression as pg_get_function_arg_default
+	// renders it, for documentation only: it is never needed to call the
+	// function, which evaluates its own defaults.
+	Default string `json:"default,omitempty"`
+}
+
+// Variadic reports whether a is the VARIADIC parameter.
+func (a FuncArg) Variadic() bool { return a.Mode == ArgModeVariadic }
+
+// Variadic returns the function's VARIADIC parameter (always the last of
+// Args), or nil.
+func (f *Function) Variadic() *FuncArg {
+	if n := len(f.Args); n > 0 && f.Args[n-1].Variadic() {
+		return &f.Args[n-1]
+	}
+	return nil
 }
 
 // Table returns the table with the given schema+name, or nil.

@@ -2,8 +2,10 @@ package introspect
 
 import (
 	"context"
+	"errors"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -314,5 +316,188 @@ func TestIntrospectKeysAndGeneratedLive(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []string{"2026-01-01", "2026-02-01"}) {
 		t.Errorf("temporal join matched room periods starting %v, want the two the booking overlaps", got)
+	}
+}
+
+// liveTx opens a transaction on PDBCORE_TEST_DATABASE_URL that the test
+// rolls back, and runs ddl in it.
+func liveTx(t *testing.T, ddl ...string) pgx.Tx {
+	t.Helper()
+	url := os.Getenv("PDBCORE_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("PDBCORE_TEST_DATABASE_URL not set; run `make test-e2e`")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close(ctx) })
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	for _, q := range ddl {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	return tx
+}
+
+// TestIntrospectFunctionsLive covers parameter defaults, VARIADIC, OUT,
+// INOUT and RETURNS TABLE parameters, and runs real calls rendered by
+// Function.CallSQL with arguments left out and placeholders numbered by the
+// caller.
+func TestIntrospectFunctionsLive(t *testing.T) {
+	tx := liveTx(t,
+		`CREATE SCHEMA pdbcore_funcs_test`,
+		`SET LOCAL search_path = pdbcore_funcs_test`,
+		`CREATE FUNCTION add_numbers(a int, b int DEFAULT 1) RETURNS int LANGUAGE sql AS 'SELECT a + b'`,
+		`CREATE FUNCTION record_event(kind text, payload jsonb DEFAULT '{}') RETURNS jsonb
+			LANGUAGE sql AS 'SELECT jsonb_build_object(''kind'', kind, ''payload'', payload)'`,
+		`CREATE FUNCTION sum_ints(VARIADIC xs int[]) RETURNS int LANGUAGE sql AS 'SELECT sum(x)::int FROM unnest(xs) x'`,
+		`CREATE FUNCTION join_words(sep text DEFAULT ',', VARIADIC words text[] DEFAULT '{}') RETURNS text
+			LANGUAGE sql AS 'SELECT array_to_string(words, sep)'`,
+		`CREATE FUNCTION split_pair(a int, OUT lo int, OUT hi int) LANGUAGE sql AS 'SELECT a - 1, a + 1'`,
+		`CREATE FUNCTION unnamed_out(a int, OUT int, OUT text) LANGUAGE sql AS 'SELECT a, a::text'`,
+		`CREATE FUNCTION inout_double(INOUT x int, OUT label text) LANGUAGE sql AS 'SELECT x * 2, ''doubled'''`,
+		`CREATE FUNCTION single_out(a int, OUT doubled int) LANGUAGE sql AS 'SELECT a * 2'`,
+		`CREATE FUNCTION squares(n int) RETURNS TABLE (i int, sq int)
+			LANGUAGE sql AS 'SELECT g, g * g FROM generate_series(1, n) g'`,
+		`CREATE FUNCTION mixed_defaults(a int, OUT r int, b int DEFAULT 2) LANGUAGE sql AS 'SELECT a + b'`,
+		`CREATE FUNCTION three(a int, b int DEFAULT 10, c int DEFAULT 100) RETURNS int LANGUAGE sql AS 'SELECT a + b + c'`,
+		`CREATE FUNCTION unnamed_in(int) RETURNS int LANGUAGE sql AS 'SELECT $1'`,
+		`SET LOCAL search_path = pg_catalog`,
+	)
+	ctx := context.Background()
+	cat, err := Introspect(ctx, tx, []string{"pdbcore_funcs_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := func(name string) *Function {
+		t.Helper()
+		for _, f := range cat.Functions {
+			if f.Name == name {
+				return f
+			}
+		}
+		t.Fatalf("function %s not introspected", name)
+		return nil
+	}
+	for _, f := range cat.Functions {
+		if f.Name == "unnamed_in" {
+			t.Errorf("function with an unnamed input parameter introspected: %+v", f)
+		}
+	}
+	in := func(name, typ string) FuncArg {
+		return FuncArg{Name: name, PGType: typ, TypeSchema: "pg_catalog", Mode: ArgModeIn}
+	}
+	withMode := func(a FuncArg, m ArgMode) FuncArg { a.Mode = m; return a }
+	withDefault := func(a FuncArg, d string) FuncArg { a.HasDefault, a.Default = true, d; return a }
+	for name, want := range map[string]struct {
+		args, cols []FuncArg
+		ret        string
+		set        bool
+	}{
+		"add_numbers":  {args: []FuncArg{in("a", "int4"), withDefault(in("b", "int4"), "1")}, ret: "int4"},
+		"record_event": {args: []FuncArg{in("kind", "text"), withDefault(in("payload", "jsonb"), "'{}'::jsonb")}, ret: "jsonb"},
+		"sum_ints":     {args: []FuncArg{withMode(in("xs", "_int4"), ArgModeVariadic)}, ret: "int4"},
+		"join_words": {args: []FuncArg{withDefault(in("sep", "text"), "','::text"),
+			withDefault(withMode(in("words", "_text"), ArgModeVariadic), "'{}'::text[]")}, ret: "text"},
+		"split_pair": {args: []FuncArg{in("a", "int4")},
+			cols: []FuncArg{withMode(in("lo", "int4"), ArgModeOut), withMode(in("hi", "int4"), ArgModeOut)}, ret: "record"},
+		"unnamed_out": {args: []FuncArg{in("a", "int4")},
+			cols: []FuncArg{withMode(in("column1", "int4"), ArgModeOut), withMode(in("column2", "text"), ArgModeOut)}, ret: "record"},
+		"inout_double": {args: []FuncArg{withMode(in("x", "int4"), ArgModeInOut)},
+			cols: []FuncArg{withMode(in("x", "int4"), ArgModeInOut), withMode(in("label", "text"), ArgModeOut)}, ret: "record"},
+		"single_out": {args: []FuncArg{in("a", "int4")}, cols: []FuncArg{withMode(in("doubled", "int4"), ArgModeOut)}, ret: "int4"},
+		"squares": {args: []FuncArg{in("n", "int4")},
+			cols: []FuncArg{withMode(in("i", "int4"), ArgModeTable), withMode(in("sq", "int4"), ArgModeTable)}, ret: "record", set: true},
+		"mixed_defaults": {args: []FuncArg{in("a", "int4"), withDefault(in("b", "int4"), "2")},
+			cols: []FuncArg{withMode(in("r", "int4"), ArgModeOut)}, ret: "int4"},
+	} {
+		f := fn(name)
+		if !reflect.DeepEqual(f.Args, want.args) || !reflect.DeepEqual(f.ReturnColumns, want.cols) ||
+			f.ReturnType != want.ret || f.ReturnsSet != want.set {
+			t.Errorf("%s: Args %+v ReturnColumns %+v ReturnType %s ReturnsSet %v\nwant %+v", name, f.Args, f.ReturnColumns, f.ReturnType, f.ReturnsSet, want)
+		}
+	}
+	if v := fn("join_words").Variadic(); v == nil || v.Name != "words" {
+		t.Errorf("join_words Variadic() = %+v", v)
+	}
+
+	type call struct {
+		fn   string
+		args map[string]any
+		sql  string
+		want string
+	}
+	for _, c := range []call{
+		{"add_numbers", map[string]any{"a": 5}, `"pdbcore_funcs_test"."add_numbers"("a" => $1::int4)`, "6"},
+		{"add_numbers", map[string]any{"a": 5, "b": 10}, `"pdbcore_funcs_test"."add_numbers"("a" => $1::int4, "b" => $2::int4)`, "15"},
+		{"add_numbers", map[string]any{"b": 10, "a": nil}, `"pdbcore_funcs_test"."add_numbers"("a" => $1::int4, "b" => $2::int4)`, ""},
+		{"record_event", map[string]any{"kind": "login"}, `"pdbcore_funcs_test"."record_event"("kind" => $1::text)`, `{"kind": "login", "payload": {}}`},
+		{"three", map[string]any{"a": 1, "c": 2}, `"pdbcore_funcs_test"."three"("a" => $1::int4, "c" => $2::int4)`, "13"},
+		{"sum_ints", map[string]any{"xs": []int32{1, 2, 3}}, `"pdbcore_funcs_test"."sum_ints"(VARIADIC $1::_int4)`, "6"},
+		{"sum_ints", map[string]any{"xs": []int32{}}, `"pdbcore_funcs_test"."sum_ints"(VARIADIC $1::_int4)`, ""},
+		{"join_words", map[string]any{"sep": "-", "words": []string{"a", "b"}}, `"pdbcore_funcs_test"."join_words"($1::text, VARIADIC $2::_text)`, "a-b"},
+		{"join_words", map[string]any{"sep": "-"}, `"pdbcore_funcs_test"."join_words"($1::text)`, ""},
+		{"join_words", map[string]any{}, `"pdbcore_funcs_test"."join_words"()`, ""},
+		{"mixed_defaults", map[string]any{"a": 1}, `"pdbcore_funcs_test"."mixed_defaults"("a" => $1::int4)`, "3"},
+		{"inout_double", map[string]any{"x": 4}, `"pdbcore_funcs_test"."inout_double"("x" => $1::int4)`, `(8,doubled)`},
+	} {
+		var params []any
+		sql, err := fn(c.fn).CallSQL(func(a FuncArg) (string, bool, error) {
+			v, ok := c.args[a.Name]
+			if !ok {
+				return "", false, nil
+			}
+			params = append(params, v)
+			return "$" + strconv.Itoa(len(params)) + "::" + a.PGType, true, nil
+		})
+		if err != nil || sql != c.sql {
+			t.Errorf("%s(%v): CallSQL = %q, %v; want %q", c.fn, c.args, sql, err, c.sql)
+			continue
+		}
+		var got *string
+		if err := tx.QueryRow(ctx, `SELECT (`+sql+`)::text`, params...).Scan(&got); err != nil {
+			t.Errorf("%s: %v", sql, err)
+			continue
+		}
+		if (got == nil && c.want != "") || (got != nil && *got != c.want) {
+			t.Errorf("%s = %v, want %q", sql, got, c.want)
+		}
+	}
+
+	split, err := fn("split_pair").CallSQL(func(FuncArg) (string, bool, error) { return "$1::int4", true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lo, hi int
+	if err := tx.QueryRow(ctx, `SELECT lo, hi FROM `+split, 7).Scan(&lo, &hi); err != nil || lo != 6 || hi != 8 {
+		t.Errorf("split_pair(7) = %d, %d, %v", lo, hi, err)
+	}
+	sq, err := fn("squares").CallSQL(func(FuncArg) (string, bool, error) { return "$1::int4", true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := tx.Query(ctx, `SELECT sq FROM `+sq+` ORDER BY i`, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := pgx.CollectRows(rows, pgx.RowTo[int32]); err != nil || !reflect.DeepEqual(got, []int32{1, 4, 9}) {
+		t.Errorf("squares(3) = %v, %v", got, err)
+	}
+
+	var missing *MissingArgsError
+	if _, err := fn("add_numbers").CallSQL(func(FuncArg) (string, bool, error) { return "", false, nil }); !errors.As(err, &missing) ||
+		!reflect.DeepEqual(missing.Args, []string{"a"}) {
+		t.Errorf("add_numbers() without a: err = %v", err)
+	}
+	wordsOnly := func(a FuncArg) (string, bool, error) { return "$1::_text", a.Variadic(), nil }
+	if _, err := fn("join_words").CallSQL(wordsOnly); !errors.As(err, &missing) || !reflect.DeepEqual(missing.Args, []string{"sep"}) {
+		t.Errorf("join_words(VARIADIC words) without sep: err = %v", err)
 	}
 }
