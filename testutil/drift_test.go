@@ -54,6 +54,7 @@ var postgisObjects = map[string]bool{
 	"geography_columns": true,
 	"geometry_dump":     true,
 	"valid_detail":      true,
+	"simple_detail":     true,
 }
 
 func normalize(live, fixture *introspect.Catalog) {
