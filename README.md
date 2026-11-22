@@ -9,7 +9,7 @@ Library only — no binary, no GraphQL or REST grammar, no `gqlparser`
 The products own the transport: schema/route generation, request parsing,
 SQL compilation, response shaping. pdbcore owns what both need identically:
 the catalog model and its introspection, naming helpers, the schema cache and
-watcher, PostGIS value handling, authentication, transaction execution with
+watcher, PostGIS and contrib-type value handling, authentication, transaction execution with
 RLS identity, JWT minting, HTTP scaffolding, configuration loading, the
 generic plugin registry, the catalog half of smart comments, and the one test
 fixture both products are tested against.
@@ -24,8 +24,9 @@ fixture both products are tested against.
 | `cache` | gzip+JSON catalog cache: `Save` / `Load` / `Check`, format-version and content-hash checks, 256 MiB decompression guard |
 | `watch` | `Watcher`: DDL event trigger + `LISTEN/NOTIFY` (`TriggerName`, `Channel`), hash-polling fallback when the trigger cannot be installed → `OnChange(*Catalog)` |
 | `postgis` | spatial value layer: flavour detection, GeoJSON/WKT/EWKT parsing to one bound parameter, filter `Ops`, derived accessors, transform/simplify/KNN/distance SQL |
+| `contrib` | operator vocabularies + value coercion for full-text search, `pg_trgm`, `hstore`, `ltree`, `citext`, range/multirange and `inet`/`cidr` columns (see [Contrib vocabularies](#contrib-vocabularies)): `ForColumn`/`ForType` lookup bound to the extension's schema, filter `Op`s, ordering `Expr`s, `Accessor`s, value `Codec`s |
 | `auth` | `Authenticator`: JWT (HS*, JWKS RS*/ES* with kid-matched cache), trusted-gateway claim headers with `TrustedProxies`, role resolution and allowlist; `ErrInvalidToken` / `ErrRoleNotAllowed` |
-| `pgexec` | pool `Connect`, `RunTx` (isolation, `SET LOCAL ROLE`, claims via `set_config(prefix.k, v, true)`, 40001/40P01 retries), `Identity`, `Classify` PG errors into classes with `dev`/`prod`/`strict` message policies, `QuoteIdent`/`ValidRole`/`ValidClaimKey` |
+| `pgexec` | pool `Connect`, `RunTx` (isolation, `SET LOCAL ROLE`, claims via `set_config(prefix.k, v, true)`, 40001/40P01 retries), `Identity`, `Classify` PG errors into classes with `dev`/`prod`/`strict` message policies (malformed tsquery/ltree operands and unknown text search configs are user input), `QuoteIdent`/`ValidRole`/`ValidClaimKey` |
 | `jwtmint` | composite-typed function results → signed HS256 JWT (`MintsFunction`, `Mint`, `Sign`) |
 | `httpx` | CORS + preflight, gzip, `Healthz`, `ListenAndServe` with the standard timeouts and graceful shutdown |
 | `confx` | koanf `Load` (defaults < YAML < env < changed flags), env key mapper (`_` → `.`, `__` → `_`, comma-separated lists), `ExampleYAML` from `koanf`/`doc` tags, `Discover`, `ParseTrustedProxy`, shared config sections (`Database`, `Schema`, `Filters`, `RLS`/`Auth`, `TX`, `Watch`, `Errors`, `Plugins`, `Log`) + `Validate*` helpers, `AuthConfig(RLS)` |
@@ -68,6 +69,38 @@ Until the first tag lands the products point at a sibling checkout:
 replace github.com/suprbdev/pdbcore => ../pdbcore
 ```
 
+## Contrib vocabularies
+
+`contrib.ForColumn(cat, col)` returns the vocabularies that apply to a column
+(by its resolved base type, so domains work; extension types only when the
+catalog records the extension). Each is bound to the extension's schema from
+`Catalog.Extensions`, so types, functions and operators render
+schema-qualified (`"ext".nlevel(c)`, `(c) OPERATOR("ext".@>) $1::"ext".ltree`)
+and work when that schema is not on the `search_path`. Every `Op`/`Expr`
+renders from the column expression and placeholders only — values travel as
+bind parameters (`op.Params(v)` coerces the operand), so compiled SQL stays a
+pure function of the query shape. Infix operands are parenthesized, so a
+non-atomic column expression groups the same bound or unbound.
+
+| Vocabulary | Column types | Operators | Exprs / accessors | Codec | Index |
+|---|---|---|---|---|---|
+| `fulltext` | `tsvector` | `matches` (`to_tsquery`, PostgREST `fts`), `matchesPlain` (`plainto_tsquery`, `plfts`), `matchesPhrase` (`phraseto_tsquery`, `phfts`), `matchesWebsearch` (`websearch_to_tsquery`, `wfts`); operand `"query"` or `{query, config}` (`$n::regconfig`); `Op.RankSQL` → `ts_rank` / `ts_rank_cd` | — | text ↔ `$1::tsvector` | GIN, GiST |
+| `textsearch` | `text`, `varchar`, `bpchar`, `citext` | same four, over `to_tsvector([config,] col)` | — | — | GIN expression index on `to_tsvector('cfg', col)`, only when queries pass that config (the config-less form is not indexable); prefer a generated `tsvector` column |
+| `trgm` (`pg_trgm`) | text-like | `similarTo` (`%`), `wordSimilarTo` (`<%`), `strictWordSimilarTo` (`<<%`) | `similarity`, `wordSimilarity`, `strictWordSimilarity`; `distance` (`<->`), `wordDistance` (`<<->`), `strictWordDistance` (`<<<->`) for ordering | — | GIN/GiST `gin_trgm_ops`/`gist_trgm_ops`; KNN ordering GiST only; none on `bpchar` (only an expression index on `col::text`). Word ops need pg_trgm 1.2, strict ones 1.4 (`Vocabulary.ForVersion`, applied by `ForColumn` from `Extension.Version`) |
+| `citext` | `citext` | — (text vocabularies apply) | — | `$1::"ext".citext`; use `Vocabulary.Operator("=")` — unqualified or text-typed comparisons fall back to case-sensitive `text` operators | — |
+| `hstore` | `hstore` | `hasKey` (`?`), `hasAllKeys` (`?&`), `hasAnyKeys` (`?\|`), `contains` (`@>`), `containedBy` (`<@`) | — | JSON object of string → string\|null ↔ `hstore($1::text[])` / `hstore_to_jsonb` | GIN `gin_hstore_ops`, GiST `gist_hstore_ops` (not `<@`) |
+| `ltree` | `ltree` | `ancestorOf` (`@>`), `descendantOf` (`<@`), `ancestorOfAny` / `descendantOfAny` (`ltree[]` operand), `matchesLquery` (`~`), `matchesAnyLquery` (`?` `lquery[]`), `matchesLtxtquery` (`@`) | `nlevel` | text ↔ `$1::"ext".ltree` | GiST `gist_ltree_ops` (not the `*Any` forms) |
+| `ltree[]` | `ltree[]` | same names, "some element …" | — | list ↔ `$1::"ext".ltree[]` | GiST `gist__ltree_ops` (not `ancestorOf`) |
+| `range` | `int4range`, `int8range`, `numrange`, `tsrange`, `tstzrange`, `daterange` | `overlaps` (`&&`), `contains` (`@>`), `containsElement` (`@>` element), `containedBy` (`<@`), `strictlyLeftOf` (`<<`), `strictlyRightOf` (`>>`), `notExtendsRightOf` (`&<`), `notExtendsLeftOf` (`&>`), `adjacentTo` (`-\|-`) | `start`, `end`, `startInclusive`, `endInclusive`, `startInfinite`, `endInfinite`, `isEmpty` | `{start, end, startInclusive, endInclusive, isEmpty}` or a literal (`"[1,5)"`) ↔ `int4range($1::int4, $2::int4, $3::text)` / jsonb object | GiST, SP-GiST |
+| `multirange` | the six built-in multiranges (PG 14+) | same, with a range operand | same | list of ranges or a literal (`"{[1,3), [5,7)}"`) ↔ `int4multirange(VARIADIC ARRAY(… unnest($1, $2, $3) …))` / jsonb array | GiST |
+| `inet` | `inet`, `cidr` | `containedBy` (`<<`), `containedByOrEquals` (`<<=`), `contains` (`>>`), `containsOrEquals` (`>>=`), `containsOrContainedBy` (`&&`) | `family`, `masklen`, `host`, `network` | text ↔ `$1::inet` / `$1::cidr` | GiST `inet_ops`, SP-GiST |
+
+Each `Op` also carries `Arg` (operand kind), `Description`, `Index`
+(`IndexHint{Method, OpClass, Note, Ordering}`) and `Extension`; accessor and
+expression types are pg type names (`int4`, `float4`, the range's element
+type). Custom (user-defined) range types are not covered: the catalog does
+not record a range's subtype.
+
 ## The fixture and the drift gate
 
 `testutil.FixtureSQL` (`testutil/fixture.sql`) and `testutil.FixtureCatalog()`
@@ -97,7 +130,7 @@ regenerate their goldens on upgrade.
 
 ```sh
 make test       # hermetic unit tests (go test -race ./...)
-make test-e2e   # DB-backed tests (fixture drift gate, pgexec RLS matrix, watch, live introspection, postgis SQL validity) on a disposable PostGIS (project pdbcore-test, host port 5434)
+make test-e2e   # DB-backed tests (fixture drift gate, pgexec RLS matrix, watch, live introspection, postgis and contrib SQL validity) on a disposable PostGIS (project pdbcore-test, host port 5434)
 make lint       # golangci-lint (falls back to go vet)
 make fixture    # print testutil.FixtureSQL
 make release    # interactive: clean tree check, version prompt, test+lint, annotated tag, push
