@@ -179,6 +179,7 @@ func tableAspectChanges(cached, live *Table) []string {
 	aspect("foreign keys", cached.ForeignKeys, live.ForeignKeys)
 	aspect("indexes", cached.Indexes, live.Indexes)
 	aspect("privileges", cached.Privileges, live.Privileges)
+	aspect("partitioning", [2]any{cached.Partitioned, cached.PartitionOf}, [2]any{live.Partitioned, live.PartitionOf})
 	if len(parts) == 0 {
 		parts = append(parts, "definition")
 	}

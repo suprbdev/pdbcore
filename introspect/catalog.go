@@ -58,6 +58,18 @@ type Table struct {
 	Comment    string    `json:"comment,omitempty"`
 	RLSEnabled bool      `json:"rls_enabled"`
 	Columns    []*Column `json:"columns"`
+	// Partitioned marks a partitioned table (relkind 'p'): it holds no rows
+	// itself, routes inserts to its partitions, and reads, updates and
+	// deletes span all of them. Expose it like any other table.
+	Partitioned bool `json:"partitioned,omitempty"`
+	// PartitionOf is the parent ("schema.name") of a partition
+	// (pg_class.relispartition), empty for every other relation. A
+	// partition's rows are also reachable through its parent, so consumers
+	// should leave partitions out of the API by default (see
+	// [Table.IsPartition]). The primary key, unique constraints, foreign keys
+	// and indexes a partition inherits from its parent are recorded on the
+	// parent only; a partition lists just the ones declared on it directly.
+	PartitionOf string `json:"partition_of,omitempty"`
 	// PrimaryKey and Uniques may be temporal (WITHOUT OVERLAPS) keys; use
 	// RowKeys for single-row lookups and ON CONFLICT targets.
 	PrimaryKey  *Constraint   `json:"primary_key,omitempty"`
@@ -66,6 +78,9 @@ type Table struct {
 	Indexes     []*Index      `json:"indexes,omitempty"`
 	Privileges  Privileges    `json:"privileges"`
 }
+
+// IsPartition reports whether t is a partition of another table.
+func (t *Table) IsPartition() bool { return t.PartitionOf != "" }
 
 // Insertable reports whether generated mutations may INSERT into this relation.
 func (t *Table) Insertable() bool { return t.Kind == RelTable && t.Privileges.Insert }

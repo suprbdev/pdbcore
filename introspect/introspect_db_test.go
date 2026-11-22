@@ -501,3 +501,105 @@ func TestIntrospectFunctionsLive(t *testing.T) {
 		t.Errorf("join_words(VARIADIC words) without sep: err = %v", err)
 	}
 }
+
+// TestIntrospectPartitionsLive checks that partitioned tables are recorded
+// with their keys and indexes, partitions are marked with their parent and
+// carry only what is declared on them, and that no constraint PostgreSQL
+// clones for partitions (onto each partition, or onto a table referencing a
+// partitioned table) shows up.
+func TestIntrospectPartitionsLive(t *testing.T) {
+	tx := liveTx(t,
+		`CREATE SCHEMA pdbcore_part_test`,
+		`SET LOCAL search_path = pdbcore_part_test`,
+		`CREATE TABLE customers (id int PRIMARY KEY, name text)`,
+		`CREATE TABLE purchases (
+			id          int NOT NULL,
+			customer_id int NOT NULL REFERENCES customers,
+			bought      date NOT NULL,
+			PRIMARY KEY (id, bought, customer_id),
+			UNIQUE (customer_id, id, bought)
+		) PARTITION BY RANGE (bought)`,
+		`CREATE INDEX purchases_customer_idx ON purchases (customer_id)`,
+		`CREATE TABLE purchases_2025 PARTITION OF purchases FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')`,
+		`CREATE TABLE purchases_2026 PARTITION OF purchases FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`,
+		`CREATE INDEX purchases_2026_local_idx ON purchases_2026 (bought)`,
+		`CREATE TABLE purchases_2027 PARTITION OF purchases FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')
+			PARTITION BY LIST (customer_id)`,
+		`CREATE TABLE purchases_2027_c1 PARTITION OF purchases_2027 FOR VALUES IN (1)`,
+		`CREATE TABLE refunds (
+			id          int PRIMARY KEY,
+			purchase_id int NOT NULL,
+			bought      date NOT NULL,
+			customer_id int NOT NULL,
+			FOREIGN KEY (purchase_id, bought, customer_id) REFERENCES purchases (id, bought, customer_id)
+		)`,
+		`SET LOCAL search_path = pg_catalog`,
+	)
+	cat, err := Introspect(context.Background(), tx, []string{"pdbcore_part_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := func(name string) *Table {
+		t.Helper()
+		tb := cat.Table("pdbcore_part_test", name)
+		if tb == nil {
+			t.Fatalf("table %s not introspected", name)
+		}
+		return tb
+	}
+	indexNames := func(tb *Table) []string {
+		var out []string
+		for _, ix := range tb.Indexes {
+			out = append(out, ix.Name)
+		}
+		return out
+	}
+
+	p := tbl("purchases")
+	if !p.Partitioned || p.IsPartition() || p.Kind != RelTable || !p.Insertable() {
+		t.Errorf("purchases: Partitioned %v PartitionOf %q Kind %s", p.Partitioned, p.PartitionOf, p.Kind)
+	}
+	if p.PrimaryKey == nil || p.PrimaryKey.Name != "purchases_pkey" || len(p.Uniques) != 1 || len(p.ForeignKeys) != 1 ||
+		p.ForeignKeys[0].RefTable != "customers" {
+		t.Errorf("purchases keys: pk %+v uniques %+v fks %+v", p.PrimaryKey, p.Uniques, p.ForeignKeys)
+	}
+	if got := indexNames(p); !reflect.DeepEqual(got, []string{"purchases_customer_id_id_bought_key", "purchases_customer_idx", "purchases_pkey"}) {
+		t.Errorf("purchases indexes = %v", got)
+	}
+	if !p.IndexedColumns()["customer_id"] {
+		t.Error("purchases.customer_id not indexed")
+	}
+
+	for name, want := range map[string]struct {
+		partitioned bool
+		indexes     []string
+	}{
+		"purchases_2025":    {},
+		"purchases_2026":    {indexes: []string{"purchases_2026_local_idx"}},
+		"purchases_2027":    {partitioned: true},
+		"purchases_2027_c1": {},
+	} {
+		part := tbl(name)
+		parent := "pdbcore_part_test.purchases"
+		if name == "purchases_2027_c1" {
+			parent = "pdbcore_part_test.purchases_2027"
+		}
+		if part.PartitionOf != parent || !part.IsPartition() || part.Partitioned != want.partitioned {
+			t.Errorf("%s: PartitionOf %q Partitioned %v", name, part.PartitionOf, part.Partitioned)
+		}
+		if part.PrimaryKey != nil || len(part.Uniques) != 0 || len(part.ForeignKeys) != 0 {
+			t.Errorf("%s carries cloned keys: pk %+v uniques %+v fks %+v", name, part.PrimaryKey, part.Uniques, part.ForeignKeys)
+		}
+		if got := indexNames(part); !reflect.DeepEqual(got, want.indexes) {
+			t.Errorf("%s indexes = %v, want %v", name, got, want.indexes)
+		}
+	}
+
+	r := tbl("refunds")
+	if len(r.ForeignKeys) != 1 || r.ForeignKeys[0].RefTable != "purchases" || r.IsPartition() || r.Partitioned {
+		t.Errorf("refunds foreign keys = %+v", r.ForeignKeys)
+	}
+	if c := tbl("customers"); c.Partitioned || c.IsPartition() || len(c.ForeignKeys) != 0 {
+		t.Errorf("customers = %+v", c)
+	}
+}

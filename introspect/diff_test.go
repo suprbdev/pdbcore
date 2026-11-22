@@ -78,6 +78,9 @@ func TestDiff(t *testing.T) {
 				{Name: "a", PGType: "int4", Mode: ArgModeOut}, {Name: "b", PGType: "text", Mode: ArgModeOut},
 			}
 		}, "function public.f(text) changed (return type, return columns)"},
+		{"table partitioned", func(c *Catalog) {
+			c.Tables[0].Partitioned = true
+		}, "table public.users changed (partitioning)"},
 		{"schema added", func(c *Catalog) {
 			c.Schemas = append(c.Schemas, "app")
 		}, "schema app added"},

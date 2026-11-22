@@ -65,7 +65,12 @@ func readTables(ctx context.Context, db Querier, schemas []string, cat *Catalog)
 		       has_table_privilege(c.oid, 'SELECT'),
 		       has_table_privilege(c.oid, 'INSERT'),
 		       has_table_privilege(c.oid, 'UPDATE'),
-		       has_table_privilege(c.oid, 'DELETE')
+		       has_table_privilege(c.oid, 'DELETE'),
+		       COALESCE((SELECT pn.nspname || '.' || pc.relname
+		                 FROM pg_inherits i
+		                 JOIN pg_class pc ON pc.oid = i.inhparent
+		                 JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+		                 WHERE c.relispartition AND i.inhrelid = c.oid), '')
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = ANY($1)
@@ -79,9 +84,11 @@ func readTables(ctx context.Context, db Querier, schemas []string, cat *Catalog)
 		t := &Table{}
 		var kind rune
 		if err := rows.Scan(&t.Schema, &t.Name, &kind, &t.RLSEnabled, &t.Comment,
-			&t.Privileges.Select, &t.Privileges.Insert, &t.Privileges.Update, &t.Privileges.Delete); err != nil {
+			&t.Privileges.Select, &t.Privileges.Insert, &t.Privileges.Update, &t.Privileges.Delete,
+			&t.PartitionOf); err != nil {
 			return err
 		}
+		t.Partitioned = kind == 'p'
 		switch kind {
 		case 'r', 'p':
 			t.Kind = RelTable
@@ -193,6 +200,11 @@ func pg18ConstraintColumns(serverVersionNum int) string {
 	return `false, true`
 }
 
+// readConstraints reads primary key, unique and foreign key constraints,
+// skipping the copies PostgreSQL clones from a partitioned table's
+// constraints (conparentid <> 0): one per partition, plus, for a foreign key
+// referencing a partitioned table, one per referenced partition on the
+// referencing table.
 func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, c.relname, con.conname, con.contype,
@@ -211,6 +223,7 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 		LEFT JOIN pg_class fc ON fc.oid = con.confrelid
 		LEFT JOIN pg_namespace fn ON fn.oid = fc.relnamespace
 		WHERE n.nspname = ANY($1) AND con.contype IN ('p', 'u', 'f')
+		  AND con.conparentid = 0
 		ORDER BY n.nspname, c.relname, con.conname`, schemas)
 	if err != nil {
 		return fmt.Errorf("introspect: constraints: %w", err)
@@ -246,6 +259,9 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 	return rows.Err()
 }
 
+// readIndexes reads valid indexes, skipping partition indexes attached to a
+// partitioned index (relispartition): the parent's partitioned index stands
+// for them.
 func readIndexes(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, c.relname, ic.relname, i.indisunique, am.amname,
@@ -257,7 +273,7 @@ func readIndexes(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		JOIN pg_class ic ON ic.oid = i.indexrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		JOIN pg_am am ON am.oid = ic.relam
-		WHERE n.nspname = ANY($1) AND i.indisvalid
+		WHERE n.nspname = ANY($1) AND i.indisvalid AND NOT ic.relispartition
 		ORDER BY n.nspname, c.relname, ic.relname`, schemas)
 	if err != nil {
 		return fmt.Errorf("introspect: indexes: %w", err)
