@@ -48,6 +48,12 @@ var samples = []sample{
 	{"MULTIPOLYGON(((0 0,1 0,1 1,0 0)))", "MultiPolygon", true},
 	{"GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(0 0,1 1))", "GeometryCollection", true},
 	{"GEOMETRYCOLLECTION EMPTY", "GeometryCollection", true},
+	{"CURVEPOLYGON(CIRCULARSTRING(0 0,4 0,4 4,0 4,0 0))", "CurvePolygon", false},
+	{"MULTICURVE((0 0,1 1),CIRCULARSTRING(0 0,1 1,2 0))", "MultiCurve", false},
+	{"MULTISURFACE(CURVEPOLYGON(CIRCULARSTRING(0 0,4 0,4 4,0 4,0 0)),((5 5,6 5,6 6,5 5)))", "MultiSurface", false},
+	{"TRIANGLE((0 0,1 0,0 1,0 0))", "Triangle", false},
+	{"TIN(((0 0 0,1 0 0,0 1 1,0 0 0)),((1 0 0,1 1 1,0 1 1,1 0 0)))", "Tin", false},
+	{"POLYHEDRALSURFACE(((0 0 0,1 0 0,1 1 0,0 1 0,0 0 0)),((1 0 0,2 0 1,2 1 1,1 1 0,1 0 0)))", "PolyhedralSurface", false},
 }
 
 // column renders $1 (a WKT parameter) as a value of the given flavour in

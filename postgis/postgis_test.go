@@ -274,7 +274,7 @@ func TestOpOrderIsAppendOnly(t *testing.T) {
 }
 
 // TestOpFlags pins the overload and index flags checked against the PostGIS
-// 3.4 catalog (pg_operator, pg_amop, pg_proc.prosupport).
+// 3.4 and 3.7 catalogs (pg_operator, pg_amop, pg_proc.prosupport).
 func TestOpFlags(t *testing.T) {
 	tests := []struct {
 		op               string
@@ -518,6 +518,16 @@ func TestDerivedApplies(t *testing.T) {
 		{"MultiLineString", nil},
 		{"Polygon", nil},
 		{"GeometryCollection", nil},
+		{"geometry(PointZ,4326)", []string{"X", "Y", "Z"}},
+		{"geography(Point,4326)", []string{"X", "Y"}},
+		{"geometry(LineStringM)", []string{"StartPoint", "EndPoint"}},
+		{"public.geometry(PointM, 4326)", []string{"X", "Y", "M"}},
+		{`"postgis"."geography"(PointZM,4326)`, []string{"X", "Y", "Z", "M"}},
+		{"geometry(Polygon,3857)", nil},
+		{"geometry(Geometry,3857)", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"geometry", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"text(Point)", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"geometry(Point", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
 	}
 	for _, tc := range tests {
 		want := map[string]bool{}
@@ -529,6 +539,34 @@ func TestDerivedApplies(t *testing.T) {
 			if got := d.Applies(tc.subtype); got != exp {
 				t.Errorf("%s.Applies(%q) = %v, want %v", d.Suffix, tc.subtype, got, exp)
 			}
+		}
+	}
+}
+
+func TestDerivedAppliesTo(t *testing.T) {
+	tests := []struct {
+		suffix     string
+		subtype    string
+		hasZ, hasM bool
+		want       bool
+	}{
+		{"Z", "Point", false, false, false},
+		{"Z", "Point", true, false, true},
+		{"M", "Point", true, false, false},
+		{"M", "Point", false, true, true},
+		{"M", "PointM", false, false, true},
+		{"X", "LineString", true, true, false},
+		{"Z", "", false, false, true},
+		{"Z", "Geometry", false, false, true},
+		{"Area", "Point", false, false, true},
+	}
+	for _, tc := range tests {
+		d, ok := DerivedBySuffix(tc.suffix)
+		if !ok {
+			t.Fatalf("derived %q not found", tc.suffix)
+		}
+		if got := d.AppliesTo(tc.subtype, tc.hasZ, tc.hasM); got != tc.want {
+			t.Errorf("%s.AppliesTo(%q, %v, %v) = %v, want %v", tc.suffix, tc.subtype, tc.hasZ, tc.hasM, got, tc.want)
 		}
 	}
 }

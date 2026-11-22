@@ -17,7 +17,11 @@ type Op struct {
 	Description string
 	// Index reports whether the operator can use a GiST index directly.
 	// Index-usable operators are documented as such so users can tell the
-	// cheap ones from the exact-but-expensive ones.
+	// cheap ones from the exact-but-expensive ones. For an operator without
+	// a geography overload the flag describes geometry columns only: a
+	// geography column is cast to geometry, which a GiST index on the
+	// geography column cannot serve (an expression index on col::geometry
+	// can).
 	Index bool
 	// Geography reports whether PostGIS provides a geography overload. The
 	// others (ST_Within, ST_Contains, ~, @, ...) exist for geometry only, so
@@ -234,7 +238,7 @@ var Ops = []Op{
 	},
 	{
 		Name: "intersects3D", Arg: TypeName, Index: true,
-		Description: "Geometries share any portion of 3D space (ST_3DIntersects).",
+		Description: "Geometries share any portion of 3D space (ST_3DIntersects). The default 2D GiST index prefilters on the 2D bounding box; an n-D GiST index (gist_geometry_ops_nd) also prunes on Z.",
 		render:      fn("ST_3DIntersects"),
 	},
 	{
@@ -544,11 +548,15 @@ var typmodBases = map[string]bool{
 	"polyhedralsurface": true, "triangle": true, "tin": true,
 }
 
-// parseSubtype splits a typmod geometry type such as "PointZ" or
-// "MULTIPOLYGONZM" into its base type and dimension flags. ok is false for an
-// empty or unrecognised spelling.
+// parseSubtype splits a typmod geometry type such as "PointZ",
+// "MULTIPOLYGONZM" or a format_type spelling such as
+// "public.geometry(PointZ,4326)" into its base type and dimension flags. ok
+// is false for an empty or unrecognised spelling.
 func parseSubtype(s string) (geomSubtype, bool) {
 	t := strings.ToLower(strings.TrimSpace(s))
+	if inner, ok := unwrapFormatType(t); ok {
+		t = inner
+	}
 	if typmodBases[t] {
 		return geomSubtype{base: t}, true
 	}
@@ -563,14 +571,42 @@ func parseSubtype(s string) (geomSubtype, bool) {
 	return geomSubtype{}, false
 }
 
+// unwrapFormatType extracts the geometry type from a lower-cased format_type
+// spelling: an optionally schema-qualified, optionally quoted geometry or
+// geography type name followed by "(type[,srid])".
+func unwrapFormatType(t string) (string, bool) {
+	name, rest, ok := strings.Cut(t, "(")
+	if !ok || !strings.HasSuffix(rest, ")") {
+		return "", false
+	}
+	name = strings.ReplaceAll(strings.TrimSpace(name), `"`, "")
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	if name != "geometry" && name != "geography" {
+		return "", false
+	}
+	typ, _, _ := strings.Cut(strings.TrimSuffix(rest, ")"), ",")
+	return strings.TrimSpace(typ), true
+}
+
 // Applies reports whether the accessor can return a non-null value on a
 // column whose typmod geometry type is subtype, spelled as
-// postgis_typmod_type or format_type report it ("Point", "PointZ",
-// "MultiPolygonZM"; case-insensitive). An empty or unrecognised subtype, or
-// the generic "Geometry", leaves the column unconstrained and every accessor
-// applies. Callers use it to skip accessors that would always be null, such
-// as X on a LineString column or Z on a 2D Point column.
+// postgis_typmod_type reports it ("Point", "PointZ", "MultiPolygonZM") or as
+// the whole format_type ("geometry(PointZ,4326)"), case-insensitively. An
+// empty or unrecognised subtype, or the generic "Geometry", leaves the column
+// unconstrained and every accessor applies. Callers use it to skip accessors
+// that would always be null, such as X on a LineString column or Z on a 2D
+// Point column.
 func (d Derived) Applies(subtype string) bool {
+	return d.AppliesTo(subtype, false, false)
+}
+
+// AppliesTo is [Derived.Applies] with the typmod's Z and M dimensions given
+// separately, for callers that hold the base type ("Point") and the
+// dimension flags apart. hasZ and hasM add to any dimensions subtype already
+// spells.
+func (d Derived) AppliesTo(subtype string, hasZ, hasM bool) bool {
 	if d.applies == nil {
 		return true
 	}
@@ -578,6 +614,8 @@ func (d Derived) Applies(subtype string) bool {
 	if !ok || st.base == "geometry" {
 		return true
 	}
+	st.z = st.z || hasZ
+	st.m = st.m || hasM
 	return d.applies(st)
 }
 
