@@ -18,7 +18,7 @@ fixture both products are tested against.
 
 | Package | What it holds |
 |---|---|
-| `introspect` | `Catalog` model (`Table`, `Column`, `Constraint`, `ForeignKey`, `Index`, `Enum`, `Composite`, `Function`, privileges, RLS flag, comments), `Introspect(ctx, querier, schemas)` (pg_catalog reader incl. `@enum` table conversion), `Diff` (human-readable drift lines), `Hash`, `CatalogFormatVersion` |
+| `introspect` | `Catalog` model (`Table`, `Column`, `Constraint`, `ForeignKey`, `Index`, `Enum`, `Composite`, `Function`, `Extension`, privileges, RLS flag, comments; `Column.Spatial` (`SpatialType`: PostGIS subtype, SRID, Z/M from the geometry/geography typmod) and `Column.SQLType` (built-in modifiers such as `character varying(255)`, `numeric(10,2)`)), `Introspect(ctx, querier, schemas)` (pg_catalog reader incl. `@enum` table conversion and installed extensions), `HasExtension`, `Diff` (human-readable drift lines), `Hash`, `CatalogFormatVersion` |
 | `smarttags` | PostGraphile-style smart-comment parser: `Parse`, `Strip`, `Tags`, `Omits`, `@behavior`, list splitting |
 | `inflect` | naming pipeline types (`Kind`, `Input`, `Next`) + string helpers (`UpperCamel`, `LowerCamel`, `Singularize`, `Pluralize`, `EnumValue`, `ByColumns`); products define their own `Kind` constants and `Default` |
 | `cache` | gzip+JSON catalog cache: `Save` / `Load` / `Check`, format-version and content-hash checks, 256 MiB decompression guard |
@@ -72,7 +72,8 @@ replace github.com/suprbdev/pdbcore => ../pdbcore
 
 `testutil.FixtureSQL` (`testutil/fixture.sql`) and `testutil.FixtureCatalog()`
 (`testutil/catalog.go`) describe the same schema: users/posts/comments with
-RLS policies on `posts`, `places`/`events` (PostGIS), a `metrics` view,
+RLS policies on `posts`, `places`/`events` (PostGIS: a constrained
+`geometry(Point,4326)` and an unconstrained `geography`), a `metrics` view,
 enums, a composite `jwt` type, and the functions the products' RPC /
 computed-column tests use. They **must** stay in sync:
 `testutil/drift_test.go` (`TestFixtureCatalogMatchesLiveIntrospection`) loads
@@ -96,7 +97,7 @@ regenerate their goldens on upgrade.
 
 ```sh
 make test       # hermetic unit tests (go test -race ./...)
-make test-e2e   # DB-backed tests (fixture drift gate, pgexec RLS matrix, watch) on a disposable PostGIS (project pdbcore-test, host port 5434)
+make test-e2e   # DB-backed tests (fixture drift gate, pgexec RLS matrix, watch, live introspection) on a disposable PostGIS (project pdbcore-test, host port 5434)
 make lint       # golangci-lint (falls back to go vet)
 make fixture    # print testutil.FixtureSQL
 make release    # interactive: clean tree check, version prompt, test+lint, annotated tag, push

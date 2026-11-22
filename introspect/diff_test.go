@@ -20,8 +20,9 @@ func diffFixture() *Catalog {
 			PrimaryKey: &Constraint{Name: "users_pkey", Columns: []string{"id"}},
 			Privileges: Privileges{Select: true},
 		}},
-		Enums:     []*Enum{{Schema: "public", Name: "mood", Values: []string{"HAPPY", "SAD"}}},
-		Functions: []*Function{{Schema: "public", Name: "f", Args: []FuncArg{{Name: "q", PGType: "text"}}, ReturnType: "int4"}},
+		Enums:      []*Enum{{Schema: "public", Name: "mood", Values: []string{"HAPPY", "SAD"}}},
+		Functions:  []*Function{{Schema: "public", Name: "f", Args: []FuncArg{{Name: "q", PGType: "text"}}, ReturnType: "int4"}},
+		Extensions: []*Extension{{Name: "plpgsql", Version: "1.0", Schema: "pg_catalog"}},
 	}
 }
 
@@ -69,6 +70,24 @@ func TestDiff(t *testing.T) {
 		{"server version", func(c *Catalog) {
 			c.ServerVersion = "17.0"
 		}, "server version changed: 16.0 -> 17.0"},
+		{"extension added", func(c *Catalog) {
+			c.Extensions = append(c.Extensions, &Extension{Name: "postgis", Version: "3.4.3", Schema: "public"})
+		}, "extension postgis added (3.4.3 in public)"},
+		{"extension removed", func(c *Catalog) { c.Extensions = nil }, "extension plpgsql removed"},
+		{"extension upgraded", func(c *Catalog) {
+			c.Extensions[0].Version = "1.1"
+		}, "extension plpgsql version changed: 1.0 -> 1.1"},
+		{"extension moved", func(c *Catalog) {
+			c.Extensions[0].Schema = "extensions"
+		}, "extension plpgsql schema changed: pg_catalog -> extensions"},
+		{"spatial column added", func(c *Catalog) {
+			c.Tables[0].Columns = append(c.Tables[0].Columns, &Column{
+				Name: "home", PGType: "geometry", Spatial: &SpatialType{Subtype: SpatialPoint, SRID: 4326},
+			})
+		}, "table public.users: column home added (geometry(Point,4326))"},
+		{"typmod added", func(c *Catalog) {
+			c.Tables[0].Columns[1].SQLType = "character varying(255)"
+		}, "table public.users: column email type changed (text not null -> character varying(255) not null)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,5 +105,45 @@ func TestDiff(t *testing.T) {
 				t.Fatalf("expected exactly one diff line, got %v", got)
 			}
 		})
+	}
+}
+
+func TestDiffSpatialTypmod(t *testing.T) {
+	withSpatial := func(st *SpatialType, isArray bool) *Catalog {
+		c := diffFixture()
+		pgType := "geometry"
+		if isArray {
+			pgType = "_geometry"
+		}
+		c.Tables[0].Columns = append(c.Tables[0].Columns, &Column{Name: "home", PGType: pgType, IsArray: isArray, Spatial: st})
+		return c
+	}
+	cases := []struct {
+		name         string
+		cached, live *SpatialType
+		isArray      bool
+		want         string
+	}{
+		{"srid", &SpatialType{Subtype: SpatialPoint, SRID: 4326}, &SpatialType{Subtype: SpatialPoint, SRID: 3857}, false,
+			"table public.users: column home type changed (geometry(Point,4326) -> geometry(Point,3857))"},
+		{"subtype", &SpatialType{Subtype: SpatialPoint}, &SpatialType{Subtype: SpatialPolygon}, false,
+			"table public.users: column home type changed (geometry(Point) -> geometry(Polygon))"},
+		{"dims", &SpatialType{Subtype: SpatialPoint, SRID: 4326}, &SpatialType{Subtype: SpatialPoint, SRID: 4326, HasZ: true, HasM: true}, false,
+			"table public.users: column home type changed (geometry(Point,4326) -> geometry(PointZM,4326))"},
+		{"constraint dropped", &SpatialType{Subtype: SpatialPoint, SRID: 4326}, &SpatialType{Subtype: SpatialGeometry}, false,
+			"table public.users: column home type changed (geometry(Point,4326) -> geometry)"},
+		{"array", &SpatialType{Subtype: SpatialPoint}, &SpatialType{Subtype: SpatialPoint, SRID: 4326}, true,
+			"table public.users: column home type changed (geometry(Point)[] -> geometry(Point,4326)[])"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Diff(withSpatial(tc.cached, tc.isArray), withSpatial(tc.live, tc.isArray))
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("Diff = %v, want [%s]", got, tc.want)
+			}
+		})
+	}
+	if d := Diff(withSpatial(&SpatialType{Subtype: SpatialPoint}, false), withSpatial(&SpatialType{Subtype: SpatialPoint}, false)); len(d) != 0 {
+		t.Fatalf("equal spatial columns diffed: %v", d)
 	}
 }
