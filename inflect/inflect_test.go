@@ -28,6 +28,24 @@ func TestSingularizePluralize(t *testing.T) {
 		{"people", "person"},
 		{"organisation_people", "organisation_person"},
 		{"children", "child"},
+		{"statuses", "status"},
+		{"buses", "bus"},
+		{"keys", "key"},
+		{"purchases", "purchase"},
+		{"databases", "database"},
+		{"houses", "house"},
+		{"courses", "course"},
+		{"responses", "response"},
+		{"aliases", "alias"},
+		{"addresses", "address"},
+		{"menus", "menu"},
+		{"gurus", "guru"},
+		{"plateaus", "plateau"},
+		{"campuses", "campus"},
+		{"order_statuses", "order_status"},
+	}
+	for _, w := range []string{"spatial_ref_sys", "sys", "bus", "status", "analysis", "axis", "alias", "canvas", "virus", "series", "species", "news", "gas", "address", "public_series", "campus", "census", "basis", "crisis"} {
+		cases = append(cases, struct{ plural, singular string }{w, w})
 	}
 	for _, c := range cases {
 		if got := Singularize(c.plural); got != c.singular {
@@ -40,6 +58,11 @@ func TestSingularizePluralize(t *testing.T) {
 		{"person", "people"},
 		{"organisation_person", "organisation_people"},
 		{"people", "people"}, // already plural stays put
+		{"series", "series"},
+		{"species", "species"},
+		{"news", "news"},
+		{"status", "statuses"},
+		{"bus", "buses"},
 	}
 	for _, c := range plurals {
 		if got := Pluralize(c.singular); got != c.plural {
