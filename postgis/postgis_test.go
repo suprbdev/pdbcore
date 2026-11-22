@@ -570,3 +570,35 @@ func TestDerivedAppliesTo(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFor(t *testing.T) {
+	gj := map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}}
+	crs := map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}, "crs": map[string]any{"properties": map[string]any{"name": "EPSG:3857"}}}
+	tests := []struct {
+		name    string
+		in      any
+		flavour Flavour
+		srid    int
+		wantSQL string
+	}{
+		{"bare wkt unconstrained", "POINT(1 2)", Geometry, 0, "ST_GeomFromEWKT($1)"},
+		{"bare wkt constrained", "POINT(1 2)", Geometry, 4326, "ST_SetSRID(ST_GeomFromEWKT($1), 4326)"},
+		{"bare wkt other srid", "POINT(1 2)", Geometry, 3857, "ST_SetSRID(ST_GeomFromEWKT($1), 3857)"},
+		{"ewkt keeps own", "SRID=3857;POINT(1 2)", Geometry, 4326, "ST_GeomFromEWKT($1)"},
+		{"geography bare wkt", "POINT(1 2)", Geography, 4326, "(ST_SetSRID(ST_GeomFromEWKT($1), 4326))::geography"},
+		{"geojson matching", gj, Geometry, 4326, "ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)"},
+		{"geojson unconstrained", gj, Geometry, 0, "ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)"},
+		{"geojson other srid", gj, Geometry, 3857, "ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326), 3857)"},
+		{"geojson crs matching", crs, Geometry, 3857, "ST_SetSRID(ST_GeomFromGeoJSON($1), 3857)"},
+		{"geojson geography", gj, Geography, 4326, "(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326))::geography"},
+	}
+	for _, tc := range tests {
+		v, err := ParseFor(tc.in, tc.flavour, tc.srid)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := v.SQL("$1"); got != tc.wantSQL {
+			t.Errorf("%s: SQL = %q, want %q", tc.name, got, tc.wantSQL)
+		}
+	}
+}

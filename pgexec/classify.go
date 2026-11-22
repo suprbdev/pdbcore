@@ -93,6 +93,9 @@ func Classify(err error, detail Detail) Classified {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		c := Classified{Class: classOf(pgErr.Code), SQLState: pgErr.Code, PG: pgErr}
+		if isPostGISInputError(pgErr) {
+			c.Class = UserInput
+		}
 		if detail == Dev {
 			c.Message = pgErr.Message
 		} else {
@@ -112,6 +115,24 @@ func Classify(err error, detail Detail) Classified {
 		c.Message = err.Error()
 	}
 	return c
+}
+
+var postgisInputErrors = []string{
+	"Operation on mixed SRID geometries",
+	"parse error - invalid geometry",
+	"lwgeom_",
+}
+
+func isPostGISInputError(pgErr *pgconn.PgError) bool {
+	if pgErr.Code != "XX000" {
+		return false
+	}
+	for _, m := range postgisInputErrors {
+		if strings.Contains(pgErr.Message, m) {
+			return true
+		}
+	}
+	return false
 }
 
 func classOf(code string) Class {
@@ -141,6 +162,12 @@ func classOf(code string) Class {
 // messages embed constraint/table/column names, which strict mode treats as
 // sensitive.
 func SanitizeMessage(pgErr *pgconn.PgError, strict bool) string {
+	if isPostGISInputError(pgErr) {
+		if strict {
+			return "invalid input value"
+		}
+		return "invalid geometry"
+	}
 	switch prefix(pgErr.Code) {
 	case "23": // integrity constraint violations are user-actionable
 		if strict {
