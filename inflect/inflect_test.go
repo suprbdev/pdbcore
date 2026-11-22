@@ -31,8 +31,20 @@ func TestSingularizePluralize(t *testing.T) {
 		{"statuses", "status"},
 		{"buses", "bus"},
 		{"keys", "key"},
+		{"purchases", "purchase"},
+		{"databases", "database"},
+		{"houses", "house"},
+		{"courses", "course"},
+		{"responses", "response"},
+		{"aliases", "alias"},
+		{"addresses", "address"},
+		{"menus", "menu"},
+		{"gurus", "guru"},
+		{"plateaus", "plateau"},
+		{"campuses", "campus"},
+		{"order_statuses", "order_status"},
 	}
-	for _, w := range []string{"spatial_ref_sys", "sys", "bus", "status", "analysis", "axis", "alias", "canvas", "virus", "series", "species", "news", "gas", "address", "public_series"} {
+	for _, w := range []string{"spatial_ref_sys", "sys", "bus", "status", "analysis", "axis", "alias", "canvas", "virus", "series", "species", "news", "gas", "address", "public_series", "campus", "census", "basis", "crisis"} {
 		cases = append(cases, struct{ plural, singular string }{w, w})
 	}
 	for _, c := range cases {

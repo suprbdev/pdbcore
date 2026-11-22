@@ -131,6 +131,19 @@ var uncountable = map[string]bool{"news": true, "series": true, "species": true}
 // singularWords end in "s" but are already singular.
 var singularWords = map[string]bool{"sys": true, "gas": true, "alias": true, "canvas": true}
 
+// pluralUs are plurals of words ending in "u", which isSingularUs must not
+// mistake for singular "-us" nouns.
+var pluralUs = map[string]bool{"menus": true, "emus": true, "gnus": true, "gurus": true, "haikus": true, "tutus": true}
+
+// isSingularUs reports whether w is a singular noun ending in "us" (status,
+// bus, campus), as opposed to the plural of a "-u" word (menus).
+func isSingularUs(w string) bool {
+	if !strings.HasSuffix(w, "us") || pluralUs[w] || len(w) < 3 {
+		return false
+	}
+	return !isVowel(w[len(w)-3])
+}
+
 func lastWord(s string) string {
 	if i := strings.LastIndexByte(s, '_'); i >= 0 {
 		return s[i+1:]
@@ -147,14 +160,19 @@ func Singularize(s string) string {
 	if irregular(s, irregularPlurals) != "" {
 		return s // already singular (person stays person, not perso)
 	}
-	if w := lastWord(s); uncountable[w] || singularWords[w] || strings.HasSuffix(w, "us") || strings.HasSuffix(w, "is") {
+	if w := lastWord(s); uncountable[w] || singularWords[w] || isSingularUs(w) || strings.HasSuffix(w, "sis") || strings.HasSuffix(w, "xis") {
 		return s
 	}
 	switch {
 	case strings.HasSuffix(s, "ies") && len(s) > 3:
 		return s[:len(s)-3] + "y"
-	case strings.HasSuffix(s, "ses") || strings.HasSuffix(s, "xes") || strings.HasSuffix(s, "zes") || strings.HasSuffix(s, "ches") || strings.HasSuffix(s, "shes"):
+	case strings.HasSuffix(s, "sses") || strings.HasSuffix(s, "xes") || strings.HasSuffix(s, "zes") || strings.HasSuffix(s, "ches") || strings.HasSuffix(s, "shes"):
 		return s[:len(s)-2]
+	case strings.HasSuffix(s, "ses"):
+		if base := lastWord(s[:len(s)-2]); singularWords[base] || isSingularUs(base) {
+			return s[:len(s)-2]
+		}
+		return s[:len(s)-1]
 	case strings.HasSuffix(s, "s") && !strings.HasSuffix(s, "ss"):
 		return s[:len(s)-1]
 	}
