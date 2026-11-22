@@ -11,7 +11,7 @@ import (
 
 // CatalogFormatVersion is bumped whenever the Catalog wire format changes
 // incompatibly; the cache layer refuses to load mismatched versions.
-const CatalogFormatVersion = 3
+const CatalogFormatVersion = 4
 
 // Catalog is the complete introspected model of the database. It is the only
 // input to API building, which keeps caching trivial and plugin transforms
@@ -24,6 +24,18 @@ type Catalog struct {
 	Enums         []*Enum      `json:"enums"`
 	Composites    []*Composite `json:"composites"`
 	Functions     []*Function  `json:"functions"`
+	// Extensions lists every extension installed in the database
+	// (pg_extension), regardless of which schemas were introspected.
+	Extensions []*Extension `json:"extensions"`
+}
+
+// Extension is an installed extension as recorded in pg_extension.
+type Extension struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	// Schema is where the extension's objects live; qualify calls to its
+	// functions with it when it may not be on the search_path.
+	Schema string `json:"schema"`
 }
 
 // RelKind distinguishes tables from the view family.
@@ -102,6 +114,15 @@ type Column struct {
 	// @enum table it referenced via FK). The column keeps its real pg type
 	// (text); schema building and compilation treat it as that enum.
 	EnumRef string `json:"enum_ref,omitempty"`
+	// Spatial holds the PostGIS type modifier of a geometry or geography
+	// column (or array of either); nil for every other type.
+	Spatial *SpatialType `json:"spatial,omitempty"`
+	// SQLType is the declared type including its modifier as format_type
+	// renders it, e.g. "character varying(255)", "numeric(10,2)",
+	// "timestamp(3) with time zone". It is set only for built-in
+	// (pg_catalog) types declared with a modifier, so it never depends on
+	// the session's search_path; empty otherwise.
+	SQLType string `json:"sql_type,omitempty"`
 }
 
 type Constraint struct {
@@ -212,6 +233,19 @@ func (c *Catalog) EnumByRef(ref string) *Enum {
 	return nil
 }
 
+// Extension returns the installed extension with the given name, or nil.
+func (c *Catalog) Extension(name string) *Extension {
+	for _, e := range c.Extensions {
+		if e.Name == name {
+			return e
+		}
+	}
+	return nil
+}
+
+// HasExtension reports whether the named extension is installed.
+func (c *Catalog) HasExtension(name string) bool { return c.Extension(name) != nil }
+
 // Composite returns the composite type with the given schema+name, or nil.
 func (c *Catalog) Composite(schema, name string) *Composite {
 	for _, ct := range c.Composites {
@@ -260,4 +294,5 @@ func (c *Catalog) sortStable() {
 		}
 		return c.Functions[i].Name < c.Functions[j].Name
 	})
+	sort.Slice(c.Extensions, func(i, j int) bool { return c.Extensions[i].Name < c.Extensions[j].Name })
 }

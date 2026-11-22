@@ -19,10 +19,11 @@ var FixtureSQL string
 // FixtureCatalog models FixtureSQL after introspection: users (pk id, unique
 // email, enum mood + mood[], jsonb, text[], composite address + address[]),
 // posts (pk id, fk author_id -> users.id, RLS), comments (self-referential),
-// places (PostGIS geometry + geography, GiST-indexed), events (type_code
-// bound to the table-backed event_type enum), the metrics view, the jwt
-// composite, and the functions. Slices follow introspection order (indexes
-// and constraints by name); PostGIS's own relations/composites are absent.
+// places (PostGIS geometry(Point,4326) + unconstrained geography,
+// GiST-indexed), events (type_code bound to the table-backed event_type
+// enum), the metrics view, the jwt composite, the functions, and the plpgsql
+// and postgis extensions. Slices follow introspection order (indexes and
+// constraints by name); PostGIS's own relations/composites are absent.
 func FixtureCatalog() *introspect.Catalog {
 	users := &introspect.Table{
 		Schema: "public", Name: "users", Kind: introspect.RelTable,
@@ -102,7 +103,8 @@ func FixtureCatalog() *introspect.Catalog {
 	}
 	// places carries the PostGIS columns: geometry (planar, SRID units) and
 	// geography (spheroidal, metres), both GiST-indexed so the indexed-only
-	// filter policy admits them.
+	// filter policy admits them. location is constrained to Point/4326 by its
+	// typmod; area is unconstrained.
 	places := &introspect.Table{
 		Schema: "public", Name: "places", Kind: introspect.RelTable,
 		Privileges: introspect.Privileges{Select: true, Insert: true, Update: true, Delete: true},
@@ -110,8 +112,10 @@ func FixtureCatalog() *introspect.Catalog {
 			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true},
 			{Name: "owner_id", Position: 2, PGType: "int4", TypeSchema: "pg_catalog"},
 			{Name: "name", Position: 3, PGType: "text", TypeSchema: "pg_catalog", NotNull: true},
-			{Name: "location", Position: 4, PGType: "geometry", TypeSchema: "public"},
-			{Name: "area", Position: 5, PGType: "geography", TypeSchema: "public"},
+			{Name: "location", Position: 4, PGType: "geometry", TypeSchema: "public",
+				Spatial: &introspect.SpatialType{Subtype: introspect.SpatialPoint, SRID: 4326}},
+			{Name: "area", Position: 5, PGType: "geography", TypeSchema: "public",
+				Spatial: &introspect.SpatialType{Subtype: introspect.SpatialGeometry}},
 		},
 		PrimaryKey: &introspect.Constraint{Name: "places_pkey", Columns: []string{"id"}},
 		ForeignKeys: []*introspect.ForeignKey{{
@@ -287,5 +291,11 @@ func FixtureCatalog() *introspect.Catalog {
 			ReturnType: "mood", ReturnTypeSchema: "public",
 			Volatility: introspect.VolatilityVolatile,
 		}},
+		// The extension version tracks the server image; the drift gate
+		// normalises it.
+		Extensions: []*introspect.Extension{
+			{Name: "plpgsql", Version: "1.0", Schema: "pg_catalog"},
+			{Name: "postgis", Version: "3.4.3", Schema: "public"},
+		},
 	}
 }

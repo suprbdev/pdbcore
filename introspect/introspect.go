@@ -47,6 +47,9 @@ func Introspect(ctx context.Context, db Querier, schemas []string) (*Catalog, er
 	if err := readFunctions(ctx, db, schemas, cat); err != nil {
 		return nil, err
 	}
+	if err := readExtensions(ctx, db, cat); err != nil {
+		return nil, err
+	}
 	if err := convertEnumTables(ctx, db, cat); err != nil {
 		return nil, err
 	}
@@ -93,6 +96,15 @@ func readTables(ctx context.Context, db Querier, schemas []string, cat *Catalog)
 	return rows.Err()
 }
 
+// typmodColumns selects a column's modifier for applyTypmod: its
+// format_type text (empty when it has none) and whether the base type is built
+// in. It expects the lateral m (typoid, typnamespace, typmod) resolved
+// through any domain. format_type is core and dispatches to the type's own
+// typmodout function, so this works with or without PostGIS installed and
+// never depends on PostGIS's internal typmod bit layout.
+const typmodColumns = `CASE WHEN m.typmod >= 0 THEN format_type(m.typoid, m.typmod) ELSE '' END,
+		       m.typnamespace = 'pg_catalog'::regnamespace`
+
 func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, c.relname, a.attname, a.attnum,
@@ -102,13 +114,17 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		       a.attnotnull,
 		       a.atthasdef,
 		       a.attidentity <> '' OR a.attgenerated <> '',
-		       COALESCE(col_description(c.oid, a.attnum), '')
+		       COALESCE(col_description(c.oid, a.attnum), ''),
+		       `+typmodColumns+`
 		FROM pg_attribute a
 		JOIN pg_class c ON c.oid = a.attrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		JOIN pg_type t ON t.oid = a.atttypid
 		JOIN pg_namespace tn ON tn.oid = t.typnamespace
 		LEFT JOIN pg_type bt ON t.typtype = 'd' AND bt.oid = t.typbasetype
+		CROSS JOIN LATERAL (SELECT COALESCE(bt.oid, t.oid) AS typoid,
+		                           COALESCE(bt.typnamespace, t.typnamespace) AS typnamespace,
+		                           CASE WHEN t.typtype = 'd' THEN t.typtypmod ELSE a.atttypmod END AS typmod) m
 		WHERE n.nspname = ANY($1)
 		  AND c.relkind IN ('r', 'p', 'v', 'm')
 		  AND a.attnum > 0 AND NOT a.attisdropped
@@ -118,13 +134,16 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var schema, table string
+		var schema, table, formatted string
+		var builtin bool
 		col := &Column{}
 		if err := rows.Scan(&schema, &table, &col.Name, &col.Position,
 			&col.TypeSchema, &col.PGType, &col.IsArray,
-			&col.NotNull, &col.HasDefault, &col.Generated, &col.Comment); err != nil {
+			&col.NotNull, &col.HasDefault, &col.Generated, &col.Comment,
+			&formatted, &builtin); err != nil {
 			return err
 		}
+		applyTypmod(col, formatted, builtin)
 		if t := cat.Table(schema, table); t != nil {
 			t.Columns = append(t.Columns, col)
 		}
@@ -212,6 +231,26 @@ func readIndexes(ctx context.Context, db Querier, schemas []string, cat *Catalog
 	return rows.Err()
 }
 
+func readExtensions(ctx context.Context, db Querier, cat *Catalog) error {
+	rows, err := db.Query(ctx, `
+		SELECT e.extname, e.extversion, n.nspname
+		FROM pg_extension e
+		JOIN pg_namespace n ON n.oid = e.extnamespace
+		ORDER BY e.extname`)
+	if err != nil {
+		return fmt.Errorf("introspect: extensions: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		e := &Extension{}
+		if err := rows.Scan(&e.Name, &e.Version, &e.Schema); err != nil {
+			return err
+		}
+		cat.Extensions = append(cat.Extensions, e)
+	}
+	return rows.Err()
+}
+
 func readEnums(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, t.typname,
@@ -244,7 +283,8 @@ func readComposites(ctx context.Context, db Querier, schemas []string, cat *Cata
 		       atn.nspname,
 		       CASE WHEN at.typtype = 'd' THEN bt.typname ELSE at.typname END,
 		       at.typcategory = 'A' OR (at.typtype = 'd' AND bt.typcategory = 'A'),
-		       COALESCE(col_description(c.oid, a.attnum), '')
+		       COALESCE(col_description(c.oid, a.attnum), ''),
+		       `+typmodColumns+`
 		FROM pg_type t
 		JOIN pg_namespace n ON n.oid = t.typnamespace
 		JOIN pg_class c ON c.oid = t.typrelid AND c.relkind = 'c'
@@ -252,6 +292,9 @@ func readComposites(ctx context.Context, db Querier, schemas []string, cat *Cata
 		JOIN pg_type at ON at.oid = a.atttypid
 		JOIN pg_namespace atn ON atn.oid = at.typnamespace
 		LEFT JOIN pg_type bt ON at.typtype = 'd' AND bt.oid = at.typbasetype
+		CROSS JOIN LATERAL (SELECT COALESCE(bt.oid, at.oid) AS typoid,
+		                           COALESCE(bt.typnamespace, at.typnamespace) AS typnamespace,
+		                           CASE WHEN at.typtype = 'd' THEN at.typtypmod ELSE a.atttypmod END AS typmod) m
 		WHERE n.nspname = ANY($1) AND t.typtype = 'c'
 		ORDER BY n.nspname, t.typname, a.attnum`, schemas)
 	if err != nil {
@@ -260,12 +303,15 @@ func readComposites(ctx context.Context, db Querier, schemas []string, cat *Cata
 	defer rows.Close()
 	byKey := map[string]*Composite{}
 	for rows.Next() {
-		var schema, name string
+		var schema, name, formatted string
+		var builtin bool
 		f := &Column{}
 		if err := rows.Scan(&schema, &name, &f.Name, &f.Position,
-			&f.TypeSchema, &f.PGType, &f.IsArray, &f.Comment); err != nil {
+			&f.TypeSchema, &f.PGType, &f.IsArray, &f.Comment,
+			&formatted, &builtin); err != nil {
 			return err
 		}
+		applyTypmod(f, formatted, builtin)
 		key := schema + "." + name
 		comp := byKey[key]
 		if comp == nil {

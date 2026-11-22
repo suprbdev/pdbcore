@@ -15,7 +15,8 @@ import (
 // FixtureSQL is loaded by the compose stack (see compose.test.yaml), the
 // database is introspected, and the result must equal FixtureCatalog()
 // after normalising the parts a hand-written fixture cannot mirror (server
-// version and the relations/composites CREATE EXTENSION postgis installs).
+// and PostGIS versions, the relations/composites CREATE EXTENSION postgis
+// installs, and the extra extensions the postgis image preinstalls).
 func TestFixtureCatalogMatchesLiveIntrospection(t *testing.T) {
 	url := os.Getenv("PDBCORE_TEST_DATABASE_URL")
 	if url == "" {
@@ -57,8 +58,28 @@ var postgisObjects = map[string]bool{
 	"simple_detail":     true,
 }
 
+// imageExtensions are created in POSTGRES_DB by the postgis/postgis image's
+// own init script (CI's service container runs it; the compose stack mounts
+// the fixture over it), so their presence depends on how the database was
+// provisioned rather than on FixtureSQL.
+var imageExtensions = map[string]bool{
+	"postgis_topology":       true,
+	"postgis_tiger_geocoder": true,
+	"fuzzystrmatch":          true,
+}
+
 func normalize(live, fixture *introspect.Catalog) {
 	fixture.ServerVersion = live.ServerVersion
+	if lp, fp := live.Extension("postgis"), fixture.Extension("postgis"); lp != nil && fp != nil {
+		fp.Version = lp.Version
+	}
+	exts := live.Extensions[:0]
+	for _, e := range live.Extensions {
+		if !imageExtensions[e.Name] {
+			exts = append(exts, e)
+		}
+	}
+	live.Extensions = exts
 	tables := live.Tables[:0]
 	for _, t := range live.Tables {
 		if !postgisObjects[t.Name] {
@@ -86,5 +107,8 @@ func TestFixtureCatalogHash(t *testing.T) {
 	}
 	if !strings.Contains(FixtureSQL, "CREATE VIEW metrics") {
 		t.Fatal("FixtureSQL must be embedded")
+	}
+	if !FixtureCatalog().HasExtension("postgis") {
+		t.Fatal("FixtureCatalog must record the postgis extension")
 	}
 }

@@ -20,6 +20,38 @@ func Diff(cached, live *Catalog) []string {
 	out = append(out, diffNamed("enum", enumMap(cached.Enums), enumMap(live.Enums))...)
 	out = append(out, diffNamed("composite type", compositeMap(cached.Composites), compositeMap(live.Composites))...)
 	out = append(out, diffNamed("function", functionMap(cached.Functions), functionMap(live.Functions))...)
+	out = append(out, diffExtensions(cached.Extensions, live.Extensions)...)
+	return out
+}
+
+func diffExtensions(cached, live []*Extension) []string {
+	var out []string
+	c, l := map[string]*Extension{}, map[string]*Extension{}
+	for _, e := range cached {
+		c[e.Name] = e
+	}
+	for _, e := range live {
+		l[e.Name] = e
+	}
+	for _, name := range sortedKeys(c) {
+		if _, ok := l[name]; !ok {
+			out = append(out, fmt.Sprintf("extension %s removed", name))
+		}
+	}
+	for _, name := range sortedKeys(l) {
+		le := l[name]
+		ce, ok := c[name]
+		if !ok {
+			out = append(out, fmt.Sprintf("extension %s added (%s in %s)", name, le.Version, le.Schema))
+			continue
+		}
+		if ce.Version != le.Version {
+			out = append(out, fmt.Sprintf("extension %s version changed: %s -> %s", name, ce.Version, le.Version))
+		}
+		if ce.Schema != le.Schema {
+			out = append(out, fmt.Sprintf("extension %s schema changed: %s -> %s", name, ce.Schema, le.Schema))
+		}
+	}
 	return out
 }
 
@@ -150,9 +182,19 @@ func tableAspectChanges(cached, live *Table) []string {
 }
 
 func typeDesc(c *Column) string {
-	t := c.PGType
-	if c.IsArray {
-		t += "[]"
+	var t string
+	switch {
+	case c.SQLType != "":
+		t = c.SQLType
+	case c.Spatial != nil && c.IsArray:
+		t = strings.TrimPrefix(c.PGType, "_") + c.Spatial.Typmod() + "[]"
+	case c.Spatial != nil:
+		t = c.PGType + c.Spatial.Typmod()
+	default:
+		t = c.PGType
+		if c.IsArray {
+			t += "[]"
+		}
 	}
 	if c.NotNull {
 		t += " not null"
