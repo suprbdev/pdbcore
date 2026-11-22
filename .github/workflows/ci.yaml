@@ -29,11 +29,16 @@ jobs:
           fi
 
   e2e:
+    name: e2e (PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18, 19]
     services:
       postgres:
         # PostGIS-enabled: the fixture schema creates the extension.
-        image: postgis/postgis:16-3.4
+        image: postgis/postgis:${{ matrix.pg }}-3.7
         env:
           POSTGRES_USER: pdbcore
           POSTGRES_PASSWORD: pdbcore
