@@ -20,7 +20,9 @@ const (
 	UserInput
 	// Permission: 42501 insufficient privilege.
 	Permission
-	// Conflict: 23505/23503/23P01 and 40001/40P01 (retries exhausted).
+	// Conflict: 23505/23503/23001/23P01 and 40001/40P01 (retries
+	// exhausted). PostgreSQL 18+ reports an ON DELETE/UPDATE RESTRICT
+	// violation as 23001 where older servers used 23503.
 	Conflict
 	// Resource: 53* insufficient resources, 08* connection exceptions,
 	// 57P01-57P03 operator intervention, connect failures.
@@ -139,7 +141,7 @@ func classOf(code string) Class {
 	switch code {
 	case "42501":
 		return Permission
-	case "23505", "23503", "23P01", "40001", "40P01":
+	case "23505", "23503", "23001", "23P01", "40001", "40P01":
 		return Conflict
 	case "23502", "23514":
 		return UserInput

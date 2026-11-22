@@ -23,7 +23,8 @@ func Introspect(ctx context.Context, db Querier, schemas []string) (*Catalog, er
 	}
 	cat := &Catalog{FormatVersion: CatalogFormatVersion, Schemas: schemas}
 
-	if err := db.QueryRow(ctx, `SHOW server_version`).Scan(&cat.ServerVersion); err != nil {
+	if err := db.QueryRow(ctx, `SELECT current_setting('server_version'), current_setting('server_version_num')::int`).
+		Scan(&cat.ServerVersion, &cat.ServerVersionNum); err != nil {
 		return nil, fmt.Errorf("introspect: server version: %w", err)
 	}
 	if err := readTables(ctx, db, schemas, cat); err != nil {
@@ -144,6 +145,10 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		       a.attnotnull,
 		       a.atthasdef,
 		       a.attidentity <> '' OR a.attgenerated <> '',
+		       CASE WHEN a.attidentity <> '' THEN 'identity'
+		            WHEN a.attgenerated = 's' THEN 'stored'
+		            WHEN a.attgenerated = 'v' THEN 'virtual'
+		            ELSE '' END,
 		       COALESCE(col_description(c.oid, a.attnum), ''),
 		       `+typmodColumns+`
 		FROM pg_attribute a
@@ -161,21 +166,31 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var schema, table, formatted string
+		var schema, table, genKind, formatted string
 		var builtin, spatial bool
 		col := &Column{}
 		if err := rows.Scan(&schema, &table, &col.Name, &col.Position,
 			&col.TypeSchema, &col.PGType, &col.IsArray,
-			&col.NotNull, &col.HasDefault, &col.Generated, &col.Comment,
+			&col.NotNull, &col.HasDefault, &col.Generated, &genKind, &col.Comment,
 			&formatted, &builtin, &spatial); err != nil {
 			return err
 		}
+		col.GeneratedKind = GeneratedKind(genKind)
 		applyTypmod(col, formatted, builtin, spatial)
 		if t := cat.Table(schema, table); t != nil {
 			t.Columns = append(t.Columns, col)
 		}
 	}
 	return rows.Err()
+}
+
+// pg18ConstraintColumns selects (conperiod, conenforced), which exist only
+// from PostgreSQL 18; older servers get the values every constraint had there.
+func pg18ConstraintColumns(serverVersionNum int) string {
+	if serverVersionNum >= 180000 {
+		return `con.conperiod, con.conenforced`
+	}
+	return `false, true`
 }
 
 func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
@@ -188,7 +203,8 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 		       COALESCE(ARRAY(SELECT a.attname FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord)
 		             JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum
 		             ORDER BY k.ord), '{}'),
-		       COALESCE(obj_description(con.oid, 'pg_constraint'), '')
+		       COALESCE(obj_description(con.oid, 'pg_constraint'), ''),
+		       `+pg18ConstraintColumns(cat.ServerVersionNum)+`
 		FROM pg_constraint con
 		JOIN pg_class c ON c.oid = con.conrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -205,7 +221,9 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 		var ctype rune
 		var cols, refCols []string
 		var refSchema, refTable string
-		if err := rows.Scan(&schema, &table, &name, &ctype, &cols, &refSchema, &refTable, &refCols, &comment); err != nil {
+		var period, enforced bool
+		if err := rows.Scan(&schema, &table, &name, &ctype, &cols, &refSchema, &refTable, &refCols, &comment,
+			&period, &enforced); err != nil {
 			return err
 		}
 		t := cat.Table(schema, table)
@@ -214,14 +232,14 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 		}
 		switch ctype {
 		case 'p':
-			t.PrimaryKey = &Constraint{Name: name, Columns: cols, Comment: comment}
+			t.PrimaryKey = &Constraint{Name: name, Columns: cols, Comment: comment, WithoutOverlaps: period}
 		case 'u':
-			t.Uniques = append(t.Uniques, &Constraint{Name: name, Columns: cols, Comment: comment})
+			t.Uniques = append(t.Uniques, &Constraint{Name: name, Columns: cols, Comment: comment, WithoutOverlaps: period})
 		case 'f':
 			t.ForeignKeys = append(t.ForeignKeys, &ForeignKey{
 				Name: name, Columns: cols,
 				RefSchema: refSchema, RefTable: refTable, RefColumns: refCols,
-				Comment: comment,
+				Comment: comment, Period: period, NotEnforced: !enforced,
 			})
 		}
 	}

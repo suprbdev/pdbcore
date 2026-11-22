@@ -19,7 +19,7 @@ func TestClassifyClasses(t *testing.T) {
 	}{
 		{"22P02", UserInput}, {"22001", UserInput},
 		{"23502", UserInput}, {"23514", UserInput},
-		{"23505", Conflict}, {"23503", Conflict}, {"23P01", Conflict},
+		{"23505", Conflict}, {"23503", Conflict}, {"23001", Conflict}, {"23P01", Conflict},
 		{"23000", Internal},
 		{"40001", Conflict}, {"40P01", Conflict},
 		{"42501", Permission}, {"42703", UserInput}, {"42601", UserInput},

@@ -14,6 +14,8 @@ func Diff(cached, live *Catalog) []string {
 	var out []string
 	if cached.ServerVersion != live.ServerVersion {
 		out = append(out, fmt.Sprintf("server version changed: %s -> %s", cached.ServerVersion, live.ServerVersion))
+	} else if cached.ServerVersionNum != live.ServerVersionNum {
+		out = append(out, fmt.Sprintf("server version number changed: %d -> %d", cached.ServerVersionNum, live.ServerVersionNum))
 	}
 	out = append(out, diffStringSet("schema", cached.Schemas, live.Schemas)...)
 	out = append(out, diffTables(cached.Tables, live.Tables)...)
@@ -147,6 +149,8 @@ func diffTable(name string, cached, live *Table) []string {
 			out = append(out, fmt.Sprintf("%s %s: column %s added (%s)", live.Kind, name, cn, typeDesc(lcol)))
 		case typeDesc(ccol) != typeDesc(lcol):
 			out = append(out, fmt.Sprintf("%s %s: column %s type changed (%s -> %s)", live.Kind, name, cn, typeDesc(ccol), typeDesc(lcol)))
+		case ccol.GeneratedKind != lcol.GeneratedKind:
+			out = append(out, fmt.Sprintf("%s %s: column %s generation changed (%s -> %s)", live.Kind, name, cn, genDesc(ccol), genDesc(lcol)))
 		case canonJSON(ccol) != canonJSON(lcol):
 			out = append(out, fmt.Sprintf("%s %s: column %s changed", live.Kind, name, cn))
 		}
@@ -200,6 +204,13 @@ func typeDesc(c *Column) string {
 		t += " not null"
 	}
 	return t
+}
+
+func genDesc(c *Column) string {
+	if c.GeneratedKind == "" {
+		return "none"
+	}
+	return string(c.GeneratedKind)
 }
 
 func enumMap(enums []*Enum) map[string]any {

@@ -7,8 +7,9 @@ import (
 
 func diffFixture() *Catalog {
 	return &Catalog{
-		ServerVersion: "16.0",
-		Schemas:       []string{"public"},
+		ServerVersion:    "16.0",
+		ServerVersionNum: 160000,
+		Schemas:          []string{"public"},
 		Tables: []*Table{{
 			Schema: "public",
 			Name:   "users",
@@ -70,6 +71,16 @@ func TestDiff(t *testing.T) {
 		{"server version", func(c *Catalog) {
 			c.ServerVersion = "17.0"
 		}, "server version changed: 16.0 -> 17.0"},
+		{"server version number", func(c *Catalog) {
+			c.ServerVersionNum = 160001
+		}, "server version number changed: 160000 -> 160001"},
+		{"generation kind", func(c *Catalog) {
+			c.Tables[0].Columns[1].Generated = true
+			c.Tables[0].Columns[1].GeneratedKind = GeneratedVirtual
+		}, "table public.users: column email generation changed (none -> virtual)"},
+		{"temporal key", func(c *Catalog) {
+			c.Tables[0].PrimaryKey.WithoutOverlaps = true
+		}, "table public.users changed (primary key)"},
 		{"extension added", func(c *Catalog) {
 			c.Extensions = append(c.Extensions, &Extension{Name: "postgis", Version: "3.4.3", Schema: "public"})
 		}, "extension postgis added (3.4.3 in public)"},
