@@ -29,7 +29,7 @@ func FixtureCatalog() *introspect.Catalog {
 		Schema: "public", Name: "users", Kind: introspect.RelTable,
 		Privileges: introspect.Privileges{Select: true, Insert: true, Update: true, Delete: true},
 		Columns: []*introspect.Column{
-			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true},
+			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true, GeneratedKind: introspect.GeneratedIdentity},
 			{Name: "email", Position: 2, PGType: "text", TypeSchema: "pg_catalog", NotNull: true},
 			{Name: "full_name", Position: 3, PGType: "text", TypeSchema: "pg_catalog"},
 			{Name: "mood", Position: 4, PGType: "mood", TypeSchema: "public"},
@@ -57,7 +57,7 @@ func FixtureCatalog() *introspect.Catalog {
 		RLSEnabled: true,
 		Privileges: introspect.Privileges{Select: true, Insert: true, Update: true, Delete: true},
 		Columns: []*introspect.Column{
-			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true},
+			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true, GeneratedKind: introspect.GeneratedIdentity},
 			{Name: "author_id", Position: 2, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true},
 			{Name: "title", Position: 3, PGType: "text", TypeSchema: "pg_catalog", NotNull: true},
 			{Name: "body", Position: 4, PGType: "text", TypeSchema: "pg_catalog"},
@@ -81,7 +81,7 @@ func FixtureCatalog() *introspect.Catalog {
 		Schema: "public", Name: "comments", Kind: introspect.RelTable,
 		Privileges: introspect.Privileges{Select: true, Insert: true, Update: true, Delete: true},
 		Columns: []*introspect.Column{
-			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true},
+			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true, GeneratedKind: introspect.GeneratedIdentity},
 			{Name: "post_id", Position: 2, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true},
 			{Name: "parent_id", Position: 3, PGType: "int4", TypeSchema: "pg_catalog"},
 			{Name: "body", Position: 4, PGType: "text", TypeSchema: "pg_catalog", NotNull: true},
@@ -109,7 +109,7 @@ func FixtureCatalog() *introspect.Catalog {
 		Schema: "public", Name: "places", Kind: introspect.RelTable,
 		Privileges: introspect.Privileges{Select: true, Insert: true, Update: true, Delete: true},
 		Columns: []*introspect.Column{
-			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true},
+			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true, GeneratedKind: introspect.GeneratedIdentity},
 			{Name: "owner_id", Position: 2, PGType: "int4", TypeSchema: "pg_catalog"},
 			{Name: "name", Position: 3, PGType: "text", TypeSchema: "pg_catalog", NotNull: true},
 			{Name: "location", Position: 4, PGType: "geometry", TypeSchema: "public",
@@ -137,7 +137,7 @@ func FixtureCatalog() *introspect.Catalog {
 		Schema: "public", Name: "events", Kind: introspect.RelTable,
 		Privileges: introspect.Privileges{Select: true, Insert: true, Update: true, Delete: true},
 		Columns: []*introspect.Column{
-			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true},
+			{Name: "id", Position: 1, PGType: "int4", TypeSchema: "pg_catalog", NotNull: true, Generated: true, GeneratedKind: introspect.GeneratedIdentity},
 			{Name: "name", Position: 2, PGType: "text", TypeSchema: "pg_catalog", NotNull: true},
 			{Name: "type_code", Position: 3, PGType: "text", TypeSchema: "pg_catalog", NotNull: true, EnumRef: "public.event_type"},
 		},
@@ -160,10 +160,11 @@ func FixtureCatalog() *introspect.Catalog {
 		},
 	}
 	return &introspect.Catalog{
-		FormatVersion: introspect.CatalogFormatVersion,
-		ServerVersion: "16.0",
-		Schemas:       []string{"public"},
-		Tables:        []*introspect.Table{comments, events, metrics, places, posts, users},
+		FormatVersion:    introspect.CatalogFormatVersion,
+		ServerVersion:    "16.0",
+		ServerVersionNum: 160000,
+		Schemas:          []string{"public"},
+		Tables:           []*introspect.Table{comments, events, metrics, places, posts, users},
 		Enums: []*introspect.Enum{{
 			Schema: "public", Name: "event_type", TableBacked: true,
 			Comment: "@enum\nKind of event.",

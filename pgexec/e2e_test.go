@@ -172,3 +172,42 @@ func TestClassifyRealErrors(t *testing.T) {
 		t.Fatalf("deadline = %+v (err %v)", c, err)
 	}
 }
+
+// TestClassifyRestrictViolation checks that an ON DELETE RESTRICT violation
+// is a Conflict with its message passed through on every server: SQLSTATE
+// 23001 from PostgreSQL 18, 23503 before.
+func TestClassifyRestrictViolation(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var num int
+	if err := tx.QueryRow(ctx, `SELECT current_setting('server_version_num')::int`).Scan(&num); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TEMP TABLE restrict_parent (id int PRIMARY KEY)`,
+		`CREATE TEMP TABLE restrict_child (parent_id int REFERENCES restrict_parent ON DELETE RESTRICT)`,
+		`INSERT INTO restrict_parent VALUES (1)`,
+		`INSERT INTO restrict_child VALUES (1)`,
+	} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	_, err = tx.Exec(ctx, `DELETE FROM restrict_parent`)
+	want := "23503"
+	if num >= 180000 {
+		want = "23001"
+	}
+	c := pgexec.Classify(err, pgexec.Prod)
+	if c.Class != pgexec.Conflict || c.SQLState != want {
+		t.Fatalf("restrict violation = %+v, want Conflict %s with the PG message", c, want)
+	}
+	if c.Message != c.PG.Message {
+		t.Fatalf("message %q not passed through (PG: %q)", c.Message, c.PG.Message)
+	}
+}

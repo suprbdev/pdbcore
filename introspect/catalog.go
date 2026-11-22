@@ -11,19 +11,23 @@ import (
 
 // CatalogFormatVersion is bumped whenever the Catalog wire format changes
 // incompatibly; the cache layer refuses to load mismatched versions.
-const CatalogFormatVersion = 4
+const CatalogFormatVersion = 5
 
 // Catalog is the complete introspected model of the database. It is the only
 // input to API building, which keeps caching trivial and plugin transforms
 // deterministic.
 type Catalog struct {
-	FormatVersion int          `json:"format_version"`
-	ServerVersion string       `json:"server_version"`
-	Schemas       []string     `json:"schemas"`
-	Tables        []*Table     `json:"tables"`
-	Enums         []*Enum      `json:"enums"`
-	Composites    []*Composite `json:"composites"`
-	Functions     []*Function  `json:"functions"`
+	FormatVersion int    `json:"format_version"`
+	ServerVersion string `json:"server_version"`
+	// ServerVersionNum is current_setting('server_version_num'), e.g.
+	// 180001 for 18.1. Gate version-dependent SQL on it rather than parsing
+	// ServerVersion.
+	ServerVersionNum int          `json:"server_version_num"`
+	Schemas          []string     `json:"schemas"`
+	Tables           []*Table     `json:"tables"`
+	Enums            []*Enum      `json:"enums"`
+	Composites       []*Composite `json:"composites"`
+	Functions        []*Function  `json:"functions"`
 	// Extensions lists every extension installed in the database
 	// (pg_extension), regardless of which schemas were introspected.
 	Extensions []*Extension `json:"extensions"`
@@ -48,12 +52,14 @@ const (
 )
 
 type Table struct {
-	Schema      string        `json:"schema"`
-	Name        string        `json:"name"`
-	Kind        RelKind       `json:"kind"`
-	Comment     string        `json:"comment,omitempty"`
-	RLSEnabled  bool          `json:"rls_enabled"`
-	Columns     []*Column     `json:"columns"`
+	Schema     string    `json:"schema"`
+	Name       string    `json:"name"`
+	Kind       RelKind   `json:"kind"`
+	Comment    string    `json:"comment,omitempty"`
+	RLSEnabled bool      `json:"rls_enabled"`
+	Columns    []*Column `json:"columns"`
+	// PrimaryKey and Uniques may be temporal (WITHOUT OVERLAPS) keys; use
+	// RowKeys for single-row lookups and ON CONFLICT targets.
 	PrimaryKey  *Constraint   `json:"primary_key,omitempty"`
 	Uniques     []*Constraint `json:"uniques,omitempty"`
 	ForeignKeys []*ForeignKey `json:"foreign_keys,omitempty"`
@@ -78,6 +84,23 @@ func (t *Table) Column(name string) *Column {
 		}
 	}
 	return nil
+}
+
+// RowKeys returns the primary key (first, when present) and unique
+// constraints that identify a single row by equality on all their columns
+// and can serve as ON CONFLICT targets. Temporal (WITHOUT OVERLAPS) keys are
+// left out: see [Constraint.WithoutOverlaps].
+func (t *Table) RowKeys() []*Constraint {
+	var out []*Constraint
+	if t.PrimaryKey.RowKey() {
+		out = append(out, t.PrimaryKey)
+	}
+	for _, u := range t.Uniques {
+		if u.RowKey() {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // IndexedColumns returns the set of column names that are the leading column
@@ -109,7 +132,10 @@ type Column struct {
 	NotNull    bool   `json:"not_null"`
 	HasDefault bool   `json:"has_default"`
 	Generated  bool   `json:"generated"` // identity or generated column: excluded from create/update input
-	Comment    string `json:"comment,omitempty"`
+	// GeneratedKind says what kind of Generated column this is; empty when
+	// Generated is false.
+	GeneratedKind GeneratedKind `json:"generated_kind,omitempty"`
+	Comment       string        `json:"comment,omitempty"`
 	// EnumRef binds the column to a table-backed enum ("schema.name" of the
 	// @enum table it referenced via FK). The column keeps its real pg type
 	// (text); schema building and compilation treat it as that enum.
@@ -125,10 +151,63 @@ type Column struct {
 	SQLType string `json:"sql_type,omitempty"`
 }
 
+// GeneratedKind distinguishes identity columns from stored and virtual
+// generated columns.
+type GeneratedKind string
+
+const (
+	// GeneratedIdentity is a GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY
+	// column.
+	GeneratedIdentity GeneratedKind = "identity"
+	// GeneratedStored is a GENERATED ALWAYS AS (expr) STORED column.
+	GeneratedStored GeneratedKind = "stored"
+	// GeneratedVirtual is a GENERATED ALWAYS AS (expr) VIRTUAL column
+	// (PostgreSQL 18+, the default kind there): computed on read and never
+	// stored, so it cannot be indexed or be part of a primary key, unique or
+	// foreign key constraint.
+	GeneratedVirtual GeneratedKind = "virtual"
+)
+
+// Virtual reports whether c is a virtual generated column.
+func (c *Column) Virtual() bool { return c.GeneratedKind == GeneratedVirtual }
+
 type Constraint struct {
 	Name    string   `json:"name"`
 	Columns []string `json:"columns"`
 	Comment string   `json:"comment,omitempty"`
+	// WithoutOverlaps marks a temporal key (PostgreSQL 18+):
+	// PRIMARY KEY or UNIQUE (..., p WITHOUT OVERLAPS). Its last column is a
+	// range or multirange compared by overlap instead of equality, so the
+	// leading columns repeat across rows, once per non-overlapping period.
+	// PostgreSQL enforces it as an exclusion constraint: a duplicate raises
+	// 23P01 rather than 23505, ON CONFLICT (cols) cannot infer it, and
+	// ON CONFLICT ON CONSTRAINT supports only DO NOTHING. Empty periods are
+	// rejected, so equality on all Columns still matches at most one row,
+	// but the meaningful lookup is EqualityColumns plus PeriodColumn
+	// containing (@>) a point or range.
+	WithoutOverlaps bool `json:"without_overlaps,omitempty"`
+}
+
+// RowKey reports whether c is a plain primary key or unique constraint that
+// rows can be looked up and upserted by: false for nil and for
+// WithoutOverlaps keys.
+func (c *Constraint) RowKey() bool { return c != nil && !c.WithoutOverlaps }
+
+// EqualityColumns returns the columns compared by equality: all Columns, or
+// all but the last for a WithoutOverlaps key.
+func (c *Constraint) EqualityColumns() []string {
+	if c.WithoutOverlaps && len(c.Columns) > 0 {
+		return c.Columns[:len(c.Columns)-1]
+	}
+	return c.Columns
+}
+
+// PeriodColumn returns the WITHOUT OVERLAPS column, or "" for a plain key.
+func (c *Constraint) PeriodColumn() string {
+	if c.WithoutOverlaps && len(c.Columns) > 0 {
+		return c.Columns[len(c.Columns)-1]
+	}
+	return ""
 }
 
 type ForeignKey struct {
@@ -138,7 +217,58 @@ type ForeignKey struct {
 	RefTable   string   `json:"ref_table"`
 	RefColumns []string `json:"ref_columns"`
 	Comment    string   `json:"comment,omitempty"`
+	// Period marks a temporal foreign key (PostgreSQL 18+):
+	// FOREIGN KEY (..., PERIOD p) REFERENCES t (..., PERIOD rp), always
+	// referencing a WithoutOverlaps key. The last Columns/RefColumns pair
+	// holds ranges or multiranges, and PostgreSQL requires each child's
+	// period to be covered by the union of the periods of the referenced rows
+	// that match the other columns. A child therefore relates to every
+	// referenced row whose period overlaps its own, possibly several, and a
+	// referenced row to every child overlapping it: the relation is to-many
+	// in both directions. Join with JoinPairs.
+	Period bool `json:"period,omitempty"`
+	// NotEnforced marks a NOT ENFORCED foreign key (PostgreSQL 18+).
+	// PostgreSQL never checks it, so a child may reference no row even when
+	// its Columns are all non-null; it still names the intended relation.
+	NotEnforced bool `json:"not_enforced,omitempty"`
 }
+
+// JoinOp is the operator relating a foreign key column to its referenced
+// column in a join predicate.
+type JoinOp string
+
+const (
+	// JoinEqual compares the pair by equality (=).
+	JoinEqual JoinOp = "="
+	// JoinOverlap compares a period pair by range overlap (&&).
+	JoinOverlap JoinOp = "&&"
+)
+
+// JoinPair is one conjunct of a foreign key join predicate:
+// child.Column Op parent.RefColumn.
+type JoinPair struct {
+	Column    string
+	RefColumn string
+	Op        JoinOp
+}
+
+// JoinPairs returns the conjuncts (ANDed) that join child rows to the rows
+// they reference, in either direction: JoinEqual for every pair except the
+// last pair of a Period key, which is JoinOverlap.
+func (fk *ForeignKey) JoinPairs() []JoinPair {
+	out := make([]JoinPair, len(fk.Columns))
+	for i, col := range fk.Columns {
+		out[i] = JoinPair{Column: col, RefColumn: fk.RefColumns[i], Op: JoinEqual}
+	}
+	if fk.Period && len(out) > 0 {
+		out[len(out)-1].Op = JoinOverlap
+	}
+	return out
+}
+
+// ReferencesOne reports whether each child row references at most one row:
+// false for Period keys.
+func (fk *ForeignKey) ReferencesOne() bool { return !fk.Period }
 
 type Index struct {
 	Name    string   `json:"name"`

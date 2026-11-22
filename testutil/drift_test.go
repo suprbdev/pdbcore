@@ -70,6 +70,7 @@ var imageExtensions = map[string]bool{
 
 func normalize(live, fixture *introspect.Catalog) {
 	fixture.ServerVersion = live.ServerVersion
+	fixture.ServerVersionNum = live.ServerVersionNum
 	if lp, fp := live.Extension("postgis"), fixture.Extension("postgis"); lp != nil && fp != nil {
 		fp.Version = lp.Version
 	}
