@@ -21,7 +21,7 @@ func Diff(cached, live *Catalog) []string {
 	out = append(out, diffTables(cached.Tables, live.Tables)...)
 	out = append(out, diffNamed("enum", enumMap(cached.Enums), enumMap(live.Enums))...)
 	out = append(out, diffNamed("composite type", compositeMap(cached.Composites), compositeMap(live.Composites))...)
-	out = append(out, diffNamed("function", functionMap(cached.Functions), functionMap(live.Functions))...)
+	out = append(out, diffFunctions(cached.Functions, live.Functions)...)
 	out = append(out, diffExtensions(cached.Extensions, live.Extensions)...)
 	return out
 }
@@ -179,6 +179,7 @@ func tableAspectChanges(cached, live *Table) []string {
 	aspect("foreign keys", cached.ForeignKeys, live.ForeignKeys)
 	aspect("indexes", cached.Indexes, live.Indexes)
 	aspect("privileges", cached.Privileges, live.Privileges)
+	aspect("partitioning", [2]any{cached.Partitioned, cached.PartitionOf}, [2]any{live.Partitioned, live.PartitionOf})
 	if len(parts) == 0 {
 		parts = append(parts, "definition")
 	}
@@ -229,8 +230,62 @@ func compositeMap(comps []*Composite) map[string]any {
 	return out
 }
 
-func functionMap(funcs []*Function) map[string]any {
-	out := map[string]any{}
+// diffFunctions reports added/removed functions by signature (name and
+// input types) and, for changed ones, which aspects changed.
+func diffFunctions(cached, live []*Function) []string {
+	c, l := functionMap(cached), functionMap(live)
+	var out []string
+	for _, sig := range sortedKeys(c) {
+		if _, ok := l[sig]; !ok {
+			out = append(out, fmt.Sprintf("function %s removed", sig))
+		}
+	}
+	for _, sig := range sortedKeys(l) {
+		lf := l[sig]
+		cf, ok := c[sig]
+		if !ok {
+			out = append(out, fmt.Sprintf("function %s added", sig))
+			continue
+		}
+		if canonJSON(cf) != canonJSON(lf) {
+			out = append(out, fmt.Sprintf("function %s changed (%s)", sig, strings.Join(functionAspectChanges(cf, lf), ", ")))
+		}
+	}
+	return out
+}
+
+func functionAspectChanges(cached, live *Function) []string {
+	var parts []string
+	aspect := func(label string, a, b any) {
+		if canonJSON(a) != canonJSON(b) {
+			parts = append(parts, label)
+		}
+	}
+	argsWith := func(f *Function, pick func(FuncArg) any) []any {
+		out := make([]any, len(f.Args))
+		for i, a := range f.Args {
+			out[i] = pick(a)
+		}
+		return out
+	}
+	aspect("argument names", argsWith(cached, func(a FuncArg) any { return a.Name }), argsWith(live, func(a FuncArg) any { return a.Name }))
+	aspect("argument modes", argsWith(cached, func(a FuncArg) any { return a.Mode }), argsWith(live, func(a FuncArg) any { return a.Mode }))
+	aspect("argument defaults",
+		argsWith(cached, func(a FuncArg) any { return [2]any{a.HasDefault, a.Default} }),
+		argsWith(live, func(a FuncArg) any { return [2]any{a.HasDefault, a.Default} }))
+	aspect("return type", [3]any{cached.ReturnType, cached.ReturnTypeSchema, cached.ReturnsSet},
+		[3]any{live.ReturnType, live.ReturnTypeSchema, live.ReturnsSet})
+	aspect("return columns", cached.ReturnColumns, live.ReturnColumns)
+	aspect("volatility", cached.Volatility, live.Volatility)
+	aspect("comment", cached.Comment, live.Comment)
+	if len(parts) == 0 {
+		parts = append(parts, "definition")
+	}
+	return parts
+}
+
+func functionMap(funcs []*Function) map[string]*Function {
+	out := map[string]*Function{}
 	for _, f := range funcs {
 		args := make([]string, len(f.Args))
 		for i, a := range f.Args {

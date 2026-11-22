@@ -193,28 +193,28 @@ func FixtureCatalog() *introspect.Catalog {
 		}},
 		Functions: []*introspect.Function{{
 			Schema: "public", Name: "search_posts",
-			Args:       []introspect.FuncArg{{Name: "term", PGType: "text", TypeSchema: "pg_catalog"}},
+			Args:       []introspect.FuncArg{{Name: "term", PGType: "text", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn}},
 			ReturnType: "posts", ReturnTypeSchema: "public", ReturnsSet: true,
 			Volatility: introspect.VolatilityStable,
 		}, {
 			// Computed column: first arg is users' row type -> User.postCount.
 			Schema: "public", Name: "users_post_count",
-			Args:       []introspect.FuncArg{{Name: "u", PGType: "users", TypeSchema: "public"}},
+			Args:       []introspect.FuncArg{{Name: "u", PGType: "users", TypeSchema: "public", Mode: introspect.ArgModeIn}},
 			ReturnType: "int8", ReturnTypeSchema: "pg_catalog",
 			Volatility: introspect.VolatilityStable,
 		}, {
 			// Set-returning computed column over a table -> User.recentPosts(n:).
 			Schema: "public", Name: "users_recent_posts",
 			Args: []introspect.FuncArg{
-				{Name: "u", PGType: "users", TypeSchema: "public"},
-				{Name: "n", PGType: "int4", TypeSchema: "pg_catalog"},
+				{Name: "u", PGType: "users", TypeSchema: "public", Mode: introspect.ArgModeIn},
+				{Name: "n", PGType: "int4", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
 			},
 			ReturnType: "posts", ReturnTypeSchema: "public", ReturnsSet: true,
 			Volatility: introspect.VolatilityStable,
 		}, {
 			// Set-returning computed column over a scalar -> User.tagWords.
 			Schema: "public", Name: "users_tag_words",
-			Args:       []introspect.FuncArg{{Name: "u", PGType: "users", TypeSchema: "public"}},
+			Args:       []introspect.FuncArg{{Name: "u", PGType: "users", TypeSchema: "public", Mode: introspect.ArgModeIn}},
 			ReturnType: "text", ReturnTypeSchema: "pg_catalog", ReturnsSet: true,
 			Volatility: introspect.VolatilityStable,
 		}, {
@@ -226,41 +226,41 @@ func FixtureCatalog() *introspect.Catalog {
 			// Volatile scalar function -> Mutation.addNumbers(input:){result}.
 			Schema: "public", Name: "add_numbers",
 			Args: []introspect.FuncArg{
-				{Name: "a", PGType: "int4", TypeSchema: "pg_catalog"},
-				{Name: "b", PGType: "int4", TypeSchema: "pg_catalog"},
+				{Name: "a", PGType: "int4", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
+				{Name: "b", PGType: "int4", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
 			},
 			ReturnType: "int4", ReturnTypeSchema: "pg_catalog",
 			Volatility: introspect.VolatilityVolatile,
 		}, {
 			// Volatile table-returning function -> Mutation.publishPost(input:){result{...}}.
 			Schema: "public", Name: "publish_post",
-			Args:       []introspect.FuncArg{{Name: "post_id", PGType: "int4", TypeSchema: "pg_catalog"}},
+			Args:       []introspect.FuncArg{{Name: "post_id", PGType: "int4", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn}},
 			ReturnType: "posts", ReturnTypeSchema: "public",
 			Volatility: introspect.VolatilityVolatile,
 		}, {
 			Schema: "public", Name: "unpublish_post",
-			Args:       []introspect.FuncArg{{Name: "post_id", PGType: "int4", TypeSchema: "pg_catalog"}},
+			Args:       []introspect.FuncArg{{Name: "post_id", PGType: "int4", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn}},
 			ReturnType: "posts", ReturnTypeSchema: "public",
 			Volatility: introspect.VolatilityVolatile,
 		}, {
 			// Array-typed argument -> list input.
 			Schema: "public", Name: "word_lengths",
-			Args:       []introspect.FuncArg{{Name: "words", PGType: "_text", TypeSchema: "pg_catalog"}},
+			Args:       []introspect.FuncArg{{Name: "words", PGType: "_text", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn}},
 			ReturnType: "int4", ReturnTypeSchema: "pg_catalog",
 			Volatility: introspect.VolatilityVolatile,
 		}, {
 			// Returns the jwt composite: minted into a token when
 			// rls.auth.jwt_type = public.jwt.
 			Schema: "public", Name: "authenticate",
-			Args:       []introspect.FuncArg{{Name: "user_email", PGType: "text", TypeSchema: "pg_catalog"}},
+			Args:       []introspect.FuncArg{{Name: "user_email", PGType: "text", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn}},
 			ReturnType: "jwt", ReturnTypeSchema: "public",
 			Volatility: introspect.VolatilityVolatile,
 		}, {
 			// Computed column with an extra argument -> Post.excerpt(maxChars:).
 			Schema: "public", Name: "posts_excerpt",
 			Args: []introspect.FuncArg{
-				{Name: "p", PGType: "posts", TypeSchema: "public"},
-				{Name: "max_chars", PGType: "int4", TypeSchema: "pg_catalog"},
+				{Name: "p", PGType: "posts", TypeSchema: "public", Mode: introspect.ArgModeIn},
+				{Name: "max_chars", PGType: "int4", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
 			},
 			ReturnType: "text", ReturnTypeSchema: "pg_catalog",
 			Volatility: introspect.VolatilityStable,
@@ -282,13 +282,13 @@ func FixtureCatalog() *introspect.Catalog {
 		}, {
 			// Enum argument -> Query.describeMood(m: Mood).
 			Schema: "public", Name: "describe_mood",
-			Args:       []introspect.FuncArg{{Name: "m", PGType: "mood", TypeSchema: "public"}},
+			Args:       []introspect.FuncArg{{Name: "m", PGType: "mood", TypeSchema: "public", Mode: introspect.ArgModeIn}},
 			ReturnType: "text", ReturnTypeSchema: "pg_catalog",
 			Volatility: introspect.VolatilityStable,
 		}, {
 			// Volatile enum return -> Mutation.bumpMood(input:){result}.
 			Schema: "public", Name: "bump_mood",
-			Args:       []introspect.FuncArg{{Name: "m", PGType: "mood", TypeSchema: "public"}},
+			Args:       []introspect.FuncArg{{Name: "m", PGType: "mood", TypeSchema: "public", Mode: introspect.ArgModeIn}},
 			ReturnType: "mood", ReturnTypeSchema: "public",
 			Volatility: introspect.VolatilityVolatile,
 		}},

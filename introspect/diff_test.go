@@ -22,7 +22,7 @@ func diffFixture() *Catalog {
 			Privileges: Privileges{Select: true},
 		}},
 		Enums:      []*Enum{{Schema: "public", Name: "mood", Values: []string{"HAPPY", "SAD"}}},
-		Functions:  []*Function{{Schema: "public", Name: "f", Args: []FuncArg{{Name: "q", PGType: "text"}}, ReturnType: "int4"}},
+		Functions:  []*Function{{Schema: "public", Name: "f", Args: []FuncArg{{Name: "q", PGType: "text", Mode: ArgModeIn}}, ReturnType: "int4"}},
 		Extensions: []*Extension{{Name: "plpgsql", Version: "1.0", Schema: "pg_catalog"}},
 	}
 }
@@ -65,6 +65,22 @@ func TestDiff(t *testing.T) {
 			c.Enums[0].Values = append(c.Enums[0].Values, "ANGRY")
 		}, "enum public.mood changed"},
 		{"function removed", func(c *Catalog) { c.Functions = nil }, "function public.f(text) removed"},
+		{"function default added", func(c *Catalog) {
+			c.Functions[0].Args[0].HasDefault = true
+			c.Functions[0].Args[0].Default = "'x'::text"
+		}, "function public.f(text) changed (argument defaults)"},
+		{"function made variadic", func(c *Catalog) {
+			c.Functions[0].Args[0].Mode = ArgModeVariadic
+		}, "function public.f(text) changed (argument modes)"},
+		{"function out params", func(c *Catalog) {
+			c.Functions[0].ReturnType = "record"
+			c.Functions[0].ReturnColumns = []FuncArg{
+				{Name: "a", PGType: "int4", Mode: ArgModeOut}, {Name: "b", PGType: "text", Mode: ArgModeOut},
+			}
+		}, "function public.f(text) changed (return type, return columns)"},
+		{"table partitioned", func(c *Catalog) {
+			c.Tables[0].Partitioned = true
+		}, "table public.users changed (partitioning)"},
 		{"schema added", func(c *Catalog) {
 			c.Schemas = append(c.Schemas, "app")
 		}, "schema app added"},
