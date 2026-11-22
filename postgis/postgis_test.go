@@ -216,14 +216,105 @@ func TestOpsRender(t *testing.T) {
 		{"within", `ST_Within("t"."geom", $1)`},
 		{"contains", `ST_Contains("t"."geom", $1)`},
 		{"equals", `ST_Equals("t"."geom", $1)`},
+		{"disjoint", `ST_Disjoint("t"."geom", $1)`},
+		{"containsProperly", `ST_ContainsProperly("t"."geom", $1)`},
+		{"covers", `ST_Covers("t"."geom", $1)`},
+		{"coveredBy", `ST_CoveredBy("t"."geom", $1)`},
+		{"crosses", `ST_Crosses("t"."geom", $1)`},
+		{"overlaps", `ST_Overlaps("t"."geom", $1)`},
+		{"touches", `ST_Touches("t"."geom", $1)`},
+		{"bboxLeftOf", `"t"."geom" << $1`},
+		{"bboxRightOf", `"t"."geom" >> $1`},
+		{"bboxBelow", `"t"."geom" <<| $1`},
+		{"bboxAbove", `"t"."geom" |>> $1`},
+		{"bboxOverlapsOrLeftOf", `"t"."geom" &< $1`},
+		{"bboxOverlapsOrRightOf", `"t"."geom" &> $1`},
+		{"bboxOverlapsOrBelow", `"t"."geom" &<| $1`},
+		{"bboxOverlapsOrAbove", `"t"."geom" |&> $1`},
+		{"bboxEquals", `"t"."geom" ~= $1`},
+		{"exactlyEquals", `"t"."geom" = $1`},
+		{"orderingEquals", `ST_OrderingEquals("t"."geom", $1)`},
+		{"intersects3D", `ST_3DIntersects("t"."geom", $1)`},
+		{"bboxIntersectsND", `"t"."geom" &&& $1`},
 	}
+	covered := map[string]bool{"dwithin": true, "beyond": true, "isNull": true}
 	for _, tc := range tests {
+		covered[tc.op] = true
 		op, ok := OpByName(tc.op)
 		if !ok {
 			t.Fatalf("operator %q not found", tc.op)
 		}
 		if got := op.Render(`"t"."geom"`, "$1"); got != tc.want {
 			t.Errorf("%s rendered %q, want %q", tc.op, got, tc.want)
+		}
+	}
+	for _, name := range OpNames() {
+		if !covered[name] {
+			t.Errorf("operator %q has no rendering test", name)
+		}
+	}
+}
+
+// TestOpOrderIsAppendOnly pins the original vocabulary's order: consumers
+// generate schemas from Ops, so new operators go at the end.
+func TestOpOrderIsAppendOnly(t *testing.T) {
+	want := []string{
+		"bboxIntersects", "bboxContains", "bboxContainedBy", "intersects",
+		"disjoint", "contains", "containsProperly", "within", "covers",
+		"coveredBy", "crosses", "overlaps", "touches", "equals", "dwithin",
+		"beyond", "isNull",
+		"bboxLeftOf", "bboxRightOf", "bboxBelow", "bboxAbove",
+		"bboxOverlapsOrLeftOf", "bboxOverlapsOrRightOf", "bboxOverlapsOrBelow",
+		"bboxOverlapsOrAbove", "bboxEquals", "exactlyEquals", "orderingEquals",
+		"intersects3D", "bboxIntersectsND",
+	}
+	if got := OpNames(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("OpNames() = %v\nwant %v", got, want)
+	}
+}
+
+// TestOpFlags pins the overload and index flags checked against the PostGIS
+// 3.4 and 3.7 catalogs (pg_operator, pg_amop, pg_proc.prosupport).
+func TestOpFlags(t *testing.T) {
+	tests := []struct {
+		op               string
+		geography, index bool
+	}{
+		{"bboxIntersects", true, true},
+		{"bboxContains", false, true},
+		{"bboxContainedBy", false, true},
+		{"intersects", true, true},
+		{"disjoint", false, false},
+		{"equals", false, true},
+		{"dwithin", true, true},
+		{"beyond", true, false},
+		{"bboxLeftOf", false, true},
+		{"bboxRightOf", false, true},
+		{"bboxBelow", false, true},
+		{"bboxAbove", false, true},
+		{"bboxOverlapsOrLeftOf", false, true},
+		{"bboxOverlapsOrRightOf", false, true},
+		{"bboxOverlapsOrBelow", false, true},
+		{"bboxOverlapsOrAbove", false, true},
+		{"bboxEquals", false, true},
+		{"exactlyEquals", true, false},
+		{"orderingEquals", false, true},
+		{"intersects3D", false, true},
+		{"bboxIntersectsND", false, true},
+	}
+	for _, tc := range tests {
+		op, ok := OpByName(tc.op)
+		if !ok {
+			t.Fatalf("operator %q not found", tc.op)
+		}
+		if op.Geography != tc.geography {
+			t.Errorf("%s Geography = %v, want %v", tc.op, op.Geography, tc.geography)
+		}
+		if op.Index != tc.index {
+			t.Errorf("%s Index = %v, want %v", tc.op, op.Index, tc.index)
+		}
+		if op.Description == "" {
+			t.Errorf("%s has no description", tc.op)
 		}
 	}
 }
@@ -246,11 +337,17 @@ func TestDWithinRender(t *testing.T) {
 
 func TestOpKinds(t *testing.T) {
 	tests := map[string]ArgKind{
-		"bboxIntersects": ArgBBox,
-		"dwithin":        ArgDWithin,
-		"beyond":         ArgDWithin,
-		"isNull":         ArgBoolean,
-		"intersects":     ArgGeometry,
+		"bboxIntersects":   ArgBBox,
+		"dwithin":          ArgDWithin,
+		"beyond":           ArgDWithin,
+		"isNull":           ArgBoolean,
+		"intersects":       ArgGeometry,
+		"bboxContains":     ArgBBox,
+		"bboxLeftOf":       ArgGeometry,
+		"bboxEquals":       ArgGeometry,
+		"intersects3D":     ArgGeometry,
+		"exactlyEquals":    ArgGeometry,
+		"bboxIntersectsND": ArgGeometry,
 	}
 	for name, want := range tests {
 		op, ok := OpByName(name)
@@ -321,5 +418,155 @@ func TestTransformAndSimplify(t *testing.T) {
 	}
 	if got := SimplifySQL(`"t"."g"`, "$1", Geometry); got != `ST_SimplifyPreserveTopology("t"."g", $1)` {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestDerivedSQL(t *testing.T) {
+	const ref = `"t"."g"`
+	tests := []struct {
+		suffix        string
+		geometry, geo string
+	}{
+		{"X", `CASE WHEN ST_GeometryType("t"."g") = 'ST_Point' THEN ST_X("t"."g") END`,
+			`CASE WHEN ST_GeometryType("t"."g"::geometry) = 'ST_Point' THEN ST_X("t"."g"::geometry) END`},
+		{"Y", `CASE WHEN ST_GeometryType("t"."g") = 'ST_Point' THEN ST_Y("t"."g") END`,
+			`CASE WHEN ST_GeometryType("t"."g"::geometry) = 'ST_Point' THEN ST_Y("t"."g"::geometry) END`},
+		{"Z", `CASE WHEN ST_GeometryType("t"."g") = 'ST_Point' THEN ST_Z("t"."g") END`,
+			`CASE WHEN ST_GeometryType("t"."g"::geometry) = 'ST_Point' THEN ST_Z("t"."g"::geometry) END`},
+		{"M", `CASE WHEN ST_GeometryType("t"."g") = 'ST_Point' THEN ST_M("t"."g") END`,
+			`CASE WHEN ST_GeometryType("t"."g"::geometry) = 'ST_Point' THEN ST_M("t"."g"::geometry) END`},
+		{"NumPoints", `ST_NPoints("t"."g")`, `ST_NPoints("t"."g"::geometry)`},
+		{"NumGeometries", `ST_NumGeometries("t"."g")`, `ST_NumGeometries("t"."g"::geometry)`},
+		{"StartPoint",
+			`ST_AsGeoJSON(CASE WHEN ST_GeometryType("t"."g") IN ('ST_LineString', 'ST_CircularString', 'ST_CompoundCurve') THEN ST_StartPoint("t"."g") END)::jsonb`,
+			`ST_AsGeoJSON(CASE WHEN ST_GeometryType("t"."g"::geometry) IN ('ST_LineString', 'ST_CircularString', 'ST_CompoundCurve') THEN ST_StartPoint("t"."g"::geometry) END)::jsonb`},
+		{"EndPoint",
+			`ST_AsGeoJSON(CASE WHEN ST_GeometryType("t"."g") IN ('ST_LineString', 'ST_CircularString', 'ST_CompoundCurve') THEN ST_EndPoint("t"."g") END)::jsonb`,
+			`ST_AsGeoJSON(CASE WHEN ST_GeometryType("t"."g"::geometry) IN ('ST_LineString', 'ST_CircularString', 'ST_CompoundCurve') THEN ST_EndPoint("t"."g"::geometry) END)::jsonb`},
+		{"PointOnSurface", `ST_AsGeoJSON(ST_PointOnSurface("t"."g"))::jsonb`, `ST_AsGeoJSON(ST_PointOnSurface("t"."g"::geometry))::jsonb`},
+		{"Wkt", `ST_AsText("t"."g")`, `ST_AsText("t"."g")`},
+		{"Ewkt", `ST_AsEWKT("t"."g")`, `ST_AsEWKT("t"."g")`},
+		{"IsEmpty", `ST_IsEmpty("t"."g")`, `ST_IsEmpty("t"."g"::geometry)`},
+		{"IsSimple", `ST_IsSimple("t"."g")`, `ST_IsSimple("t"."g"::geometry)`},
+		{"Xmin", `ST_XMin("t"."g")`, `ST_XMin("t"."g"::geometry)`},
+		{"Ymin", `ST_YMin("t"."g")`, `ST_YMin("t"."g"::geometry)`},
+		{"Xmax", `ST_XMax("t"."g")`, `ST_XMax("t"."g"::geometry)`},
+		{"Ymax", `ST_YMax("t"."g")`, `ST_YMax("t"."g"::geometry)`},
+		{"Area", `ST_Area("t"."g")`, `ST_Area("t"."g")`},
+		{"Length", `ST_Length("t"."g")`, `ST_Length("t"."g")`},
+		{"Perimeter", `ST_Perimeter("t"."g")`, `ST_Perimeter("t"."g"::geometry)`},
+		{"Centroid", `ST_AsGeoJSON(ST_Centroid("t"."g"))::jsonb`, `ST_AsGeoJSON(ST_Centroid("t"."g"::geometry))::jsonb`},
+		{"Envelope", `ST_AsGeoJSON(ST_Envelope("t"."g"))::jsonb`, `ST_AsGeoJSON(ST_Envelope("t"."g"::geometry))::jsonb`},
+		{"Srid", `ST_SRID("t"."g")`, `ST_SRID("t"."g")`},
+		{"GeometryType", `ST_GeometryType("t"."g")`, `ST_GeometryType("t"."g"::geometry)`},
+		{"IsValid", `ST_IsValid("t"."g")`, `ST_IsValid("t"."g"::geometry)`},
+	}
+	covered := map[string]bool{}
+	for _, tc := range tests {
+		covered[tc.suffix] = true
+		d, ok := DerivedBySuffix(tc.suffix)
+		if !ok {
+			t.Fatalf("derived %q not found", tc.suffix)
+		}
+		if got := d.SQL(ref, Geometry); got != tc.geometry {
+			t.Errorf("%s geometry SQL = %s\nwant %s", tc.suffix, got, tc.geometry)
+		}
+		if got := d.SQL(ref, Geography); got != tc.geo {
+			t.Errorf("%s geography SQL = %s\nwant %s", tc.suffix, got, tc.geo)
+		}
+	}
+	for _, s := range DerivedSuffixes() {
+		if !covered[s] {
+			t.Errorf("derived %q has no rendering test", s)
+		}
+	}
+}
+
+// TestDerivedOrderIsAppendOnly pins the original accessors' order: consumers
+// generate fields from Deriveds, so new accessors go at the end.
+func TestDerivedOrderIsAppendOnly(t *testing.T) {
+	want := []string{
+		"Area", "Length", "Perimeter", "Centroid", "Envelope", "Srid", "GeometryType", "IsValid",
+		"X", "Y", "Z", "M", "NumPoints", "NumGeometries", "StartPoint", "EndPoint",
+		"PointOnSurface", "Wkt", "Ewkt", "IsEmpty", "IsSimple", "Xmin", "Ymin", "Xmax", "Ymax",
+	}
+	if got := DerivedSuffixes(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("DerivedSuffixes() = %v\nwant %v", got, want)
+	}
+}
+
+func TestDerivedApplies(t *testing.T) {
+	gated := map[string]bool{"X": true, "Y": true, "Z": true, "M": true, "StartPoint": true, "EndPoint": true}
+	tests := []struct {
+		subtype string
+		want    []string
+	}{
+		{"", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"Geometry", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"GeometryZM", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"Wormhole", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"Point", []string{"X", "Y"}},
+		{"point", []string{"X", "Y"}},
+		{"PointZ", []string{"X", "Y", "Z"}},
+		{"PointM", []string{"X", "Y", "M"}},
+		{"POINTZM", []string{"X", "Y", "Z", "M"}},
+		{"MultiPoint", nil},
+		{"LineString", []string{"StartPoint", "EndPoint"}},
+		{"LineStringZ", []string{"StartPoint", "EndPoint"}},
+		{"CircularString", []string{"StartPoint", "EndPoint"}},
+		{"CompoundCurve", []string{"StartPoint", "EndPoint"}},
+		{"MultiLineString", nil},
+		{"Polygon", nil},
+		{"GeometryCollection", nil},
+		{"geometry(PointZ,4326)", []string{"X", "Y", "Z"}},
+		{"geography(Point,4326)", []string{"X", "Y"}},
+		{"geometry(LineStringM)", []string{"StartPoint", "EndPoint"}},
+		{"public.geometry(PointM, 4326)", []string{"X", "Y", "M"}},
+		{`"postgis"."geography"(PointZM,4326)`, []string{"X", "Y", "Z", "M"}},
+		{"geometry(Polygon,3857)", nil},
+		{"geometry(Geometry,3857)", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"geometry", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"text(Point)", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+		{"geometry(Point", []string{"X", "Y", "Z", "M", "StartPoint", "EndPoint"}},
+	}
+	for _, tc := range tests {
+		want := map[string]bool{}
+		for _, s := range tc.want {
+			want[s] = true
+		}
+		for _, d := range Deriveds {
+			exp := !gated[d.Suffix] || want[d.Suffix]
+			if got := d.Applies(tc.subtype); got != exp {
+				t.Errorf("%s.Applies(%q) = %v, want %v", d.Suffix, tc.subtype, got, exp)
+			}
+		}
+	}
+}
+
+func TestDerivedAppliesTo(t *testing.T) {
+	tests := []struct {
+		suffix     string
+		subtype    string
+		hasZ, hasM bool
+		want       bool
+	}{
+		{"Z", "Point", false, false, false},
+		{"Z", "Point", true, false, true},
+		{"M", "Point", true, false, false},
+		{"M", "Point", false, true, true},
+		{"M", "PointM", false, false, true},
+		{"X", "LineString", true, true, false},
+		{"Z", "", false, false, true},
+		{"Z", "Geometry", false, false, true},
+		{"Area", "Point", false, false, true},
+	}
+	for _, tc := range tests {
+		d, ok := DerivedBySuffix(tc.suffix)
+		if !ok {
+			t.Fatalf("derived %q not found", tc.suffix)
+		}
+		if got := d.AppliesTo(tc.subtype, tc.hasZ, tc.hasM); got != tc.want {
+			t.Errorf("%s.AppliesTo(%q, %v, %v) = %v, want %v", tc.suffix, tc.subtype, tc.hasZ, tc.hasM, got, tc.want)
+		}
 	}
 }

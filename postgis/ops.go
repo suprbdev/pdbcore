@@ -17,7 +17,11 @@ type Op struct {
 	Description string
 	// Index reports whether the operator can use a GiST index directly.
 	// Index-usable operators are documented as such so users can tell the
-	// cheap ones from the exact-but-expensive ones.
+	// cheap ones from the exact-but-expensive ones. For an operator without
+	// a geography overload the flag describes geometry columns only: a
+	// geography column is cast to geometry, which a GiST index on the
+	// geography column cannot serve (an expression index on col::geometry
+	// can).
 	Index bool
 	// Geography reports whether PostGIS provides a geography overload. The
 	// others (ST_Within, ST_Contains, ~, @, ...) exist for geometry only, so
@@ -76,7 +80,17 @@ func fn(name string) func(string, string, []string) string {
 //
 // Ordering matters only for schema readability: the index-usable bounding-box
 // operators come first because they are the ones that stay fast on large
-// tables, followed by the exact DE-9IM predicates.
+// tables, followed by the exact DE-9IM predicates. The list is append-only
+// (everything after isNull was added for parity with
+// postgraphile-plugin-connection-filter-postgis) so generated schemas only
+// grow at the end.
+//
+// Operand shapes: bboxIntersects, bboxContains and bboxContainedBy take a
+// BBoxInput envelope (the viewport case). Every other operator, including the
+// directional and equality bounding-box operators (bboxLeftOf, bboxEquals,
+// bboxIntersectsND, ...), takes a geometry, as connection-filter-postgis does:
+// PostGIS compares against that geometry's bounding box, and a geometry can
+// carry the Z/M extent that &&& needs where an envelope cannot.
 var Ops = []Op{
 	{
 		Name: "bboxIntersects", Arg: "BBoxInput", Index: true, Geography: true,
@@ -144,7 +158,7 @@ var Ops = []Op{
 		render:      fn("ST_Touches"),
 	},
 	{
-		Name: "equals", Arg: TypeName,
+		Name: "equals", Arg: TypeName, Index: true,
 		Description: "Geometries are spatially equal, ignoring vertex order (ST_Equals).",
 		render:      fn("ST_Equals"),
 	},
@@ -166,6 +180,71 @@ var Ops = []Op{
 		Name: "isNull", Arg: "Boolean",
 		Description: "Test whether the column is null.",
 		render:      nil, // handled structurally by the compiler
+	},
+	{
+		Name: "bboxLeftOf", Arg: TypeName, Index: true,
+		Description: "This column's bounding box is strictly to the left of the given geometry's (<<).",
+		render:      binary("<<"),
+	},
+	{
+		Name: "bboxRightOf", Arg: TypeName, Index: true,
+		Description: "This column's bounding box is strictly to the right of the given geometry's (>>).",
+		render:      binary(">>"),
+	},
+	{
+		Name: "bboxBelow", Arg: TypeName, Index: true,
+		Description: "This column's bounding box is strictly below the given geometry's (<<|).",
+		render:      binary("<<|"),
+	},
+	{
+		Name: "bboxAbove", Arg: TypeName, Index: true,
+		Description: "This column's bounding box is strictly above the given geometry's (|>>).",
+		render:      binary("|>>"),
+	},
+	{
+		Name: "bboxOverlapsOrLeftOf", Arg: TypeName, Index: true,
+		Description: "This column's bounding box overlaps or is to the left of the given geometry's (&<).",
+		render:      binary("&<"),
+	},
+	{
+		Name: "bboxOverlapsOrRightOf", Arg: TypeName, Index: true,
+		Description: "This column's bounding box overlaps or is to the right of the given geometry's (&>).",
+		render:      binary("&>"),
+	},
+	{
+		Name: "bboxOverlapsOrBelow", Arg: TypeName, Index: true,
+		Description: "This column's bounding box overlaps or is below the given geometry's (&<|).",
+		render:      binary("&<|"),
+	},
+	{
+		Name: "bboxOverlapsOrAbove", Arg: TypeName, Index: true,
+		Description: "This column's bounding box overlaps or is above the given geometry's (|&>).",
+		render:      binary("|&>"),
+	},
+	{
+		Name: "bboxEquals", Arg: TypeName, Index: true,
+		Description: "This column's bounding box is the same as the given geometry's (~=).",
+		render:      binary("~="),
+	},
+	{
+		Name: "exactlyEquals", Arg: TypeName, Geography: true,
+		Description: "Same coordinates in the same order and the same SRID (=). Uses a B-tree index, not a GiST one.",
+		render:      binary("="),
+	},
+	{
+		Name: "orderingEquals", Arg: TypeName, Index: true,
+		Description: "Geometries are equal and their vertices are in the same order (ST_OrderingEquals).",
+		render:      fn("ST_OrderingEquals"),
+	},
+	{
+		Name: "intersects3D", Arg: TypeName, Index: true,
+		Description: "Geometries share any portion of 3D space (ST_3DIntersects). The default 2D GiST index prefilters on the 2D bounding box; an n-D GiST index (gist_geometry_ops_nd) also prunes on Z.",
+		render:      fn("ST_3DIntersects"),
+	},
+	{
+		Name: "bboxIntersectsND", Arg: TypeName, Index: true,
+		Description: "n-D bounding boxes (including Z and M) overlap (&&&). Uses an n-D GiST index (gist_geometry_ops_nd), not the default 2D one.",
+		render:      binary("&&&"),
 	},
 }
 
@@ -226,12 +305,21 @@ type Derived struct {
 	GeoJSON bool
 	// sql builds the expression from the column reference and flavour.
 	sql func(ref string, f Flavour) string
+	// applies restricts the accessor to some typmod geometry types; nil
+	// means every type.
+	applies func(geomSubtype) bool
 }
 
 // Deriveds are the derived accessors generated for every spatial column.
 //
 // Each is a pure function of the column, so they compile into the same single
-// statement as an ordinary column read — no extra round trip.
+// statement as an ordinary column read — no extra round trip. Accessors that
+// PostGIS only defines for one geometry type (X, Y, Z, M, StartPoint,
+// EndPoint) render a CASE guard on ST_GeometryType that yields NULL for every
+// other type instead of an error, so their SQL references the column twice.
+// [Derived.Applies] reports which accessors are worth exposing once a
+// column's typmod is known. The list is append-only so generated schemas
+// only grow at the end.
 var Deriveds = []Derived{
 	{
 		Suffix: "Area", Type: "Float",
@@ -303,6 +391,232 @@ var Deriveds = []Derived{
 			return "ST_IsValid(" + ref + ")"
 		},
 	},
+	{
+		Suffix: "X", Type: "Float",
+		Description: "X coordinate (longitude for geography) of a point (ST_X); null for other geometry types.",
+		sql:         onlyTypes("ST_X", "ST_Point"),
+		applies:     isPoint,
+	},
+	{
+		Suffix: "Y", Type: "Float",
+		Description: "Y coordinate (latitude for geography) of a point (ST_Y); null for other geometry types.",
+		sql:         onlyTypes("ST_Y", "ST_Point"),
+		applies:     isPoint,
+	},
+	{
+		Suffix: "Z", Type: "Float",
+		Description: "Z coordinate of a point (ST_Z); null for other geometry types or a point without Z.",
+		sql:         onlyTypes("ST_Z", "ST_Point"),
+		applies:     func(s geomSubtype) bool { return isPoint(s) && s.z },
+	},
+	{
+		Suffix: "M", Type: "Float",
+		Description: "M coordinate of a point (ST_M); null for other geometry types or a point without M.",
+		sql:         onlyTypes("ST_M", "ST_Point"),
+		applies:     func(s geomSubtype) bool { return isPoint(s) && s.m },
+	},
+	{
+		Suffix: "NumPoints", Type: "Int",
+		Description: "Number of vertices in the geometry (ST_NPoints).",
+		sql:         unary("ST_NPoints"),
+	},
+	{
+		Suffix: "NumGeometries", Type: "Int",
+		Description: "Number of member geometries: 1 for a single geometry, 0 when empty (ST_NumGeometries).",
+		sql:         unary("ST_NumGeometries"),
+	},
+	{
+		Suffix: "StartPoint", Type: TypeName, GeoJSON: true,
+		Description: "First point of a LineString, CircularString or CompoundCurve (ST_StartPoint), as GeoJSON; null for other geometry types.",
+		sql:         onlyTypes("ST_StartPoint", curveTypes...),
+		applies:     isCurve,
+	},
+	{
+		Suffix: "EndPoint", Type: TypeName, GeoJSON: true,
+		Description: "Last point of a LineString, CircularString or CompoundCurve (ST_EndPoint), as GeoJSON; null for other geometry types.",
+		sql:         onlyTypes("ST_EndPoint", curveTypes...),
+		applies:     isCurve,
+	},
+	{
+		Suffix: "PointOnSurface", Type: TypeName, GeoJSON: true,
+		Description: "A point guaranteed to lie on the geometry (ST_PointOnSurface), as GeoJSON.",
+		sql:         unary("ST_PointOnSurface"),
+	},
+	{
+		Suffix: "Wkt", Type: "String",
+		Description: "Well-Known Text of the geometry, without SRID (ST_AsText).",
+		sql:         func(ref string, _ Flavour) string { return "ST_AsText(" + ref + ")" },
+	},
+	{
+		Suffix: "Ewkt", Type: "String",
+		Description: "Extended Well-Known Text of the geometry, with an SRID=n; prefix (ST_AsEWKT).",
+		sql:         func(ref string, _ Flavour) string { return "ST_AsEWKT(" + ref + ")" },
+	},
+	{
+		Suffix: "IsEmpty", Type: "Boolean",
+		Description: "Whether the geometry is empty (ST_IsEmpty).",
+		sql:         unary("ST_IsEmpty"),
+	},
+	{
+		Suffix: "IsSimple", Type: "Boolean",
+		Description: "Whether the geometry has no self-intersections or self-tangencies (ST_IsSimple).",
+		sql:         unary("ST_IsSimple"),
+	},
+	{
+		Suffix: "Xmin", Type: "Float",
+		Description: "Minimum X of the bounding box (ST_XMin); null when empty.",
+		sql:         unary("ST_XMin"),
+	},
+	{
+		Suffix: "Ymin", Type: "Float",
+		Description: "Minimum Y of the bounding box (ST_YMin); null when empty.",
+		sql:         unary("ST_YMin"),
+	},
+	{
+		Suffix: "Xmax", Type: "Float",
+		Description: "Maximum X of the bounding box (ST_XMax); null when empty.",
+		sql:         unary("ST_XMax"),
+	},
+	{
+		Suffix: "Ymax", Type: "Float",
+		Description: "Maximum Y of the bounding box (ST_YMax); null when empty.",
+		sql:         unary("ST_YMax"),
+	},
+}
+
+// curveTypes are the single-curve types ST_EndPoint answers for. PostGIS 3.2+
+// ST_StartPoint also answers for any other geometry, so both are guarded to
+// keep the pair consistent.
+var curveTypes = []string{"ST_LineString", "ST_CircularString", "ST_CompoundCurve"}
+
+// asGeometry casts a geography reference to geometry for functions that have
+// no geography overload.
+func asGeometry(ref string, f Flavour) string {
+	if f == Geography {
+		return ref + "::geometry"
+	}
+	return ref
+}
+
+// unary builds a derived accessor calling a geometry-only PostGIS function.
+func unary(name string) func(string, Flavour) string {
+	return func(ref string, f Flavour) string {
+		return name + "(" + asGeometry(ref, f) + ")"
+	}
+}
+
+// onlyTypes builds a derived accessor calling a geometry-only PostGIS function
+// that is NULL unless ST_GeometryType is one of types (ST_X raises an error on
+// a non-point rather than returning NULL).
+func onlyTypes(name string, types ...string) func(string, Flavour) string {
+	return func(ref string, f Flavour) string {
+		g := asGeometry(ref, f)
+		quoted := make([]string, len(types))
+		for i, t := range types {
+			quoted[i] = "'" + t + "'"
+		}
+		cond := " = " + quoted[0]
+		if len(quoted) > 1 {
+			cond = " IN (" + strings.Join(quoted, ", ") + ")"
+		}
+		return "CASE WHEN ST_GeometryType(" + g + ")" + cond + " THEN " + name + "(" + g + ") END"
+	}
+}
+
+// geomSubtype is a parsed typmod geometry type ("PointZ" -> point, z).
+type geomSubtype struct {
+	base string
+	z, m bool
+}
+
+func isPoint(s geomSubtype) bool { return s.base == "point" }
+
+func isCurve(s geomSubtype) bool {
+	switch s.base {
+	case "linestring", "circularstring", "compoundcurve":
+		return true
+	}
+	return false
+}
+
+// typmodBases are the lower-cased geometry type names a typmod can carry.
+var typmodBases = map[string]bool{
+	"geometry": true, "point": true, "linestring": true, "polygon": true,
+	"multipoint": true, "multilinestring": true, "multipolygon": true,
+	"geometrycollection": true, "circularstring": true, "compoundcurve": true,
+	"curvepolygon": true, "multicurve": true, "multisurface": true,
+	"polyhedralsurface": true, "triangle": true, "tin": true,
+}
+
+// parseSubtype splits a typmod geometry type such as "PointZ",
+// "MULTIPOLYGONZM" or a format_type spelling such as
+// "public.geometry(PointZ,4326)" into its base type and dimension flags. ok
+// is false for an empty or unrecognised spelling.
+func parseSubtype(s string) (geomSubtype, bool) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	if inner, ok := unwrapFormatType(t); ok {
+		t = inner
+	}
+	if typmodBases[t] {
+		return geomSubtype{base: t}, true
+	}
+	for _, suf := range []struct {
+		s    string
+		z, m bool
+	}{{"zm", true, true}, {"z", true, false}, {"m", false, true}} {
+		if base, ok := strings.CutSuffix(t, suf.s); ok && typmodBases[base] {
+			return geomSubtype{base: base, z: suf.z, m: suf.m}, true
+		}
+	}
+	return geomSubtype{}, false
+}
+
+// unwrapFormatType extracts the geometry type from a lower-cased format_type
+// spelling: an optionally schema-qualified, optionally quoted geometry or
+// geography type name followed by "(type[,srid])".
+func unwrapFormatType(t string) (string, bool) {
+	name, rest, ok := strings.Cut(t, "(")
+	if !ok || !strings.HasSuffix(rest, ")") {
+		return "", false
+	}
+	name = strings.ReplaceAll(strings.TrimSpace(name), `"`, "")
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	if name != "geometry" && name != "geography" {
+		return "", false
+	}
+	typ, _, _ := strings.Cut(strings.TrimSuffix(rest, ")"), ",")
+	return strings.TrimSpace(typ), true
+}
+
+// Applies reports whether the accessor can return a non-null value on a
+// column whose typmod geometry type is subtype, spelled as
+// postgis_typmod_type reports it ("Point", "PointZ", "MultiPolygonZM") or as
+// the whole format_type ("geometry(PointZ,4326)"), case-insensitively. An
+// empty or unrecognised subtype, or the generic "Geometry", leaves the column
+// unconstrained and every accessor applies. Callers use it to skip accessors
+// that would always be null, such as X on a LineString column or Z on a 2D
+// Point column.
+func (d Derived) Applies(subtype string) bool {
+	return d.AppliesTo(subtype, false, false)
+}
+
+// AppliesTo is [Derived.Applies] with the typmod's Z and M dimensions given
+// separately, for callers that hold the base type ("Point") and the
+// dimension flags apart. hasZ and hasM add to any dimensions subtype already
+// spells.
+func (d Derived) AppliesTo(subtype string, hasZ, hasM bool) bool {
+	if d.applies == nil {
+		return true
+	}
+	st, ok := parseSubtype(subtype)
+	if !ok || st.base == "geometry" {
+		return true
+	}
+	st.z = st.z || hasZ
+	st.m = st.m || hasM
+	return d.applies(st)
 }
 
 // DerivedBySuffix looks up a derived accessor.
