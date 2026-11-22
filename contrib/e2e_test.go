@@ -14,6 +14,7 @@ import (
 
 	"github.com/suprbdev/pdbcore/contrib"
 	"github.com/suprbdev/pdbcore/introspect"
+	"github.com/suprbdev/pdbcore/pgexec"
 )
 
 const (
@@ -718,6 +719,114 @@ func TestUnboundOnSearchPath(t *testing.T) {
 			if err := d.query(q, a.vals, &got); err != nil {
 				t.Errorf("%s %s: %v\n%s", v.Name, op.Name, err, q)
 			}
+		}
+	}
+}
+
+// TestTrgmOldVersionLive installs pg_trgm 1.3, which predates the strict
+// word-similarity operators, and checks ForColumn leaves them out and every
+// remaining operator and expression runs.
+func TestTrgmOldVersionLive(t *testing.T) {
+	url := os.Getenv("PDBCORE_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("PDBCORE_TEST_DATABASE_URL not set; run `make test-e2e`")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	var installed bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')`).Scan(&installed); err != nil {
+		t.Fatal(err)
+	}
+	if installed {
+		t.Skip("pg_trgm is already installed in this database")
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	d := &liveDB{t: t, ctx: ctx, tx: tx}
+	d.exec(`CREATE SCHEMA ` + quote(extSchema))
+	d.exec(`CREATE SCHEMA ` + dataSchema)
+	d.exec(`CREATE EXTENSION pg_trgm VERSION '1.3' SCHEMA ` + quote(extSchema))
+	d.exec(`CREATE TABLE ` + dataSchema + `.words (w text)`)
+	d.exec(`INSERT INTO ` + dataSchema + `.words VALUES ('hello world'), (NULL)`)
+	d.exec(`SET LOCAL search_path TO ` + dataSchema)
+	if d.cat, err = introspect.Introspect(ctx, tx, []string{dataSchema}); err != nil {
+		t.Fatal(err)
+	}
+	if v := d.cat.Extension(contrib.ExtTrgm).Version; v != "1.3" {
+		t.Fatalf("pg_trgm version %q", v)
+	}
+	if err := d.query("SELECT 'a'::text OPERATOR("+quote(extSchema)+".<<%) 'b'::text", nil, new(bool)); err == nil {
+		t.Fatal("pg_trgm 1.3 unexpectedly has <<%")
+	}
+	vs := contrib.ForColumn(d.cat, d.cat.Table(dataSchema, "words").Column("w"))
+	v := vs[len(vs)-1]
+	if v.Name != contrib.VocabTrgm {
+		t.Fatalf("vocabularies %v", vs)
+	}
+	if got := strings.Join(v.OpNames(), ","); got != "similarTo,wordSimilarTo" {
+		t.Errorf("ops = %s", got)
+	}
+	for _, op := range v.Ops {
+		var n int64
+		if err := d.query("SELECT count(*) FROM words AS t WHERE "+op.Render("t.w", "$1"), []any{"hello"}, &n); err != nil {
+			t.Errorf("%s: %v", op.Name, err)
+		}
+	}
+	for _, e := range v.Exprs {
+		if strings.HasPrefix(e.Name, "strict") {
+			t.Errorf("expr %s offered on pg_trgm 1.3", e.Name)
+		}
+		var r any
+		if err := d.query("SELECT max("+e.Render("t.w", "$1")+") FROM words AS t", []any{"hello"}, &r); err != nil {
+			t.Errorf("%s: %v", e.Name, err)
+		}
+	}
+}
+
+// TestOperandErrorsClassifyLive checks that malformed operands surface as
+// user-input errors under pgexec.Classify.
+func TestOperandErrorsClassifyLive(t *testing.T) {
+	d := openLive(t)
+	tests := []struct {
+		typ, op string
+		col     any
+		operand any
+	}{
+		{"tsvector", "matches", "cat:1", "a b"},
+		{"tsvector", "matches", "cat:1", "a &"},
+		{"tsvector", "matchesWebsearch", "cat:1", map[string]any{"query": "cat", "config": "klingon"}},
+		{"text", "matchesPlain", "cat", map[string]any{"query": "cat", "config": "klingon"}},
+		{"ltree", "ancestorOf", "a.b", "a..b"},
+		{"ltree", "matchesLquery", "a.b", "a.b.*{"},
+		{"ltree", "matchesAnyLquery", "a.b", []any{"*{2,1}"}},
+		{"ltree", "matchesLtxtquery", "a.b", "(a"},
+		{"ltree", "matchesLtxtquery", "a.b", "a | | b"},
+	}
+	for _, tc := range tests {
+		vs := contrib.ForType(d.cat, tc.typ, false)
+		op, _ := contrib.FindOp(vs, tc.op)
+		var a args
+		var colSQL string
+		if vs[0].Codec != nil {
+			colSQL = vs[0].Codec.SQL(a.add(tc.col)...)
+		} else {
+			colSQL = textCast("text", a.add(tc.col)[0])
+		}
+		ps, err := op.Params(tc.operand)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := "SELECT " + op.Render("t.c", a.add(ps...)...) + " FROM (SELECT " + colSQL + " AS c) AS t"
+		err = d.query(q, a.vals, new(bool))
+		if c := pgexec.Classify(err, pgexec.Prod); err == nil || c.Class != pgexec.UserInput || c.Message == "invalid operation" {
+			t.Errorf("%s %s(%v): %v -> %v %q", tc.typ, tc.op, tc.operand, err, c.Class, c.Message)
 		}
 	}
 }

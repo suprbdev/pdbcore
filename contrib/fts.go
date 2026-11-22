@@ -99,9 +99,9 @@ func (q FullTextQuery) Params() []any {
 // configuration placeholder ("" omits it).
 func TSQuerySQL(v Variant, query, config string) string {
 	if config == "" {
-		return v.Func() + "(" + query + "::text)"
+		return v.Func() + "(" + atom(query) + "::text)"
 	}
-	return v.Func() + "(" + config + "::regconfig, " + query + "::text)"
+	return v.Func() + "(" + atom(config) + "::regconfig, " + atom(query) + "::text)"
 }
 
 // TSVectorSQL renders to_tsvector over a text expression with an optional
@@ -119,7 +119,7 @@ func TSVectorSQL(col, config string) string {
 	if config == "" {
 		return "to_tsvector(" + col + ")"
 	}
-	return "to_tsvector(" + config + "::regconfig, " + col + ")"
+	return "to_tsvector(" + atom(config) + "::regconfig, " + col + ")"
 }
 
 // RankSQL renders a relevance expression over a tsvector and a tsquery
@@ -157,7 +157,7 @@ func FullText() Vocabulary {
 			Description: vt.desc + " An optional config names the text search configuration of the query.",
 			render: func(_ qual, col string, a []string) string {
 				q, c := ftsArgs(a)
-				return col + " @@ " + TSQuerySQL(vt.v, q, c)
+				return paren(col) + " @@ " + TSQuerySQL(vt.v, q, c)
 			},
 			rank: func(_ qual, fn, col string, a []string) string {
 				q, c := ftsArgs(a)
@@ -169,7 +169,7 @@ func FullText() Vocabulary {
 		Name: VocabFullText, Type: "tsvector", Ops: ops,
 		Codec: &Codec{
 			Arg: ArgText,
-			sql: func(_ qual, a []string) string { return a[0] + "::tsvector" },
+			sql: func(_ qual, a []string) string { return atom(a[0]) + "::tsvector" },
 		},
 	}
 }

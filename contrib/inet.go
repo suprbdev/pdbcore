@@ -11,7 +11,9 @@ func Inet(typeName string) (Vocabulary, bool) {
 	infix := func(name, op, desc string) Op {
 		return Op{
 			Name: name, Arg: ArgText, Index: idx, Description: desc,
-			render: func(_ qual, col string, a []string) string { return col + " " + op + " " + a[0] + "::inet" },
+			render: func(_ qual, col string, a []string) string {
+				return paren(col) + " " + op + " " + atom(a[0]) + "::inet"
+			},
 		}
 	}
 	fn := func(name, cast string) func(qual, string) string {
@@ -34,7 +36,7 @@ func Inet(typeName string) (Vocabulary, bool) {
 		},
 		Codec: &Codec{
 			Arg: ArgText,
-			sql: func(_ qual, a []string) string { return a[0] + "::" + typeName },
+			sql: func(_ qual, a []string) string { return atom(a[0]) + "::" + typeName },
 		},
 	}, true
 }

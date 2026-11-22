@@ -2,7 +2,7 @@ package contrib
 
 func ltreeInfix(op, operandType string) func(qual, string, []string) string {
 	return func(q qual, col string, a []string) string {
-		return col + " " + q.op(op) + " " + q.cast(a[0], operandType)
+		return paren(col) + " " + q.op(op) + " " + q.cast(a[0], operandType)
 	}
 }
 

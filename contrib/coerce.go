@@ -53,10 +53,14 @@ func Text(v any) (string, error) {
 }
 
 // TextList coerces a list-of-strings operand ([]any of strings or
-// []string). Null elements are rejected.
+// []string). Null elements are rejected; a nil slice becomes an empty list,
+// never a NULL parameter.
 func TextList(v any) ([]string, error) {
 	switch l := v.(type) {
 	case []string:
+		if l == nil {
+			return []string{}, nil
+		}
 		return l, nil
 	case []any:
 		out := make([]string, len(l))

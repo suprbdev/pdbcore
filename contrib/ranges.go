@@ -349,13 +349,13 @@ func (rt rangeType) parseMulti(v any) ([]any, error) {
 
 // sql renders the range constructor over three placeholders.
 func (rt rangeType) sql(a []string) string {
-	return rt.name + "(" + a[0] + "::" + rt.elem + ", " + a[1] + "::" + rt.elem + ", " + a[2] + "::text)"
+	return rt.name + "(" + atom(a[0]) + "::" + rt.elem + ", " + atom(a[1]) + "::" + rt.elem + ", " + atom(a[2]) + "::text)"
 }
 
 // multiSQL renders the multirange constructor over three array placeholders.
 func (rt rangeType) multiSQL(a []string) string {
 	return rt.multi + "(VARIADIC ARRAY(SELECT " + rt.name + "(__l, __u, __b) FROM unnest(" +
-		a[0] + "::" + rt.elem + "[], " + a[1] + "::" + rt.elem + "[], " + a[2] + "::text[]) AS __r(__l, __u, __b)))"
+		atom(a[0]) + "::" + rt.elem + "[], " + atom(a[1]) + "::" + rt.elem + "[], " + atom(a[2]) + "::text[]) AS __r(__l, __u, __b)))"
 }
 
 // rangeJSON renders a non-null range expression as the RangeValue object.
@@ -400,7 +400,7 @@ func rangeOps(rt rangeType, idx []IndexHint) []Op {
 	rangeOp := func(name, op, desc string) Op {
 		return Op{
 			Name: name, Arg: ArgRange, Index: idx, Description: desc, params: rt.parse,
-			render: func(_ qual, col string, a []string) string { return col + " " + op + " " + rt.sql(a) },
+			render: func(_ qual, col string, a []string) string { return paren(col) + " " + op + " " + rt.sql(a) },
 		}
 	}
 	return []Op{
@@ -410,7 +410,7 @@ func rangeOps(rt rangeType, idx []IndexHint) []Op {
 			Name: "containsElement", Arg: ArgElement, Index: idx, params: rt.parseElement,
 			Description: "Contains the given value (@> element).",
 			render: func(_ qual, col string, a []string) string {
-				return col + " @> " + a[0] + "::" + rt.elem
+				return paren(col) + " @> " + atom(a[0]) + "::" + rt.elem
 			},
 		},
 		rangeOp("containedBy", "<@", "Is contained by the given range (<@)."),

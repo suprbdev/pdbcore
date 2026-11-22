@@ -26,7 +26,7 @@ fixture both products are tested against.
 | `postgis` | spatial value layer: flavour detection, GeoJSON/WKT/EWKT parsing to one bound parameter, filter `Ops`, derived accessors, transform/simplify/KNN/distance SQL |
 | `contrib` | operator vocabularies + value coercion for full-text search, `pg_trgm`, `hstore`, `ltree`, `citext`, range/multirange and `inet`/`cidr` columns (see [Contrib vocabularies](#contrib-vocabularies)): `ForColumn`/`ForType` lookup bound to the extension's schema, filter `Op`s, ordering `Expr`s, `Accessor`s, value `Codec`s |
 | `auth` | `Authenticator`: JWT (HS*, JWKS RS*/ES* with kid-matched cache), trusted-gateway claim headers with `TrustedProxies`, role resolution and allowlist; `ErrInvalidToken` / `ErrRoleNotAllowed` |
-| `pgexec` | pool `Connect`, `RunTx` (isolation, `SET LOCAL ROLE`, claims via `set_config(prefix.k, v, true)`, 40001/40P01 retries), `Identity`, `Classify` PG errors into classes with `dev`/`prod`/`strict` message policies, `QuoteIdent`/`ValidRole`/`ValidClaimKey` |
+| `pgexec` | pool `Connect`, `RunTx` (isolation, `SET LOCAL ROLE`, claims via `set_config(prefix.k, v, true)`, 40001/40P01 retries), `Identity`, `Classify` PG errors into classes with `dev`/`prod`/`strict` message policies (malformed tsquery/ltree operands and unknown text search configs are user input), `QuoteIdent`/`ValidRole`/`ValidClaimKey` |
 | `jwtmint` | composite-typed function results → signed HS256 JWT (`MintsFunction`, `Mint`, `Sign`) |
 | `httpx` | CORS + preflight, gzip, `Healthz`, `ListenAndServe` with the standard timeouts and graceful shutdown |
 | `confx` | koanf `Load` (defaults < YAML < env < changed flags), env key mapper (`_` → `.`, `__` → `_`, comma-separated lists), `ExampleYAML` from `koanf`/`doc` tags, `Discover`, `ParseTrustedProxy`, shared config sections (`Database`, `Schema`, `Filters`, `RLS`/`Auth`, `TX`, `Watch`, `Errors`, `Plugins`, `Log`) + `Validate*` helpers, `AuthConfig(RLS)` |
@@ -75,17 +75,18 @@ replace github.com/suprbdev/pdbcore => ../pdbcore
 (by its resolved base type, so domains work; extension types only when the
 catalog records the extension). Each is bound to the extension's schema from
 `Catalog.Extensions`, so types, functions and operators render
-schema-qualified (`"ext".nlevel(c)`, `c OPERATOR("ext".@>) $1::"ext".ltree`)
+schema-qualified (`"ext".nlevel(c)`, `(c) OPERATOR("ext".@>) $1::"ext".ltree`)
 and work when that schema is not on the `search_path`. Every `Op`/`Expr`
 renders from the column expression and placeholders only — values travel as
 bind parameters (`op.Params(v)` coerces the operand), so compiled SQL stays a
-pure function of the query shape.
+pure function of the query shape. Infix operands are parenthesized, so a
+non-atomic column expression groups the same bound or unbound.
 
 | Vocabulary | Column types | Operators | Exprs / accessors | Codec | Index |
 |---|---|---|---|---|---|
 | `fulltext` | `tsvector` | `matches` (`to_tsquery`, PostgREST `fts`), `matchesPlain` (`plainto_tsquery`, `plfts`), `matchesPhrase` (`phraseto_tsquery`, `phfts`), `matchesWebsearch` (`websearch_to_tsquery`, `wfts`); operand `"query"` or `{query, config}` (`$n::regconfig`); `Op.RankSQL` → `ts_rank` / `ts_rank_cd` | — | text ↔ `$1::tsvector` | GIN, GiST |
 | `textsearch` | `text`, `varchar`, `bpchar`, `citext` | same four, over `to_tsvector([config,] col)` | — | — | GIN expression index on `to_tsvector('cfg', col)`, only when queries pass that config (the config-less form is not indexable); prefer a generated `tsvector` column |
-| `trgm` (`pg_trgm`) | text-like | `similarTo` (`%`), `wordSimilarTo` (`<%`), `strictWordSimilarTo` (`<<%`) | `similarity`, `wordSimilarity`, `strictWordSimilarity`; `distance` (`<->`), `wordDistance` (`<<->`), `strictWordDistance` (`<<<->`) for ordering | — | GIN/GiST `gin_trgm_ops`/`gist_trgm_ops`; KNN ordering GiST only |
+| `trgm` (`pg_trgm`) | text-like | `similarTo` (`%`), `wordSimilarTo` (`<%`), `strictWordSimilarTo` (`<<%`) | `similarity`, `wordSimilarity`, `strictWordSimilarity`; `distance` (`<->`), `wordDistance` (`<<->`), `strictWordDistance` (`<<<->`) for ordering | — | GIN/GiST `gin_trgm_ops`/`gist_trgm_ops`; KNN ordering GiST only; none on `bpchar` (only an expression index on `col::text`). Word ops need pg_trgm 1.2, strict ones 1.4 (`Vocabulary.ForVersion`, applied by `ForColumn` from `Extension.Version`) |
 | `citext` | `citext` | — (text vocabularies apply) | — | `$1::"ext".citext`; use `Vocabulary.Operator("=")` — unqualified or text-typed comparisons fall back to case-sensitive `text` operators | — |
 | `hstore` | `hstore` | `hasKey` (`?`), `hasAllKeys` (`?&`), `hasAnyKeys` (`?\|`), `contains` (`@>`), `containedBy` (`<@`) | — | JSON object of string → string\|null ↔ `hstore($1::text[])` / `hstore_to_jsonb` | GIN `gin_hstore_ops`, GiST `gist_hstore_ops` (not `<@`) |
 | `ltree` | `ltree` | `ancestorOf` (`@>`), `descendantOf` (`<@`), `ancestorOfAny` / `descendantOfAny` (`ltree[]` operand), `matchesLquery` (`~`), `matchesAnyLquery` (`?` `lquery[]`), `matchesLtxtquery` (`@`) | `nlevel` | text ↔ `$1::"ext".ltree` | GiST `gist_ltree_ops` (not the `*Any` forms) |

@@ -5,7 +5,7 @@ package contrib
 // schema qualifies the extension's type and function ("" for none).
 func HstoreSQL(schema, placeholder string) string {
 	q := qual{schema: schema}
-	return q.fn("hstore") + "(" + placeholder + "::text[])"
+	return q.fn("hstore") + "(" + atom(placeholder) + "::text[])"
 }
 
 // HstoreOutputSQL renders an hstore reference as a jsonb object of string
@@ -25,35 +25,35 @@ func Hstore() Vocabulary {
 				Name: "hasKey", Arg: ArgText, Index: idx, Extension: ExtHstore,
 				Description: "Contains the given key (?).",
 				render: func(q qual, col string, a []string) string {
-					return col + " " + q.op("?") + " " + a[0] + "::text"
+					return paren(col) + " " + q.op("?") + " " + atom(a[0]) + "::text"
 				},
 			},
 			{
 				Name: "hasAllKeys", Arg: ArgTextList, Index: idx, Extension: ExtHstore,
 				Description: "Contains all of the given keys (?&).",
 				render: func(q qual, col string, a []string) string {
-					return col + " " + q.op("?&") + " " + a[0] + "::text[]"
+					return paren(col) + " " + q.op("?&") + " " + atom(a[0]) + "::text[]"
 				},
 			},
 			{
 				Name: "hasAnyKeys", Arg: ArgTextList, Index: idx, Extension: ExtHstore,
 				Description: "Contains any of the given keys (?|).",
 				render: func(q qual, col string, a []string) string {
-					return col + " " + q.op("?|") + " " + a[0] + "::text[]"
+					return paren(col) + " " + q.op("?|") + " " + atom(a[0]) + "::text[]"
 				},
 			},
 			{
 				Name: "contains", Arg: ArgHstore, Index: idx, Extension: ExtHstore,
 				Description: "Contains every key/value pair of the given object (@>).",
 				render: func(q qual, col string, a []string) string {
-					return col + " " + q.op("@>") + " " + HstoreSQL(q.schema, a[0])
+					return paren(col) + " " + q.op("@>") + " " + HstoreSQL(q.schema, a[0])
 				},
 			},
 			{
 				Name: "containedBy", Arg: ArgHstore, Extension: ExtHstore,
 				Description: "Every key/value pair is in the given object (<@). Cannot use an index.",
 				render: func(q qual, col string, a []string) string {
-					return col + " " + q.op("<@") + " " + HstoreSQL(q.schema, a[0])
+					return paren(col) + " " + q.op("<@") + " " + HstoreSQL(q.schema, a[0])
 				},
 			},
 		},

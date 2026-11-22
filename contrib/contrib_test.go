@@ -39,52 +39,52 @@ func TestOpRenders(t *testing.T) {
 		n    int
 		want string
 	}{
-		{contrib.FullText(), "matches", 1, "t.c @@ to_tsquery($1::text)"},
-		{contrib.FullText(), "matches", 2, "t.c @@ to_tsquery($2::regconfig, $1::text)"},
-		{contrib.FullText(), "matchesPlain", 2, "t.c @@ plainto_tsquery($2::regconfig, $1::text)"},
-		{contrib.FullText(), "matchesPhrase", 1, "t.c @@ phraseto_tsquery($1::text)"},
-		{contrib.FullText(), "matchesWebsearch", 2, "t.c @@ websearch_to_tsquery($2::regconfig, $1::text)"},
+		{contrib.FullText(), "matches", 1, "(t.c) @@ to_tsquery($1::text)"},
+		{contrib.FullText(), "matches", 2, "(t.c) @@ to_tsquery($2::regconfig, $1::text)"},
+		{contrib.FullText(), "matchesPlain", 2, "(t.c) @@ plainto_tsquery($2::regconfig, $1::text)"},
+		{contrib.FullText(), "matchesPhrase", 1, "(t.c) @@ phraseto_tsquery($1::text)"},
+		{contrib.FullText(), "matchesWebsearch", 2, "(t.c) @@ websearch_to_tsquery($2::regconfig, $1::text)"},
 		{contrib.TextSearch("text"), "matches", 1, "to_tsvector(t.c) @@ to_tsquery($1::text)"},
 		{contrib.TextSearch("text"), "matchesWebsearch", 2, "to_tsvector($2::regconfig, t.c) @@ websearch_to_tsquery($2::regconfig, $1::text)"},
-		{contrib.Trgm("text"), "similarTo", 1, "t.c % $1::text"},
-		{contrib.Trgm("text").Bind("ext"), "similarTo", 1, `t.c OPERATOR("ext".%) $1::text`},
-		{contrib.Trgm("text").Bind("ext"), "wordSimilarTo", 1, `t.c OPERATOR("ext".%>) $1::text`},
-		{contrib.Trgm("text").Bind("ext"), "strictWordSimilarTo", 1, `t.c OPERATOR("ext".%>>) $1::text`},
-		{contrib.Hstore().Bind("ext"), "hasKey", 1, `t.c OPERATOR("ext".?) $1::text`},
-		{contrib.Hstore().Bind("ext"), "hasAllKeys", 1, `t.c OPERATOR("ext".?&) $1::text[]`},
-		{contrib.Hstore().Bind("ext"), "hasAnyKeys", 1, `t.c OPERATOR("ext".?|) $1::text[]`},
-		{contrib.Hstore().Bind("ext"), "contains", 1, `t.c OPERATOR("ext".@>) "ext".hstore($1::text[])`},
-		{contrib.Hstore().Bind("ext"), "containedBy", 1, `t.c OPERATOR("ext".<@) "ext".hstore($1::text[])`},
-		{contrib.Hstore(), "contains", 1, `t.c @> hstore($1::text[])`},
-		{contrib.Ltree().Bind("ext"), "ancestorOf", 1, `t.c OPERATOR("ext".@>) $1::"ext".ltree`},
-		{contrib.Ltree().Bind("ext"), "descendantOf", 1, `t.c OPERATOR("ext".<@) $1::"ext".ltree`},
-		{contrib.Ltree().Bind("ext"), "ancestorOfAny", 1, `t.c OPERATOR("ext".@>) $1::"ext".ltree[]`},
-		{contrib.Ltree().Bind("ext"), "descendantOfAny", 1, `t.c OPERATOR("ext".<@) $1::"ext".ltree[]`},
-		{contrib.Ltree().Bind("ext"), "matchesLquery", 1, `t.c OPERATOR("ext".~) $1::"ext".lquery`},
-		{contrib.Ltree().Bind("ext"), "matchesAnyLquery", 1, `t.c OPERATOR("ext".?) $1::"ext".lquery[]`},
-		{contrib.Ltree().Bind("ext"), "matchesLtxtquery", 1, `t.c OPERATOR("ext".@) $1::"ext".ltxtquery`},
-		{contrib.Ltree(), "matchesLquery", 1, `t.c ~ $1::lquery`},
-		{contrib.LtreeArray().Bind("ext"), "ancestorOf", 1, `t.c OPERATOR("ext".@>) $1::"ext".ltree`},
-		{contrib.LtreeArray().Bind("ext"), "descendantOf", 1, `t.c OPERATOR("ext".<@) $1::"ext".ltree`},
-		{contrib.LtreeArray().Bind("ext"), "matchesLquery", 1, `t.c OPERATOR("ext".~) $1::"ext".lquery`},
-		{contrib.LtreeArray().Bind("ext"), "matchesAnyLquery", 1, `t.c OPERATOR("ext".?) $1::"ext".lquery[]`},
-		{contrib.LtreeArray().Bind("ext"), "matchesLtxtquery", 1, `t.c OPERATOR("ext".@) $1::"ext".ltxtquery`},
-		{m(contrib.Range("int4range")), "overlaps", 3, "t.c && int4range($1::int4, $2::int4, $3::text)"},
-		{m(contrib.Range("tstzrange")), "contains", 3, "t.c @> tstzrange($1::timestamptz, $2::timestamptz, $3::text)"},
-		{m(contrib.Range("daterange")), "containsElement", 1, "t.c @> $1::date"},
-		{m(contrib.Range("numrange")), "containedBy", 3, "t.c <@ numrange($1::numeric, $2::numeric, $3::text)"},
-		{m(contrib.Range("int8range")), "strictlyLeftOf", 3, "t.c << int8range($1::int8, $2::int8, $3::text)"},
-		{m(contrib.Range("tsrange")), "strictlyRightOf", 3, "t.c >> tsrange($1::timestamp, $2::timestamp, $3::text)"},
-		{m(contrib.Range("int4range")), "notExtendsRightOf", 3, "t.c &< int4range($1::int4, $2::int4, $3::text)"},
-		{m(contrib.Range("int4range")), "notExtendsLeftOf", 3, "t.c &> int4range($1::int4, $2::int4, $3::text)"},
-		{m(contrib.Range("int4range")), "adjacentTo", 3, "t.c -|- int4range($1::int4, $2::int4, $3::text)"},
-		{m(contrib.Multirange("int4multirange")), "overlaps", 3, "t.c && int4range($1::int4, $2::int4, $3::text)"},
-		{m(contrib.Multirange("datemultirange")), "containsElement", 1, "t.c @> $1::date"},
-		{m(contrib.Inet("inet")), "containedBy", 1, "t.c << $1::inet"},
-		{m(contrib.Inet("cidr")), "containedByOrEquals", 1, "t.c <<= $1::inet"},
-		{m(contrib.Inet("inet")), "contains", 1, "t.c >> $1::inet"},
-		{m(contrib.Inet("inet")), "containsOrEquals", 1, "t.c >>= $1::inet"},
-		{m(contrib.Inet("inet")), "containsOrContainedBy", 1, "t.c && $1::inet"},
+		{contrib.Trgm("text"), "similarTo", 1, "(t.c) % $1::text"},
+		{contrib.Trgm("text").Bind("ext"), "similarTo", 1, `(t.c) OPERATOR("ext".%) $1::text`},
+		{contrib.Trgm("text").Bind("ext"), "wordSimilarTo", 1, `(t.c) OPERATOR("ext".%>) $1::text`},
+		{contrib.Trgm("text").Bind("ext"), "strictWordSimilarTo", 1, `(t.c) OPERATOR("ext".%>>) $1::text`},
+		{contrib.Hstore().Bind("ext"), "hasKey", 1, `(t.c) OPERATOR("ext".?) $1::text`},
+		{contrib.Hstore().Bind("ext"), "hasAllKeys", 1, `(t.c) OPERATOR("ext".?&) $1::text[]`},
+		{contrib.Hstore().Bind("ext"), "hasAnyKeys", 1, `(t.c) OPERATOR("ext".?|) $1::text[]`},
+		{contrib.Hstore().Bind("ext"), "contains", 1, `(t.c) OPERATOR("ext".@>) "ext".hstore($1::text[])`},
+		{contrib.Hstore().Bind("ext"), "containedBy", 1, `(t.c) OPERATOR("ext".<@) "ext".hstore($1::text[])`},
+		{contrib.Hstore(), "contains", 1, `(t.c) @> hstore($1::text[])`},
+		{contrib.Ltree().Bind("ext"), "ancestorOf", 1, `(t.c) OPERATOR("ext".@>) $1::"ext".ltree`},
+		{contrib.Ltree().Bind("ext"), "descendantOf", 1, `(t.c) OPERATOR("ext".<@) $1::"ext".ltree`},
+		{contrib.Ltree().Bind("ext"), "ancestorOfAny", 1, `(t.c) OPERATOR("ext".@>) $1::"ext".ltree[]`},
+		{contrib.Ltree().Bind("ext"), "descendantOfAny", 1, `(t.c) OPERATOR("ext".<@) $1::"ext".ltree[]`},
+		{contrib.Ltree().Bind("ext"), "matchesLquery", 1, `(t.c) OPERATOR("ext".~) $1::"ext".lquery`},
+		{contrib.Ltree().Bind("ext"), "matchesAnyLquery", 1, `(t.c) OPERATOR("ext".?) $1::"ext".lquery[]`},
+		{contrib.Ltree().Bind("ext"), "matchesLtxtquery", 1, `(t.c) OPERATOR("ext".@) $1::"ext".ltxtquery`},
+		{contrib.Ltree(), "matchesLquery", 1, `(t.c) ~ $1::lquery`},
+		{contrib.LtreeArray().Bind("ext"), "ancestorOf", 1, `(t.c) OPERATOR("ext".@>) $1::"ext".ltree`},
+		{contrib.LtreeArray().Bind("ext"), "descendantOf", 1, `(t.c) OPERATOR("ext".<@) $1::"ext".ltree`},
+		{contrib.LtreeArray().Bind("ext"), "matchesLquery", 1, `(t.c) OPERATOR("ext".~) $1::"ext".lquery`},
+		{contrib.LtreeArray().Bind("ext"), "matchesAnyLquery", 1, `(t.c) OPERATOR("ext".?) $1::"ext".lquery[]`},
+		{contrib.LtreeArray().Bind("ext"), "matchesLtxtquery", 1, `(t.c) OPERATOR("ext".@) $1::"ext".ltxtquery`},
+		{m(contrib.Range("int4range")), "overlaps", 3, "(t.c) && int4range($1::int4, $2::int4, $3::text)"},
+		{m(contrib.Range("tstzrange")), "contains", 3, "(t.c) @> tstzrange($1::timestamptz, $2::timestamptz, $3::text)"},
+		{m(contrib.Range("daterange")), "containsElement", 1, "(t.c) @> $1::date"},
+		{m(contrib.Range("numrange")), "containedBy", 3, "(t.c) <@ numrange($1::numeric, $2::numeric, $3::text)"},
+		{m(contrib.Range("int8range")), "strictlyLeftOf", 3, "(t.c) << int8range($1::int8, $2::int8, $3::text)"},
+		{m(contrib.Range("tsrange")), "strictlyRightOf", 3, "(t.c) >> tsrange($1::timestamp, $2::timestamp, $3::text)"},
+		{m(contrib.Range("int4range")), "notExtendsRightOf", 3, "(t.c) &< int4range($1::int4, $2::int4, $3::text)"},
+		{m(contrib.Range("int4range")), "notExtendsLeftOf", 3, "(t.c) &> int4range($1::int4, $2::int4, $3::text)"},
+		{m(contrib.Range("int4range")), "adjacentTo", 3, "(t.c) -|- int4range($1::int4, $2::int4, $3::text)"},
+		{m(contrib.Multirange("int4multirange")), "overlaps", 3, "(t.c) && int4range($1::int4, $2::int4, $3::text)"},
+		{m(contrib.Multirange("datemultirange")), "containsElement", 1, "(t.c) @> $1::date"},
+		{m(contrib.Inet("inet")), "containedBy", 1, "(t.c) << $1::inet"},
+		{m(contrib.Inet("cidr")), "containedByOrEquals", 1, "(t.c) <<= $1::inet"},
+		{m(contrib.Inet("inet")), "contains", 1, "(t.c) >> $1::inet"},
+		{m(contrib.Inet("inet")), "containsOrEquals", 1, "(t.c) >>= $1::inet"},
+		{m(contrib.Inet("inet")), "containsOrContainedBy", 1, "(t.c) && $1::inet"},
 	}
 	for _, tc := range tests {
 		op, ok := tc.v.Op(tc.op)
@@ -206,7 +206,7 @@ func TestUniqueOpNamesPerColumn(t *testing.T) {
 		t.Errorf("ops = %v", seen)
 	}
 	op, ok := contrib.FindOp(contrib.ForType(cat, "text", false), "wordSimilarTo")
-	if !ok || op.Render("c", "$1") != `c OPERATOR("ext".%>) $1::text` {
+	if !ok || op.Render("c", "$1") != `(c) OPERATOR("ext".%>) $1::text` {
 		t.Errorf("FindOp = %v %q", ok, op.Render("c", "$1"))
 	}
 }
@@ -217,9 +217,9 @@ func TestExprRenders(t *testing.T) {
 		"similarity":           `"ext".similarity(t.c, $1::text)`,
 		"wordSimilarity":       `"ext".word_similarity($1::text, t.c)`,
 		"strictWordSimilarity": `"ext".strict_word_similarity($1::text, t.c)`,
-		"distance":             `t.c OPERATOR("ext".<->) $1::text`,
-		"wordDistance":         `t.c OPERATOR("ext".<->>) $1::text`,
-		"strictWordDistance":   `t.c OPERATOR("ext".<->>>) $1::text`,
+		"distance":             `(t.c) OPERATOR("ext".<->) $1::text`,
+		"wordDistance":         `(t.c) OPERATOR("ext".<->>) $1::text`,
+		"strictWordDistance":   `(t.c) OPERATOR("ext".<->>>) $1::text`,
 	}
 	for name, want := range tests {
 		e, ok := v.Expr(name)
@@ -558,7 +558,7 @@ func TestIsText(t *testing.T) {
 func TestBindIsCopy(t *testing.T) {
 	base := contrib.Hstore()
 	bound := base.Bind("ext")
-	if got := base.Ops[0].Render("c", "$1"); got != "c ? $1::text" {
+	if got := base.Ops[0].Render("c", "$1"); got != "(c) ? $1::text" {
 		t.Errorf("Bind mutated the original: %s", got)
 	}
 	if bound.Schema != "ext" || bound.Codec == base.Codec {
@@ -566,5 +566,106 @@ func TestBindIsCopy(t *testing.T) {
 	}
 	if v := contrib.FullText().Bind("ext"); v.Schema != "" {
 		t.Error("core vocabulary took a schema")
+	}
+}
+
+// TestNonAtomicOperandsAreGrouped renders every infix operator over a
+// non-atomic column expression and placeholder: the column must stay
+// grouped (bound OPERATOR() and bare % have different precedences), and a
+// cast must apply to the whole placeholder expression.
+func TestNonAtomicOperandsAreGrouped(t *testing.T) {
+	const col = "t.a || t.b"
+	for _, v := range allVocabularies(t) {
+		for _, op := range v.Ops {
+			lo, _ := arity(op.Arg)
+			sql := op.Render(col, placeholders(lo)...)
+			for i := 0; ; {
+				j := strings.Index(sql[i:], col)
+				if j < 0 {
+					break
+				}
+				j += i
+				before, after := sql[:j], sql[j+len(col):]
+				if !strings.HasSuffix(before, "(") && !strings.HasSuffix(before, ", ") ||
+					!strings.HasPrefix(after, ")") && !strings.HasPrefix(after, ",") {
+					t.Errorf("%s %s: ungrouped column in %s", v.Name, op.Name, sql)
+				}
+				i = j + len(col)
+			}
+		}
+	}
+	trgm := contrib.Trgm("text")
+	if got := trgm.Ops[0].Render(col, "$1 || 'x'"); got != "(t.a || t.b) % ($1 || 'x')::text" {
+		t.Errorf("unbound = %s", got)
+	}
+	if got := trgm.Bind("ext").Ops[0].Render(col, "$1"); got != `(t.a || t.b) OPERATOR("ext".%) $1::text` {
+		t.Errorf("bound = %s", got)
+	}
+	if got := contrib.Ltree().Bind("ext").Codec.SQL("$1 || $2"); got != `($1 || $2)::"ext".ltree` {
+		t.Errorf("codec = %s", got)
+	}
+}
+
+func TestTextListNil(t *testing.T) {
+	for _, in := range []any{[]string(nil), []any(nil), []any{}} {
+		got, err := contrib.TextList(in)
+		if err != nil || got == nil || len(got) != 0 {
+			t.Errorf("TextList(%#v) = %#v, %v", in, got, err)
+		}
+	}
+	if _, err := contrib.TextList(nil); err == nil {
+		t.Error("TextList(nil) accepted a null operand")
+	}
+}
+
+func TestTrgmBpcharNotIndexable(t *testing.T) {
+	for _, op := range contrib.Trgm("bpchar").Ops {
+		if op.Indexable() || !strings.Contains(op.Description, "(column::text)") {
+			t.Errorf("bpchar %s: index %v, %q", op.Name, op.Index, op.Description)
+		}
+	}
+	for _, e := range contrib.Trgm("bpchar").Exprs {
+		if len(e.Index) != 0 {
+			t.Errorf("bpchar %s: index %v", e.Name, e.Index)
+		}
+	}
+	for _, op := range contrib.Trgm("varchar").Ops {
+		if !op.Indexable() || strings.Contains(op.Description, "char(n)") {
+			t.Errorf("varchar %s not indexable", op.Name)
+		}
+	}
+}
+
+func TestTrgmVersionGating(t *testing.T) {
+	names := func(version string) string {
+		cat := &introspect.Catalog{Extensions: []*introspect.Extension{{Name: "pg_trgm", Version: version, Schema: "ext"}}}
+		v := contrib.ForType(cat, "text", false)[1]
+		var out []string
+		out = append(out, v.OpNames()...)
+		for _, e := range v.Exprs {
+			out = append(out, e.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	all := "similarTo,wordSimilarTo,strictWordSimilarTo,similarity,wordSimilarity,strictWordSimilarity,distance,wordDistance,strictWordDistance"
+	tests := map[string]string{
+		"1.6":    all,
+		"1.4":    all,
+		"1.10":   all,
+		"2":      all,
+		"":       all,
+		"1.4dev": all,
+		"1.3":    "similarTo,wordSimilarTo,similarity,wordSimilarity,distance,wordDistance",
+		"1.2":    "similarTo,wordSimilarTo,similarity,wordSimilarity,distance,wordDistance",
+		"1.1":    "similarTo,similarity,distance",
+		"0.9":    "similarTo,similarity,distance",
+	}
+	for version, want := range tests {
+		if got := names(version); got != want {
+			t.Errorf("pg_trgm %q: %s, want %s", version, got, want)
+		}
+	}
+	if got := len(contrib.Trgm("text").ForVersion("1.3").Ops); got != 2 || len(contrib.Trgm("text").Ops) != 3 {
+		t.Errorf("ForVersion mutated or miscounted: %d", got)
 	}
 }

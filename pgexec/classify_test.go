@@ -153,3 +153,36 @@ func TestClassifyPostGISInputErrors(t *testing.T) {
 		t.Errorf("22023 = %v", got.Class)
 	}
 }
+
+func TestClassifyContribInputErrors(t *testing.T) {
+	user := []*pgconn.PgError{
+		pgErr("42704", `text search configuration "klingon" does not exist`),
+		pgErr("42601", `syntax error in tsquery: "a b"`),
+		pgErr("42601", `no operand in tsquery: "a &"`),
+		pgErr("42601", `syntax error in tsvector: "a:x"`),
+		pgErr("42601", "ltree syntax error at character 3"),
+		pgErr("42601", "lquery syntax error"),
+		pgErr("42601", "lquery syntax error at character 3"),
+		pgErr("42601", "operand syntax error"),
+		pgErr("42601", "syntax error"),
+	}
+	for _, e := range user {
+		if got := Classify(e, Prod); got.Class != UserInput || got.Message != e.Message {
+			t.Errorf("Prod %s %q = %v %q", e.Code, e.Message, got.Class, got.Message)
+		}
+		if got := Classify(e, Strict); got.Class != UserInput || got.Message != "invalid input value" {
+			t.Errorf("Strict %s %q = %v %q", e.Code, e.Message, got.Class, got.Message)
+		}
+	}
+	statement := []*pgconn.PgError{
+		pgErr("42601", `syntax error at or near "FROM"`),
+		pgErr("42601", "syntax error at end of input"),
+		pgErr("42601", "syntax error at end of jsonpath input"),
+		pgErr("42704", `type "ltree" does not exist`),
+	}
+	for _, e := range statement {
+		if got := Classify(e, Prod); got.Message != "invalid operation" {
+			t.Errorf("%s %q = %v %q, want the generic 42* message", e.Code, e.Message, got.Class, got.Message)
+		}
+	}
+}

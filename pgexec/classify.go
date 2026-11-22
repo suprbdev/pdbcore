@@ -55,7 +55,8 @@ func (c Class) String() string {
 type Detail int
 
 const (
-	// Prod passes 22*/23* PG messages through and hides the rest.
+	// Prod passes 22*/23* PG messages, and the messages of malformed
+	// full-text/ltree operands, through and hides the rest.
 	Prod Detail = iota
 	// Dev exposes full PG messages (and non-PG error text).
 	Dev
@@ -95,7 +96,7 @@ func Classify(err error, detail Detail) Classified {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		c := Classified{Class: classOf(pgErr.Code), SQLState: pgErr.Code, PG: pgErr}
-		if isPostGISInputError(pgErr) {
+		if isPostGISInputError(pgErr) || isContribInputError(pgErr) {
 			c.Class = UserInput
 		}
 		if detail == Dev {
@@ -137,6 +138,39 @@ func isPostGISInputError(pgErr *pgconn.PgError) bool {
 	return false
 }
 
+// contribSyntaxErrors are the 42601 messages raised while parsing values of
+// the full-text and ltree types (tsquery, tsvector, ltree, lquery and
+// ltxtquery input), as opposed to a syntax error in the statement itself,
+// which reads "syntax error at or near ..." or "... at end of input".
+var contribSyntaxErrors = []string{
+	"syntax error in tsquery",
+	"no operand in tsquery",
+	"syntax error in tsvector",
+	"ltree syntax error",
+	"lquery syntax error",
+	"operand syntax error",
+}
+
+// isContribInputError reports whether a 42601 or 42704 error was caused by
+// a filter operand rather than by the statement: a malformed full-text or
+// ltree query value, or an unknown text search configuration name.
+func isContribInputError(pgErr *pgconn.PgError) bool {
+	switch pgErr.Code {
+	case "42704":
+		return strings.HasPrefix(pgErr.Message, "text search configuration ")
+	case "42601":
+		if pgErr.Message == "syntax error" {
+			return true
+		}
+		for _, m := range contribSyntaxErrors {
+			if strings.HasPrefix(pgErr.Message, m) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func classOf(code string) Class {
 	switch code {
 	case "42501":
@@ -169,6 +203,12 @@ func SanitizeMessage(pgErr *pgconn.PgError, strict bool) string {
 			return "invalid input value"
 		}
 		return "invalid geometry"
+	}
+	if isContribInputError(pgErr) {
+		if strict {
+			return "invalid input value"
+		}
+		return pgErr.Message
 	}
 	switch prefix(pgErr.Code) {
 	case "23": // integrity constraint violations are user-actionable

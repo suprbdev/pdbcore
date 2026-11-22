@@ -54,6 +54,7 @@
 package contrib
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/suprbdev/pdbcore/introspect"
@@ -182,7 +183,22 @@ func (q qual) fn(name string) string { return q.prefix() + name }
 func (q qual) typ(name string) string { return q.prefix() + name }
 
 // cast renders placeholder::type with the type schema-qualified when bound.
-func (q qual) cast(ph, typ string) string { return ph + "::" + q.typ(typ) }
+func (q qual) cast(ph, typ string) string { return atom(ph) + "::" + q.typ(typ) }
+
+// paren groups an operand of an infix operator. OPERATOR(schema.op) has the
+// "any other operator" precedence while some bare operators (%) are
+// multiplicative, so a non-atomic column expression would otherwise regroup
+// differently in bound and unbound renders.
+func paren(expr string) string { return "(" + expr + ")" }
+
+// atom returns a bare $n placeholder unchanged and parenthesizes anything
+// else, so a following ::type cast applies to the whole expression.
+func atom(ph string) string {
+	if len(ph) > 1 && ph[0] == '$' && strings.Trim(ph[1:], "0123456789") == "" {
+		return ph
+	}
+	return paren(ph)
+}
 
 func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
@@ -207,6 +223,8 @@ type Op struct {
 	render func(q qual, col string, a []string) string
 	rank   func(q qual, fn, col string, a []string) string
 	params func(v any) ([]any, error)
+	// since is the first extension version providing the operator.
+	since string
 }
 
 // Indexable reports whether some index can serve the predicate.
@@ -265,6 +283,7 @@ type Expr struct {
 
 	q      qual
 	render func(q qual, col string, a []string) string
+	since  string
 }
 
 // Params coerces the operand into the bind parameters Render expects.
@@ -403,6 +422,56 @@ func (v Vocabulary) Bind(schema string) Vocabulary {
 // resolve to the wrong operator (citext; see [Citext]) without it.
 func (v Vocabulary) Operator(op string) string { return qual{schema: v.Schema}.op(op) }
 
+// ForVersion returns a copy of v without the operators and expressions that
+// the given version of its extension does not provide yet (pg_trgm before
+// 1.2 lacks the word-similarity operators, before 1.4 the strict ones; a
+// database upgraded with pg_upgrade keeps its old extension versions until
+// ALTER EXTENSION ... UPDATE). An empty or unparsable version keeps
+// everything.
+func (v Vocabulary) ForVersion(version string) Vocabulary {
+	var ops []Op
+	for _, o := range v.Ops {
+		if versionAtLeast(version, o.since) {
+			ops = append(ops, o)
+		}
+	}
+	var exprs []Expr
+	for _, e := range v.Exprs {
+		if versionAtLeast(version, e.since) {
+			exprs = append(exprs, e)
+		}
+	}
+	v.Ops, v.Exprs = ops, exprs
+	return v
+}
+
+// versionAtLeast compares dotted numeric versions component by component
+// ("1.10" > "1.4"). An empty or non-numeric have or an empty want is true.
+func versionAtLeast(have, want string) bool {
+	if want == "" || have == "" {
+		return true
+	}
+	h, w := strings.Split(have, "."), strings.Split(want, ".")
+	for i := 0; i < len(h) || i < len(w); i++ {
+		hn, wn := 0, 0
+		var err error
+		if i < len(h) {
+			if hn, err = strconv.Atoi(h[i]); err != nil {
+				return true
+			}
+		}
+		if i < len(w) {
+			if wn, err = strconv.Atoi(w[i]); err != nil {
+				return true
+			}
+		}
+		if hn != wn {
+			return hn > wn
+		}
+	}
+	return true
+}
+
 // Op looks up an operator by name.
 func (v Vocabulary) Op(name string) (Op, bool) {
 	for _, o := range v.Ops {
@@ -454,9 +523,11 @@ func FindOp(vs []Vocabulary, name string) (Op, bool) {
 }
 
 // ForColumn returns the vocabularies that apply to a column, bound to the
-// schemas their extensions are installed in. Extension vocabularies are
-// returned only when the catalog records the extension. Columns that other
-// layers own (PostGIS spatial columns, table-backed enums) get none.
+// schemas their extensions are installed in and limited to what the
+// installed extension version provides ([Vocabulary.ForVersion]). Extension
+// vocabularies are returned only when the catalog records the extension.
+// Columns that other layers own (PostGIS spatial columns, table-backed
+// enums) get none.
 func ForColumn(cat *introspect.Catalog, col *introspect.Column) []Vocabulary {
 	if col == nil || col.Spatial != nil || col.EnumRef != "" {
 		return nil
@@ -473,6 +544,7 @@ func ForColumn(cat *introspect.Catalog, col *introspect.Column) []Vocabulary {
 func ForType(cat *introspect.Catalog, pgType string, isArray bool) []Vocabulary {
 	base, arr := normalizeType(pgType)
 	arr = arr || isArray
+	var ver string
 	ext := func(name string) (string, bool) {
 		if cat == nil {
 			return "", false
@@ -481,6 +553,7 @@ func ForType(cat *introspect.Catalog, pgType string, isArray bool) []Vocabulary 
 		if e == nil {
 			return "", false
 		}
+		ver = e.Version
 		return e.Schema, true
 	}
 	if arr {
@@ -527,7 +600,7 @@ func ForType(cat *introspect.Catalog, pgType string, isArray bool) []Vocabulary 
 	}
 	out = append(out, TextSearch(base))
 	if s, ok := ext(ExtTrgm); ok {
-		out = append(out, Trgm(base).Bind(s))
+		out = append(out, Trgm(base).Bind(s).ForVersion(ver))
 	}
 	return out
 }
