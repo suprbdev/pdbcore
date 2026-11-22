@@ -258,3 +258,38 @@ func TestOpValues(t *testing.T) {
 		}
 	}
 }
+
+func TestParseForExecutes(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	for _, srid := range []int{4326, 3857} {
+		table := fmt.Sprintf("pdbcore_srid_%d", srid)
+		if _, err := conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s; CREATE TABLE %s (g geometry(Point,%d)); INSERT INTO %s VALUES (ST_SetSRID(ST_MakePoint(1,2),%d))", table, table, srid, table, srid)); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS "+table) })
+		inputs := map[string]any{
+			"wkt":     "POINT(1 2)",
+			"geojson": map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}},
+		}
+		for name, in := range inputs {
+			if _, err := postgis.Parse(in, postgis.Geometry); err != nil {
+				t.Fatal(err)
+			}
+			v, err := postgis.ParseFor(in, postgis.Geometry, srid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var n int
+			q := fmt.Sprintf("SELECT count(*) FROM %s WHERE ST_Intersects(g, %s)", table, v.SQL("$1"))
+			if err := conn.QueryRow(ctx, q, v.Param).Scan(&n); err != nil {
+				t.Errorf("srid %d %s: %v\n%s", srid, name, err, q)
+				continue
+			}
+			wantHit := name == "wkt" || srid == 4326
+			if wantHit != (n == 1) {
+				t.Errorf("srid %d %s: count %d", srid, name, n)
+			}
+		}
+	}
+}

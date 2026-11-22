@@ -97,7 +97,8 @@ func IsSpatial(pgType string) bool { return FlavourOf(pgType).Spatial() }
 type Value struct {
 	// Param is the single value handed to the driver: GeoJSON text or a
 	// WKT/EWKT string.
-	Param string
+	Param   string
+	hasSRID bool
 	// ctor is the PostGIS constructor wrapping the placeholder.
 	ctor string
 	// Flavour is the target type the expression is cast to.
@@ -106,6 +107,10 @@ type Value struct {
 	// WGS84 (4326) per RFC 7946 unless the value carries an explicit CRS;
 	// EWKT carries its own SRID so none is forced.
 	SRID int
+	// TransformSRID, when non-zero, reprojects the value with ST_Transform
+	// after SRID has been applied. ParseFor sets it for GeoJSON bound for a
+	// column in a different CRS.
+	TransformSRID int
 }
 
 // SQL renders the value expression given the placeholder for Param (e.g. "$3").
@@ -118,6 +123,9 @@ func (v Value) SQL(placeholder string) string {
 	expr := v.ctor + "(" + placeholder + ")"
 	if v.SRID != 0 {
 		expr = fmt.Sprintf("ST_SetSRID(%s, %d)", expr, v.SRID)
+	}
+	if v.TransformSRID != 0 {
+		expr = fmt.Sprintf("ST_Transform(%s, %d)", expr, v.TransformSRID)
 	}
 	if v.Flavour == Geography {
 		// ST_GeomFromGeoJSON/EWKT return geometry; geography columns need the
@@ -141,6 +149,40 @@ const defaultGeoJSONSRID = 4326
 // The value is validated structurally so malformed input fails at compile time
 // with a user-facing error rather than as a Postgres error mid-statement.
 func Parse(v any, f Flavour) (Value, error) {
+	return ParseFor(v, f, 0)
+}
+
+// ParseFor is Parse for a value bound to a column whose typmod SRID is srid
+// (introspect.SpatialType.SRID; 0 means unconstrained and behaves exactly like
+// Parse). The SRID comes from the catalog, never from user input, so it is
+// rendered as an integer literal without breaking the compiled-SQL-is-a-pure-
+// function-of-query-shape invariant.
+//
+//   - Bare WKT is tagged with srid.
+//   - EWKT keeps its own SRID.
+//   - GeoJSON is WGS84 (or its explicit CRS member); when that differs from
+//     srid on a geometry column it is reprojected with ST_Transform.
+//
+// Geography columns are always 4326, so no reprojection is applied to them.
+func ParseFor(v any, f Flavour, srid int) (Value, error) {
+	val, err := parse(v, f)
+	if err != nil || srid <= 0 {
+		return val, err
+	}
+	switch val.ctor {
+	case "ST_GeomFromEWKT":
+		if val.SRID == 0 && !val.hasSRID {
+			val.SRID = srid
+		}
+	case "ST_GeomFromGeoJSON":
+		if f == Geometry && val.SRID != srid {
+			val.TransformSRID = srid
+		}
+	}
+	return val, nil
+}
+
+func parse(v any, f Flavour) (Value, error) {
 	if !f.Spatial() {
 		return Value{}, fmt.Errorf("postgis: not a spatial type")
 	}
@@ -170,7 +212,7 @@ func parseWKT(s string, f Flavour) (Value, error) {
 	if !looksLikeWKT(body) {
 		return Value{}, fmt.Errorf("spatial value %q is not valid WKT", clip(s))
 	}
-	val := Value{Param: trimmed, ctor: "ST_GeomFromEWKT", Flavour: f}
+	val := Value{Param: trimmed, ctor: "ST_GeomFromEWKT", Flavour: f, hasSRID: hasSRID}
 	if !hasSRID && f == Geography {
 		// Bare WKT has SRID 0; geography requires a real CRS.
 		val.SRID = defaultGeoJSONSRID

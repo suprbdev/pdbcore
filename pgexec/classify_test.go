@@ -127,3 +127,29 @@ func TestParseDetail(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyPostGISInputErrors(t *testing.T) {
+	cases := []string{
+		"ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)",
+		"parse error - invalid geometry",
+		"lwgeom_from_hexwkb: bad input",
+	}
+	for _, msg := range cases {
+		e := pgErr("XX000", msg)
+		if got := Classify(e, Prod); got.Class != UserInput || got.Message != "invalid geometry" {
+			t.Errorf("Prod %q = %v %q", msg, got.Class, got.Message)
+		}
+		if got := Classify(e, Strict); got.Class != UserInput || got.Message != "invalid input value" {
+			t.Errorf("Strict %q = %v %q", msg, got.Class, got.Message)
+		}
+		if got := Classify(e, Dev); got.Class != UserInput || got.Message != msg {
+			t.Errorf("Dev %q = %v %q", msg, got.Class, got.Message)
+		}
+	}
+	if got := Classify(pgErr("XX000", "something else"), Prod); got.Class != Internal || got.Message != "database error" {
+		t.Errorf("unrelated XX000 = %v %q", got.Class, got.Message)
+	}
+	if got := Classify(pgErr("22023", "bad param"), Prod); got.Class != UserInput {
+		t.Errorf("22023 = %v", got.Class)
+	}
+}
