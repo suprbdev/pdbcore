@@ -125,6 +125,19 @@ func irregular(s string, forms map[string]string) string {
 	return ""
 }
 
+// uncountable words are identical in singular and plural form.
+var uncountable = map[string]bool{"news": true, "series": true, "species": true}
+
+// singularWords end in "s" but are already singular.
+var singularWords = map[string]bool{"sys": true, "gas": true, "alias": true, "canvas": true}
+
+func lastWord(s string) string {
+	if i := strings.LastIndexByte(s, '_'); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
 // Singularize applies simple English singularization rules — enough for
 // common table names; plugins can override anything it gets wrong.
 func Singularize(s string) string {
@@ -133,6 +146,9 @@ func Singularize(s string) string {
 	}
 	if irregular(s, irregularPlurals) != "" {
 		return s // already singular (person stays person, not perso)
+	}
+	if w := lastWord(s); uncountable[w] || singularWords[w] || strings.HasSuffix(w, "us") || strings.HasSuffix(w, "is") {
+		return s
 	}
 	switch {
 	case strings.HasSuffix(s, "ies") && len(s) > 3:
@@ -152,6 +168,9 @@ func Pluralize(s string) string {
 	}
 	if irregular(s, irregularSingulars) != "" {
 		return s // already plural (people stays people)
+	}
+	if uncountable[lastWord(s)] {
+		return s
 	}
 	switch {
 	case strings.HasSuffix(s, "y") && len(s) > 1 && !isVowel(s[len(s)-2]):
