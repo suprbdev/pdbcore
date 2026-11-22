@@ -13,11 +13,11 @@ test: ## Unit tests (hermetic, no database needed)
 	$(GO) test -race ./...
 
 # -p isolates the stack; port 5434 keeps it clear of pdbq's e2e database.
-# The DB-backed tests (fixture drift gate, pgexec, watch, introspect) skip
+# The DB-backed tests (fixture drift gate, pgexec, watch, introspect, postgis) skip
 # without PDBCORE_TEST_DATABASE_URL, so this target is what actually runs them.
 test-e2e: ## DB-backed tests against a disposable PostGIS Postgres
 	docker compose -p pdbcore-test -f compose.test.yaml up -d --wait
-	PDBCORE_TEST_DATABASE_URL="$(TEST_DB)" $(GO) test -race -count=1 ./testutil/ ./pgexec/ ./watch/ ./introspect/; \
+	PDBCORE_TEST_DATABASE_URL="$(TEST_DB)" $(GO) test -race -count=1 ./testutil/ ./pgexec/ ./watch/ ./introspect/ ./postgis/; \
 	status=$$?; docker compose -p pdbcore-test -f compose.test.yaml down -v; exit $$status
 
 lint: ## Run golangci-lint (falls back to go vet)

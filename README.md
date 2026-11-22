@@ -97,7 +97,7 @@ regenerate their goldens on upgrade.
 
 ```sh
 make test       # hermetic unit tests (go test -race ./...)
-make test-e2e   # DB-backed tests (fixture drift gate, pgexec RLS matrix, watch, live introspection) on a disposable PostGIS (project pdbcore-test, host port 5434)
+make test-e2e   # DB-backed tests (fixture drift gate, pgexec RLS matrix, watch, live introspection, postgis SQL validity) on a disposable PostGIS (project pdbcore-test, host port 5434)
 make lint       # golangci-lint (falls back to go vet)
 make fixture    # print testutil.FixtureSQL
 make release    # interactive: clean tree check, version prompt, test+lint, annotated tag, push
