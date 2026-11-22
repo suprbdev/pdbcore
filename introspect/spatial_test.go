@@ -75,8 +75,21 @@ func TestSpatialTypmodRoundTrip(t *testing.T) {
 			t.Errorf("Typmod() = %q, want %q", got, in)
 		}
 	}
-	if got := (&SpatialType{Subtype: SpatialGeometry}).Typmod(); got != "" {
-		t.Errorf("unconstrained Typmod() = %q, want empty", got)
+	for st, want := range map[SpatialType]string{
+		{Subtype: SpatialGeometry}:             "",
+		{}:                                     "",
+		{SRID: 4326}:                           "(Geometry,4326)",
+		{HasZ: true}:                           "(GeometryZ)",
+		{HasM: true, SRID: 3857}:               "(GeometryM,3857)",
+		{Subtype: SpatialPoint}:                "(Point)",
+		{Subtype: SpatialGeometry, SRID: 4326}: "(Geometry,4326)",
+	} {
+		if got := st.Typmod(); got != want {
+			t.Errorf("%+v.Typmod() = %q, want %q", st, got, want)
+		}
+		if st.Constrained() != (want != "") {
+			t.Errorf("%+v.Constrained() = %v", st, st.Constrained())
+		}
 	}
 }
 
@@ -86,26 +99,28 @@ func TestApplyTypmod(t *testing.T) {
 		col       Column
 		formatted string
 		builtin   bool
+		isSpatial bool
 		spatial   *SpatialType
 		sqlType   string
 	}{
-		{"constrained geometry", Column{PGType: "geometry"}, "public.geometry(Point,4326)", false,
+		{"constrained geometry", Column{PGType: "geometry"}, "public.geometry(Point,4326)", false, true,
 			&SpatialType{Subtype: SpatialPoint, SRID: 4326}, ""},
-		{"unconstrained geography", Column{PGType: "geography"}, "", false,
+		{"unconstrained geography", Column{PGType: "geography"}, "", false, true,
 			&SpatialType{Subtype: SpatialGeometry}, ""},
-		{"geometry array", Column{PGType: "_geometry", IsArray: true}, "geometry(PolygonZ)[]", false,
+		{"geometry array", Column{PGType: "_geometry", IsArray: true}, "geometry(PolygonZ)[]", false, true,
 			&SpatialType{Subtype: SpatialPolygon, HasZ: true}, ""},
-		{"malformed spatial degrades", Column{PGType: "geometry"}, "geometry(Point,x)", false,
+		{"malformed spatial degrades", Column{PGType: "geometry"}, "geometry(Point,x)", false, true,
 			&SpatialType{Subtype: SpatialGeometry}, ""},
-		{"varchar", Column{PGType: "varchar"}, "character varying(255)", true, nil, "character varying(255)"},
-		{"numeric", Column{PGType: "numeric"}, "numeric(10,2)", true, nil, "numeric(10,2)"},
-		{"unmodified builtin", Column{PGType: "text"}, "", true, nil, ""},
-		{"extension type", Column{PGType: "citext"}, "public.citext(3)", false, nil, ""},
+		{"non-postgis type named geometry", Column{PGType: "geometry"}, "", false, false, nil, ""},
+		{"varchar", Column{PGType: "varchar"}, "character varying(255)", true, false, nil, "character varying(255)"},
+		{"numeric", Column{PGType: "numeric"}, "numeric(10,2)", true, false, nil, "numeric(10,2)"},
+		{"unmodified builtin", Column{PGType: "text"}, "", true, false, nil, ""},
+		{"extension type", Column{PGType: "citext"}, "public.citext(3)", false, false, nil, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			col := tc.col
-			applyTypmod(&col, tc.formatted, tc.builtin)
+			applyTypmod(&col, tc.formatted, tc.builtin, tc.isSpatial)
 			if (col.Spatial == nil) != (tc.spatial == nil) || (col.Spatial != nil && *col.Spatial != *tc.spatial) {
 				t.Errorf("Spatial = %+v, want %+v", col.Spatial, tc.spatial)
 			}

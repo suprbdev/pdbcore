@@ -12,7 +12,8 @@ import (
 // variants inside a transaction that is rolled back, so the DDL never
 // commits (and never reaches the watch tests' event-trigger NOTIFY). The
 // spatial half runs only where PostGIS is installed; the rest also checks
-// that the query works on a database without it.
+// that the query works on a database without it, and that a user type named
+// geometry outside the postgis schema is not taken for PostGIS.
 func TestIntrospectTypmodsLive(t *testing.T) {
 	url := os.Getenv("PDBCORE_TEST_DATABASE_URL")
 	if url == "" {
@@ -37,12 +38,18 @@ func TestIntrospectTypmodsLive(t *testing.T) {
 	ddl := []string{
 		`CREATE SCHEMA pdbcore_typmod_test`,
 		`CREATE DOMAIN pdbcore_typmod_test.code AS varchar(20)`,
+		`CREATE DOMAIN pdbcore_typmod_test.code2 AS pdbcore_typmod_test.code`,
+		`CREATE DOMAIN pdbcore_typmod_test.code3 AS pdbcore_typmod_test.code2`,
+		`CREATE TYPE pdbcore_typmod_test.geometry AS (x int)`,
 		`CREATE TABLE pdbcore_typmod_test.t (
 			v  varchar(10),
 			w  numeric(10,2),
 			x  timestamptz(3),
 			z  varchar(5)[],
 			d  pdbcore_typmod_test.code,
+			dd pdbcore_typmod_test.code3,
+			ug pdbcore_typmod_test.geometry,
+			ua pdbcore_typmod_test.geometry[],
 			p  text,
 			n  numeric
 		)`,
@@ -50,11 +57,13 @@ func TestIntrospectTypmodsLive(t *testing.T) {
 	}
 	if postgis {
 		ddl = append(ddl,
-			`CREATE DOMAIN pdbcore_typmod_test.pt AS geometry(Point,4326)`,
+			`CREATE DOMAIN pdbcore_typmod_test.pt AS public.geometry(Point,4326)`,
+			`CREATE DOMAIN pdbcore_typmod_test.pt2 AS pdbcore_typmod_test.pt`,
 			`ALTER TABLE pdbcore_typmod_test.t
 				ADD g0 geometry, ADD g1 geometry(Point,4326), ADD g2 geometry(LineStringZM,3857),
 				ADD g3 geometry(GeometryZ), ADD g4 geography, ADD g5 geography(Polygon),
-				ADD g6 geometry(MultiPolygon,4326)[], ADD g7 pdbcore_typmod_test.pt`,
+				ADD g6 geometry(MultiPolygon,4326)[], ADD g7 pdbcore_typmod_test.pt,
+				ADD g8 pdbcore_typmod_test.pt2`,
 			`ALTER TYPE pdbcore_typmod_test.c ADD ATTRIBUTE g geometry(MultiPoint,2154)`,
 		)
 	}
@@ -81,18 +90,21 @@ func TestIntrospectTypmodsLive(t *testing.T) {
 	if tbl == nil {
 		t.Fatal("scratch table not introspected")
 	}
-	for name, want := range map[string]string{
-		"v": "character varying(10)",
-		"w": "numeric(10,2)",
-		"x": "timestamp(3) with time zone",
-		"z": "character varying(5)[]",
-		"d": "character varying(20)",
-		"p": "",
-		"n": "",
+	for name, want := range map[string]struct{ pgType, sqlType string }{
+		"v":  {"varchar", "character varying(10)"},
+		"w":  {"numeric", "numeric(10,2)"},
+		"x":  {"timestamptz", "timestamp(3) with time zone"},
+		"z":  {"_varchar", "character varying(5)[]"},
+		"d":  {"varchar", "character varying(20)"},
+		"dd": {"varchar", "character varying(20)"},
+		"ug": {"geometry", ""},
+		"ua": {"_geometry", ""},
+		"p":  {"text", ""},
+		"n":  {"numeric", ""},
 	} {
 		col := tbl.Column(name)
-		if col.SQLType != want || col.Spatial != nil {
-			t.Errorf("column %s: SQLType %q Spatial %+v, want %q", name, col.SQLType, col.Spatial, want)
+		if col.PGType != want.pgType || col.SQLType != want.sqlType || col.Spatial != nil {
+			t.Errorf("column %s: PGType %q SQLType %q Spatial %+v, want %+v", name, col.PGType, col.SQLType, col.Spatial, want)
 		}
 	}
 	comp := cat.Composite("pdbcore_typmod_test", "c")
@@ -111,13 +123,18 @@ func TestIntrospectTypmodsLive(t *testing.T) {
 		"g5": {Subtype: SpatialPolygon, SRID: 4326},
 		"g6": {Subtype: SpatialMultiPolygon, SRID: 4326},
 		"g7": {Subtype: SpatialPoint, SRID: 4326},
+		"g8": {Subtype: SpatialPoint, SRID: 4326},
 	} {
 		col := tbl.Column(name)
-		if col.Spatial == nil || *col.Spatial != want || col.SQLType != "" {
+		if col.Spatial == nil || *col.Spatial != want || col.SQLType != "" || !isPostGISName(col) {
 			t.Errorf("column %s: Spatial %+v SQLType %q, want %+v", name, col.Spatial, col.SQLType, want)
 		}
 	}
 	if g := comp.Fields[1].Spatial; g == nil || *g != (SpatialType{Subtype: SpatialMultiPoint, SRID: 2154}) {
 		t.Errorf("composite geometry field Spatial = %+v", g)
 	}
+}
+
+func isPostGISName(col *Column) bool {
+	return col.PGType == "geometry" || col.PGType == "geography" || col.PGType == "_geometry"
 }

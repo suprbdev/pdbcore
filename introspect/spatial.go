@@ -45,21 +45,29 @@ type SpatialType struct {
 }
 
 // Constrained reports whether the column restricts subtype, SRID or
-// dimensions at all.
+// dimensions at all. An empty Subtype counts as Geometry.
 func (s *SpatialType) Constrained() bool {
-	return s.Subtype != SpatialGeometry || s.SRID != 0 || s.HasZ || s.HasM
+	return s.subtype() != SpatialGeometry || s.SRID != 0 || s.HasZ || s.HasM
+}
+
+func (s *SpatialType) subtype() SpatialSubtype {
+	if s.Subtype == "" {
+		return SpatialGeometry
+	}
+	return s.Subtype
 }
 
 // Typmod renders the modifier in PostGIS syntax, e.g. "(PointZ,4326)", or ""
-// for an unconstrained column. Appending it to the base type name yields a
-// type usable in a cast: "geometry" + "(Point,4326)".
+// for an unconstrained column; an empty Subtype renders as Geometry.
+// Appending it to the base type name yields a type usable in a cast:
+// "geometry" + "(Point,4326)".
 func (s *SpatialType) Typmod() string {
 	if !s.Constrained() {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteByte('(')
-	b.WriteString(string(s.Subtype))
+	b.WriteString(string(s.subtype()))
 	if s.HasZ {
 		b.WriteByte('Z')
 	}
@@ -128,24 +136,15 @@ func parseSpatialTypmod(formatted string) (*SpatialType, error) {
 	return out, nil
 }
 
-// isSpatialType reports whether a column's canonical type is PostGIS
-// geometry or geography (or an array of either). Classification is by name,
-// as PostGIS may be installed into any schema.
-func isSpatialType(pgType string, isArray bool) bool {
-	if isArray {
-		pgType = strings.TrimPrefix(pgType, "_")
-	}
-	return pgType == "geometry" || pgType == "geography"
-}
-
 // applyTypmod fills Column.Spatial and Column.SQLType from the column's
-// format_type text (empty when the column has no modifier) and whether its
-// base type is built in. A spatial modifier that does not parse degrades to
-// the unconstrained type rather than failing introspection; PostgreSQL still
+// format_type text (empty when it has none), whether its base type is built
+// in, and whether it is PostGIS geometry or geography (or an array of
+// either). A spatial modifier that does not parse degrades to the
+// unconstrained type rather than failing introspection; PostgreSQL still
 // enforces the real constraint on write.
-func applyTypmod(col *Column, formatted string, builtin bool) {
+func applyTypmod(col *Column, formatted string, builtin, spatial bool) {
 	switch {
-	case isSpatialType(col.PGType, col.IsArray):
+	case spatial:
 		st, err := parseSpatialTypmod(formatted)
 		if err != nil {
 			st = &SpatialType{Subtype: SpatialGeometry}
