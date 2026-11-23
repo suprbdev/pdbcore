@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -42,7 +43,7 @@ type Identity struct {
 	ClaimsPrefix string
 }
 
-// TxOptions controls RunTx.
+// TxOptions controls RunTx and QueryTx.
 type TxOptions struct {
 	Isolation pgx.TxIsoLevel
 	// MaxRetries re-runs the whole transaction after a serialization
@@ -50,6 +51,11 @@ type TxOptions struct {
 	MaxRetries int
 	// RLS enables the SET LOCAL ROLE + set_config claims step.
 	RLS bool
+	// ScanBeforeCommit (QueryTx only) holds COMMIT back until every
+	// Stmt.Scan has returned nil, so a Scan error rolls the statements
+	// back, at the cost of a second round trip. RunTx always works this
+	// way: fn runs before the commit.
+	ScanBeforeCommit bool
 	// Log receives the retry warning; nil uses slog.Default().
 	Log *slog.Logger
 }
@@ -95,9 +101,11 @@ func runOnce(ctx context.Context, db TxBeginner, opts TxOptions, id Identity, fn
 	return tx.Commit(ctx)
 }
 
-// ApplyIdentity switches role and exposes claims inside an open transaction.
-// It uses SET LOCAL exclusively (never SET) so pooled connections cannot
-// leak request identity across requests once the connection is reused.
+// ApplyIdentity switches role and exposes claims inside an open transaction:
+// SET LOCAL ROLE, then every claim in a single set_config statement
+// (claimsSQL). It uses transaction-local settings exclusively (never SET)
+// so pooled connections cannot leak request identity across requests once
+// the connection is reused.
 func ApplyIdentity(ctx context.Context, tx Querier, id Identity) error {
 	if id.Role != "" {
 		if !ValidRole(id.Role) {
@@ -107,31 +115,65 @@ func ApplyIdentity(ctx context.Context, tx Querier, id Identity) error {
 			return fmt.Errorf("set role: %w", err)
 		}
 	}
+	keys, vals := claimSettings(id)
+	if len(keys) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, claimsSQL, keys, vals); err != nil {
+		return fmt.Errorf("set claims: %w", err)
+	}
+	return nil
+}
+
+// claimsSQL applies every claim with transaction-local set_config in one
+// statement. $1 holds the setting names and $2 the values, as text arrays
+// of equal length (see claimSettings). The text is constant, so it is
+// prepared once per connection whatever the number of claims.
+const claimsSQL = `SELECT count(set_config(c.k, c.v, true)) FROM unnest($1::text[], $2::text[]) AS c(k, v)`
+
+// identitySQL is claimsSQL plus the role switch: $1 is the role, $2 and
+// $3 the claim names and values. set_config('role', r, true) is what SET
+// LOCAL ROLE executes (same membership check, same SQLSTATEs), with the
+// role passed as a bind parameter instead of a quoted identifier.
+const identitySQL = `SELECT set_config('role', $1, true), (SELECT count(set_config(c.k, c.v, true)) FROM unnest($2::text[], $3::text[]) AS c(k, v))`
+
+// claimSettings returns the set_config names (ClaimsPrefix + "." + key) and
+// values for id.Claims, sorted by name. String values are used verbatim and
+// anything else is JSON-encoded; keys failing [ValidClaimKey] and values
+// that cannot be encoded are skipped.
+func claimSettings(id Identity) (names, values []string) {
+	if len(id.Claims) == 0 {
+		return nil, nil
+	}
 	prefix := id.ClaimsPrefix
 	if prefix == "" {
 		prefix = DefaultClaimsPrefix
 	}
-	for k, v := range id.Claims {
-		if !ValidClaimKey(k) {
-			continue
+	keys := make([]string, 0, len(id.Claims))
+	for k := range id.Claims {
+		if ValidClaimKey(k) {
+			keys = append(keys, k)
 		}
-		val := ""
-		switch tv := v.(type) {
+	}
+	sort.Strings(keys)
+	names = make([]string, 0, len(keys))
+	values = make([]string, 0, len(keys))
+	for _, k := range keys {
+		var val string
+		switch tv := id.Claims[k].(type) {
 		case string:
 			val = tv
 		default:
-			b, err := json.Marshal(v)
+			b, err := json.Marshal(tv)
 			if err != nil {
 				continue
 			}
 			val = string(b)
 		}
-		// set_config(..., true) scopes the setting to the transaction.
-		if _, err := tx.Exec(ctx, "SELECT set_config($1, $2, true)", prefix+"."+k, val); err != nil {
-			return fmt.Errorf("set claim %s: %w", k, err)
-		}
+		names = append(names, prefix+"."+k)
+		values = append(values, val)
 	}
-	return nil
+	return names, values
 }
 
 // IsSerializationFailure reports whether err carries SQLSTATE 40001

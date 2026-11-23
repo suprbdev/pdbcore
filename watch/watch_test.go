@@ -53,6 +53,7 @@ func TestWatchEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS watch_test CASCADE")
+	defer dropTriggers(pool, "pdbcore_test_ddl_watch")
 
 	changes := make(chan *introspect.Catalog, 4)
 	w := &Watcher{
