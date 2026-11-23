@@ -36,8 +36,8 @@ var reservedClaimsNamespaces = map[string]bool{
 	"cron": true, "anon": true, "pgrst": true, "bdr": true, "pgroonga": true,
 }
 
-// ValidateClaimsPrefix checks an Identity.ClaimsPrefix ("" means
-// DefaultClaimsPrefix): dot-separated components, each a letter or
+// ValidateClaimsPrefix checks an Identity.ClaimsPrefix ("" sets no
+// per-claim settings): dot-separated components, each a letter or
 // underscore followed by letters, digits and underscores, and a first
 // component that is not a real setting namespace (plpgsql, auto_explain,
 // postgis, anything starting with pg_, ...). Claims are written to
@@ -47,15 +47,29 @@ func ValidateClaimsPrefix(prefix string) error {
 	if prefix == "" {
 		return nil
 	}
-	parts := strings.Split(prefix, ".")
+	return validateSettingName("claims prefix", prefix, "jwt.claims")
+}
+
+// ValidateClaimsSetting checks an Identity.ClaimsJSONSetting: the rules of
+// ValidateClaimsPrefix, plus at least two components, since PostgreSQL only
+// accepts custom settings whose name contains a dot.
+func ValidateClaimsSetting(name string) error {
+	if !strings.Contains(name, ".") {
+		return fmt.Errorf("invalid claims setting %q: use a dotted name such as %q", name, "request.jwt.claims")
+	}
+	return validateSettingName("claims setting", name, "request.jwt.claims")
+}
+
+func validateSettingName(what, name, example string) error {
+	parts := strings.Split(name, ".")
 	for _, p := range parts {
 		if p == "" || !simpleIdent(p) || (p[0] >= '0' && p[0] <= '9') {
-			return fmt.Errorf("invalid claims prefix %q: use dot-separated identifiers such as %q", prefix, DefaultClaimsPrefix)
+			return fmt.Errorf("invalid %s %q: use dot-separated identifiers such as %q", what, name, example)
 		}
 	}
 	first := strings.ToLower(parts[0])
 	if strings.HasPrefix(first, "pg_") || reservedClaimsNamespaces[first] {
-		return fmt.Errorf("invalid claims prefix %q: %q is a server or extension settings namespace", prefix, parts[0])
+		return fmt.Errorf("invalid %s %q: %q is a server or extension settings namespace", what, name, parts[0])
 	}
 	return nil
 }

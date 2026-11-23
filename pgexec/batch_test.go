@@ -29,7 +29,7 @@ func TestBatchPlanShapes(t *testing.T) {
 	}{
 		{"implicit, no rls", TxOptions{}, anon, []string{"SELECT 1", "SELECT 2"}},
 		{"implicit, role", TxOptions{RLS: true}, anon, []string{identitySQL, "SELECT 1", "SELECT 2"}},
-		{"implicit, claims only", TxOptions{RLS: true}, Identity{Claims: map[string]any{"sub": "1"}}, []string{claimsSQL, "SELECT 1", "SELECT 2"}},
+		{"implicit, claims only", TxOptions{RLS: true}, Identity{ClaimsPrefix: "jwt.claims", Claims: map[string]any{"sub": "1"}}, []string{claimsSQL, "SELECT 1", "SELECT 2"}},
 		{"implicit, empty identity", TxOptions{RLS: true}, Identity{}, []string{"SELECT 1", "SELECT 2"}},
 		{"explicit", TxOptions{RLS: true, Isolation: pgx.Serializable}, anon,
 			[]string{"BEGIN ISOLATION LEVEL SERIALIZABLE", identitySQL, "SELECT 1", "SELECT 2", "COMMIT"}},

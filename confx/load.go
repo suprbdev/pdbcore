@@ -5,8 +5,10 @@ import (
 	"net/netip"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
@@ -15,28 +17,112 @@ import (
 	flag "github.com/spf13/pflag"
 )
 
+// LoadOption customises Load.
+type LoadOption func(*loadOpts)
+
+type loadOpts struct {
+	moved map[string]string
+}
+
+// WithMoved adds product keys to MovedKeys: old key (or old section, which
+// maps every key below it) to the key that replaced it.
+func WithMoved(moved map[string]string) LoadOption {
+	return func(o *loadOpts) {
+		for k, v := range moved {
+			o.moved[k] = v
+		}
+	}
+}
+
 // Load layers configuration into dst (which already holds the defaults):
 // optional YAML file, then envPrefix-prefixed environment variables, then
 // flags. Pass only the flags the user actually set (see ChangedFlags) so
 // unset flags cannot shadow YAML/env values; flag names are koanf paths.
-// Validation is the caller's job.
-func Load(envPrefix, path string, flags *flag.FlagSet, dst any) error {
+//
+// Loading is strict: a file key that dst has no field for is an error
+// naming the key it moved to (MovedKeys, WithMoved) or the closest valid
+// key. An environment variable with the prefix is checked the same way
+// when its first segment names a section of dst (or of a moved key), or
+// nearly does; other variables with the prefix (PDBQ_TEST_DATABASE_URL)
+// are ignored. Values are decoded with weak typing, so environment strings
+// set booleans, numbers, durations and lists. Validation is the caller's
+// job.
+func Load(envPrefix, path string, flags *flag.FlagSet, dst any, opts ...LoadOption) error {
+	o := loadOpts{moved: map[string]string{}}
+	for k, v := range MovedKeys {
+		o.moved[k] = v
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	schema := schemaOf(dst)
+	var errs []string
 	k := koanf.New(".")
 	if path != "" {
-		if err := k.Load(file.Provider(path), yaml.Parser()); err != nil {
+		fk := koanf.New(".")
+		if err := fk.Load(file.Provider(path), yaml.Parser()); err != nil {
 			return fmt.Errorf("config: read %s: %w", path, err)
 		}
+		for _, key := range fk.Keys() {
+			if schema.known(key) {
+				continue
+			}
+			msg := "unknown key " + key
+			if hint := schema.unknownKey(key, o.moved, func(p string) string { return p }); hint != "" {
+				msg += ": " + hint
+			}
+			errs = append(errs, msg)
+		}
+		if err := k.Merge(fk); err != nil {
+			return fmt.Errorf("config: %w", err)
+		}
 	}
-	if err := k.Load(env.ProviderWithValue(envPrefix, ".", envValueMapper(envPrefix, slicePaths(dst))), nil); err != nil {
+	envVars := map[string]string{}
+	mapper := envValueMapper(envPrefix, slicePaths(dst))
+	ek := koanf.New(".")
+	if err := ek.Load(env.ProviderWithValue(envPrefix, ".", func(key, value string) (string, any) {
+		path, v := mapper(key, value)
+		envVars[path] = key
+		return path, v
+	}), nil); err != nil {
 		return fmt.Errorf("config: env: %w", err)
+	}
+	for _, key := range ek.Keys() {
+		if schema.known(key) {
+			continue
+		}
+		top, _, _ := strings.Cut(key, ".")
+		if !schema.section(top, o.moved) {
+			ek.Delete(key)
+			continue
+		}
+		msg := fmt.Sprintf("unknown environment variable %s (%s)", envVars[key], key)
+		if hint := schema.unknownKey(key, o.moved, func(p string) string { return envName(envPrefix, p) }); hint != "" {
+			msg += ": " + hint
+		}
+		errs = append(errs, msg)
+	}
+	if len(errs) > 0 {
+		sort.Strings(errs)
+		return InvalidConfig(errs)
+	}
+	if err := k.Merge(ek); err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
 	if flags != nil {
 		if err := k.Load(posflag.Provider(flags, ".", k), nil); err != nil {
 			return fmt.Errorf("config: flags: %w", err)
 		}
 	}
-	if err := k.Unmarshal("", dst); err != nil {
-		return fmt.Errorf("config: unmarshal: %w", err)
+	err := k.UnmarshalWithConf("", dst, koanf.UnmarshalConf{DecoderConfig: &mapstructure.DecoderConfig{
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.TextUnmarshallerHookFunc()),
+		WeaklyTypedInput: true,
+		ErrorUnused:      true,
+	}})
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
 	return nil
 }

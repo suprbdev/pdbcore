@@ -64,10 +64,8 @@ func jwksServer(t *testing.T, keys *[]map[string]string, fetches *atomic.Int32) 
 }
 
 func jwksAuth(url string) *Authenticator {
-	return New(Config{
-		Enabled:       true,
+	return mustNew(Config{
 		AnonymousRole: "anonymous",
-		RoleClaim:     "role",
 		Mode:          "jwt",
 		JWKSURL:       url,
 		JWKSCacheTTL:  time.Hour,
@@ -293,10 +291,8 @@ func newJWKSFixture(t *testing.T, ttl time.Duration, gate chan struct{}) *jwksFi
 	s.srv = httptest.NewServer(s)
 	t.Cleanup(s.srv.Close)
 	logs := &logBuffer{}
-	a := New(Config{
-		Enabled:       true,
+	a := mustNew(Config{
 		AnonymousRole: "anonymous",
-		RoleClaim:     "role",
 		Mode:          "jwt",
 		JWKSURL:       s.srv.URL + "/internal/idp/jwks.json",
 		JWKSCacheTTL:  ttl,

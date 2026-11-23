@@ -15,13 +15,19 @@ import (
 const testSecret = "test-secret"
 
 func testAuth() *Authenticator {
-	return New(Config{
-		Enabled:       true,
+	return mustNew(Config{
 		AnonymousRole: "anonymous",
-		RoleClaim:     "role",
 		Mode:          "jwt",
 		JWTSecret:     testSecret,
 	})
+}
+
+func mustNew(cfg Config) *Authenticator {
+	a, err := New(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return a
 }
 
 func signToken(t *testing.T, claims jwt.MapClaims) string {
@@ -82,11 +88,9 @@ func TestJWTValidExpAccepted(t *testing.T) {
 
 func TestAllowedRoles(t *testing.T) {
 	newAuth := func(allowed ...string) *Authenticator {
-		return New(Config{
-			Enabled:       true,
+		return mustNew(Config{
 			AnonymousRole: "anonymous",
 			DefaultRole:   "app_default",
-			RoleClaim:     "role",
 			AllowedRoles:  allowed,
 			Mode:          "jwt",
 			JWTSecret:     testSecret,
@@ -156,10 +160,8 @@ func headersAuth(trusted ...string) *Authenticator {
 		}
 		prefixes = append(prefixes, p)
 	}
-	return New(Config{
-		Enabled:        true,
+	return mustNew(Config{
 		AnonymousRole:  "anonymous",
-		RoleClaim:      "role",
 		Mode:           "headers",
 		HeaderPrefix:   "X-Pdbq-Claim-",
 		TrustedProxies: prefixes,
@@ -182,17 +184,6 @@ func headersRequest(remoteAddr string) *http.Request {
 	r.RemoteAddr = remoteAddr
 	r.Header.Set("X-Pdbq-Claim-Role", "app_user")
 	return r
-}
-
-func TestHeadersNoTrustedProxiesAcceptsAnyPeer(t *testing.T) {
-	a := headersAuth()
-	_, role, err := a.Authenticate(headersRequest("203.0.113.7:4444"))
-	if err != nil {
-		t.Fatalf("legacy behavior broken: %v", err)
-	}
-	if role != "app_user" {
-		t.Fatalf("role = %q, want app_user", role)
-	}
 }
 
 func TestHeadersTrustedPeerAccepted(t *testing.T) {
@@ -253,18 +244,8 @@ func TestMalformedAuthorizationHeader(t *testing.T) {
 	}
 }
 
-func TestDisabledIsNoop(t *testing.T) {
-	a := New(Config{Enabled: false, Mode: "jwt"})
-	r := httptest.NewRequest("POST", "/graphql", nil)
-	r.Header.Set("Authorization", "Bearer garbage")
-	claims, role, err := a.Authenticate(r)
-	if err != nil || claims != nil || role != "" {
-		t.Fatalf("disabled auth = (%v, %q, %v), want (nil, \"\", nil)", claims, role, err)
-	}
-}
-
 func TestModeNoneIsAnonymous(t *testing.T) {
-	a := New(Config{Enabled: true, Mode: "none", AnonymousRole: "anonymous"})
+	a := mustNew(Config{Mode: ModeNone, AnonymousRole: "anonymous"})
 	r := httptest.NewRequest("POST", "/graphql", nil)
 	r.Header.Set("Authorization", "Bearer garbage")
 	_, role, err := a.Authenticate(r)
@@ -403,13 +384,13 @@ func TestHeadersEndToEndWireCanonicalization(t *testing.T) {
 }
 
 func TestHeadersClaimAllowlist(t *testing.T) {
-	a := New(Config{
-		Enabled:       true,
-		AnonymousRole: "anonymous",
-		RoleClaim:     "app_role",
-		Mode:          "headers",
-		HeaderPrefix:  "X-Pdbr-Claim-",
-		HeaderClaims:  []string{"user_id"},
+	a := mustNew(Config{
+		AnonymousRole:   "anonymous",
+		HeaderRoleClaim: "app_role",
+		TrustedProxies:  []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+		Mode:            "headers",
+		HeaderPrefix:    "X-Pdbr-Claim-",
+		HeaderClaims:    []string{"user_id"},
 	})
 	r := claimRequest(map[string][]string{"X-Pdbr-Claim-User-Id": {"1"}, "X-Pdbr-Claim-App-Role": {"app_user"}})
 	claims, role, err := a.Authenticate(r)

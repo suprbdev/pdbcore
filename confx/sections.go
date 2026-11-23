@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/suprbdev/pdbcore/auth"
 	"github.com/suprbdev/pdbcore/contract"
 )
 
@@ -19,7 +20,7 @@ type Database struct {
 	URL              string        `koanf:"url" doc:"PostgreSQL connection URL, e.g. postgres://user:pass@host:5432/db. Also honours standard PG* env vars when empty."`
 	MaxConns         int32         `koanf:"max_conns" doc:"Maximum pooled connections."`
 	ConnectTimeout   time.Duration `koanf:"connect_timeout" doc:"Timeout for establishing a connection."`
-	StatementTimeout time.Duration `koanf:"statement_timeout" doc:"Per-statement timeout applied to every request (0 disables)."`
+	StatementTimeout time.Duration `koanf:"statement_timeout" doc:"Per-statement timeout applied to every request (0 disables). Keep it below the HTTP request timeout so a slow statement fails with SQLSTATE 57014 (a timeout error the client can act on) before the request is cut off."`
 }
 
 // Schema selects what is introspected and how.
@@ -35,29 +36,74 @@ type Filters struct {
 	AllowColumns map[string][]string `koanf:"allow_columns" doc:"Per-table extra filterable columns, keyed by schema.table, overriding indexed_only."`
 }
 
-// RLS is the row-level-security / identity section.
-type RLS struct {
-	Enabled       bool     `koanf:"enabled" doc:"Run each request as a switched role with claims exposed via set_config (SET LOCAL). Disabling uses the privileged connection directly and logs a loud warning."`
-	DefaultRole   string   `koanf:"default_role" doc:"Role assumed for authenticated requests without a role claim."`
-	AnonymousRole string   `koanf:"anonymous_role" doc:"Role assumed for unauthenticated requests."`
-	RoleClaim     string   `koanf:"role_claim" doc:"JWT claim (or claim header in headers mode: app_role is <header_prefix>App-Role) carrying the database role."`
-	AllowedRoles  []string `koanf:"allowed_roles" doc:"Roles a request may assume via the role claim. Empty allows any role (subject to database grants); default_role and anonymous_role are always allowed."`
-	ClaimsPrefix  string   `koanf:"claims_prefix" doc:"set_config namespace for request claims, e.g. pdbq.claims."`
-	Auth          Auth     `koanf:"auth"`
+// Auth is the credential section: how a request proves who it is.
+type Auth struct {
+	Mode     auth.Mode `koanf:"mode" doc:"Credential source: 'jwt' (verify a bearer JWT), 'headers' (claims set by a trusted gateway) or 'none' (no credentials: every request is anonymous)."`
+	JWT      JWT       `koanf:"jwt" doc:"JWT verification (jwt mode) and the key minting signs with."`
+	Headers  Headers   `koanf:"headers" doc:"Gateway claim headers (headers mode)."`
+	MintType string    `koanf:"mint_type" doc:"Schema-qualified composite type (e.g. public.jwt) minted into a signed JWT: any function returning it yields an HS256 token string built from the composite's fields (an exp field becomes the token expiry). Requires jwt.secret or jwt.secret_file; jwt.issuer/jwt.audience are embedded when set. Empty disables minting."`
 }
 
-// Auth is the claim source (nested under rls.auth).
-type Auth struct {
-	Mode           string        `koanf:"mode" doc:"Claim source: 'jwt', 'headers' (behind a trusted gateway), or 'none'."`
-	JWTSecret      string        `koanf:"jwt_secret" doc:"HMAC secret for HS256/384/512 verification (jwt mode; ignored when jwks_url is set)."`
-	JWKSURL        string        `koanf:"jwks_url" doc:"JWKS endpoint for asymmetric JWT verification (RS256/384/512, ES256/384/512). Takes precedence over jwt_secret."`
-	JWKSCacheTTL   time.Duration `koanf:"jwks_cache_ttl" doc:"How long fetched JWKS keys are cached; an unknown kid triggers an early refresh (key rotation) at most once a minute. After the TTL, keys refresh in the background and stay in use for up to one more TTL while the endpoint fails; failed fetches back off from 1s to 1m."`
-	JWTIssuer      string        `koanf:"jwt_issuer" doc:"Expected iss claim; empty skips the check."`
-	JWTAudience    string        `koanf:"jwt_audience" doc:"Expected aud claim; empty skips the check."`
-	HeaderPrefix   string        `koanf:"header_prefix" doc:"Header prefix mapped to claims in headers mode, e.g. X-Pdbq-Claim-. The rest of the name maps to one claim (User-Id is user_id); requests with a claim header containing an underscore or other punctuation, repeated, or folding onto another claim header are rejected. The gateway must strip every client-supplied header with this prefix, in any letter case."`
-	HeaderClaims   []string      `koanf:"header_claims" doc:"Claim names (e.g. user_id) accepted from claim headers in headers mode; role_claim is always accepted. Requests carrying any other claim header are rejected. Empty accepts any claim."`
-	TrustedProxies []string      `koanf:"trusted_proxies" doc:"CIDR blocks (or single IPs) allowed to supply claim headers in headers mode. Requests from other peers that carry claim headers are rejected. Empty trusts every peer and logs a startup warning."`
-	JWTType        string        `koanf:"jwt_type" doc:"Schema-qualified composite type (e.g. public.jwt) minted into a signed JWT: any function returning it yields an HS256 token string built from the composite's fields (an exp field becomes the token expiry). Requires jwt_secret; jwt_issuer/jwt_audience are embedded when set. Empty disables minting."`
+// JWT is the auth.jwt section.
+type JWT struct {
+	Secret        string        `koanf:"secret" doc:"HMAC secret verifying HS256/384/512 tokens (ignored for verification when jwks_url is set) and signing minted tokens."`
+	SecretFile    string        `koanf:"secret_file" doc:"File holding the HMAC secret (trailing newlines are stripped), instead of secret."`
+	JWKSURL       string        `koanf:"jwks_url" doc:"JWKS endpoint for asymmetric JWT verification (RS256/384/512, ES256/384/512). Takes precedence over secret."`
+	JWKSCacheTTL  time.Duration `koanf:"jwks_cache_ttl" doc:"How long fetched JWKS keys are cached; an unknown kid triggers an early refresh (key rotation) at most once a minute. After the TTL, keys refresh in the background and stay in use for up to one more TTL while the endpoint fails; failed fetches back off from 1s to 1m."`
+	Issuer        string        `koanf:"issuer" doc:"Expected iss claim; empty skips the check."`
+	Audience      string        `koanf:"audience" doc:"Expected aud claim; empty skips the check."`
+	Leeway        time.Duration `koanf:"leeway" doc:"Clock skew tolerated when checking exp, nbf and iat."`
+	RoleClaimPath string        `koanf:"role_claim_path" doc:"Path of the claim carrying the database role: dot-separated keys with optional array indexes and double-quoted keys, e.g. role, app_metadata.role, realm_access.roles[0] or \"https://example.com/role\". A missing claim falls back to roles.default; a claim that is not a non-empty string is rejected."`
+}
+
+// Headers is the auth.headers section.
+type Headers struct {
+	Prefix         string   `koanf:"prefix" doc:"Header prefix mapped to claims, e.g. X-Pdbq-Claim-. The rest of the name maps to one claim (User-Id is user_id); requests with a claim header containing an underscore or other punctuation, repeated, or folding onto another claim header are rejected. The gateway must strip every client-supplied header with this prefix, in any letter case."`
+	Claims         []string `koanf:"claims" doc:"Claim names (e.g. user_id) accepted from claim headers; role_claim is always accepted. Requests carrying any other claim header are rejected. Empty accepts any claim."`
+	RoleClaim      string   `koanf:"role_claim" doc:"Claim carrying the database role (role is sent as <prefix>Role). A missing claim falls back to roles.default."`
+	TrustedProxies []string `koanf:"trusted_proxies" doc:"CIDR blocks (or single IPs) allowed to send claim headers; required in headers mode. Requests from other peers that carry claim headers are rejected."`
+}
+
+// Roles is the database role section: which role a request runs as.
+type Roles struct {
+	Switch    bool     `koanf:"switch" doc:"Run each request as its resolved role (SET LOCAL ROLE). Disabling runs every request as the connection role, with credentials still verified and claims still set; it logs a loud warning."`
+	Anonymous string   `koanf:"anonymous" doc:"Role of requests without credentials (every request in auth mode none). Empty refuses requests without credentials with 401 (auth modes jwt and headers)."`
+	Default   string   `koanf:"default" doc:"Role of authenticated requests without a role claim; empty falls back to anonymous, and a request that resolves to no role is refused."`
+	Allowed   []string `koanf:"allowed" doc:"Roles a request may assume via its role claim. Empty allows any role (subject to database grants); default and anonymous are always allowed."`
+}
+
+// Claims is the section exposing request claims to SQL.
+type Claims struct {
+	Prefix      string `koanf:"prefix" doc:"Namespace of the per-claim settings: claim user_id is current_setting('jwt.claims.user_id', true) with the default (PostGraphile's). Empty sets no per-claim settings."`
+	JSONSetting string `koanf:"json_setting" doc:"Setting that receives every claim as one JSON object ('{}' without credentials), e.g. request.jwt.claims (PostgREST's: current_setting('request.jwt.claims', true)::json->>'sub'). Empty sets none."`
+}
+
+// DefaultClaimsPrefix is the default claims.prefix, PostGraphile's
+// namespace, so policies reading current_setting('jwt.claims.<claim>') port
+// unchanged.
+const DefaultClaimsPrefix = "jwt.claims"
+
+// DefaultAuth is the auth section's default: jwt mode, a one-hour JWKS
+// cache, the role in the top-level role claim, and claim headers named
+// headerPrefix + claim.
+func DefaultAuth(headerPrefix string) Auth {
+	return Auth{
+		Mode:    auth.ModeJWT,
+		JWT:     JWT{JWKSCacheTTL: time.Hour, RoleClaimPath: "role"},
+		Headers: Headers{Prefix: headerPrefix, RoleClaim: "role"},
+	}
+}
+
+// DefaultRoles is the roles section's default: role switching on and no
+// anonymous access.
+func DefaultRoles() Roles {
+	return Roles{Switch: true}
+}
+
+// DefaultClaims is the claims section's default: per-claim settings under
+// DefaultClaimsPrefix and no JSON setting.
+func DefaultClaims() Claims {
+	return Claims{Prefix: DefaultClaimsPrefix}
 }
 
 // TX is the transaction policy shared by both products. pdbq adds
@@ -80,14 +126,16 @@ type Errors struct {
 	Detail string `koanf:"detail" doc:"'dev' exposes full PostgreSQL error detail in GraphQL errors; 'prod' sanitizes but passes constraint-violation and bad-input messages through; 'strict' hides every database error message (constraint and column names never leak)."`
 }
 
-// Plugins disables and configures plugins by name.
-type Plugins struct {
-	Disabled []string                  `koanf:"disabled" doc:"Plugin names to disable."`
-	Settings map[string]map[string]any `koanf:"settings" doc:"Per-plugin configuration, keyed by plugin name."`
+// Plugins disables and configures plugins by name. S is the product's
+// settings struct: one koanf-tagged field per configurable plugin, keyed by
+// plugin name, each holding that plugin's typed settings.
+type Plugins[S any] struct {
+	Disabled []string `koanf:"disabled" doc:"Plugin names to disable."`
+	Settings S        `koanf:"settings" doc:"Per-plugin settings, one section per plugin."`
 }
 
 // DisabledSet returns the disabled-plugin set for registry filtering.
-func (p Plugins) DisabledSet() map[string]bool {
+func (p Plugins[S]) DisabledSet() map[string]bool {
 	out := map[string]bool{}
 	for _, n := range p.Disabled {
 		out[n] = true

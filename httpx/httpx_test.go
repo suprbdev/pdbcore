@@ -36,7 +36,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestCORSAllowedOrigin(t *testing.T) {
-	h := CORS([]string{"https://example.com"}, health())
+	h := CORS(CORSPolicy{Origins: []string{"https://example.com"}}, health())
 	rec := do(h, "GET", "/healthz", map[string]string{"Origin": "https://example.com"})
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://example.com" {
 		t.Fatalf("Access-Control-Allow-Origin = %q, want https://example.com", got)
@@ -47,15 +47,18 @@ func TestCORSAllowedOrigin(t *testing.T) {
 }
 
 func TestCORSDisallowedOrigin(t *testing.T) {
-	h := CORS([]string{"https://example.com"}, health())
+	h := CORS(CORSPolicy{Origins: []string{"https://example.com"}}, health())
 	rec := do(h, "GET", "/healthz", map[string]string{"Origin": "https://evil.com"})
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("Access-Control-Allow-Origin = %q, want empty for disallowed origin", got)
 	}
+	if got := rec.Header().Get("Vary"); got != "Origin" {
+		t.Fatalf("Vary = %q, want Origin on every response", got)
+	}
 }
 
 func TestCORSWildcard(t *testing.T) {
-	h := CORS([]string{"*"}, health())
+	h := CORS(CORSPolicy{Origins: []string{"*"}}, health())
 	rec := do(h, "GET", "/healthz", map[string]string{"Origin": "https://anything.example"})
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://anything.example" {
 		t.Fatalf("Access-Control-Allow-Origin = %q, want echoed origin for wildcard config", got)
@@ -63,7 +66,7 @@ func TestCORSWildcard(t *testing.T) {
 }
 
 func TestCORSNoOriginHeader(t *testing.T) {
-	h := CORS([]string{"*"}, health())
+	h := CORS(CORSPolicy{Origins: []string{"*"}}, health())
 	rec := do(h, "GET", "/healthz", nil)
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("Access-Control-Allow-Origin = %q, want empty without Origin", got)
@@ -72,7 +75,7 @@ func TestCORSNoOriginHeader(t *testing.T) {
 
 func TestPreflight(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.Handle("OPTIONS /graphql", Preflight([]string{"https://example.com"}, "POST, GET, OPTIONS"))
+	mux.Handle("OPTIONS /graphql", Preflight(CORSPolicy{Origins: []string{"https://example.com"}, AllowMethods: "POST, GET, OPTIONS"}))
 	rec := do(mux, "OPTIONS", "/graphql", map[string]string{
 		"Origin":                         "https://example.com",
 		"Access-Control-Request-Method":  "POST",
@@ -95,8 +98,54 @@ func TestPreflight(t *testing.T) {
 	}
 }
 
+func TestCORSExposeHeaders(t *testing.T) {
+	p := CORSPolicy{Origins: []string{"https://example.com"}, ExposeHeaders: []string{"Content-Range", "ETag", "Location"}}
+	rec := do(CORS(p, health()), "GET", "/healthz", map[string]string{"Origin": "https://example.com"})
+	if got := rec.Header().Get("Access-Control-Expose-Headers"); got != "Content-Range, ETag, Location" {
+		t.Fatalf("Access-Control-Expose-Headers = %q", got)
+	}
+	rec = do(CORS(p, health()), "GET", "/healthz", map[string]string{"Origin": "https://evil.com"})
+	if got := rec.Header().Get("Access-Control-Expose-Headers"); got != "" {
+		t.Fatalf("Access-Control-Expose-Headers = %q for a disallowed origin", got)
+	}
+	rec = do(CORS(CORSPolicy{Origins: []string{"*"}}, health()), "GET", "/healthz", map[string]string{"Origin": "https://a.example"})
+	if _, ok := rec.Header()["Access-Control-Expose-Headers"]; ok {
+		t.Fatal("Access-Control-Expose-Headers set without ExposeHeaders")
+	}
+}
+
+func TestCORSAndGzipKeepBothVary(t *testing.T) {
+	p := CORSPolicy{Origins: []string{"*"}}
+	hdr := map[string]string{"Origin": "https://a.example", "Accept-Encoding": "gzip"}
+	for name, h := range map[string]http.Handler{
+		"cors outside": CORS(p, Gzip(health())),
+		"gzip outside": Gzip(CORS(p, health())),
+	} {
+		rec := do(h, "GET", "/healthz", hdr)
+		got := rec.Header().Values("Vary")
+		if len(got) != 2 || !varies(rec.Header(), "Origin") || !varies(rec.Header(), "Accept-Encoding") {
+			t.Errorf("%s: Vary = %q, want Origin and Accept-Encoding once each", name, got)
+		}
+	}
+}
+
+func TestAddVary(t *testing.T) {
+	h := http.Header{}
+	h.Set("Vary", "accept-encoding, Cookie")
+	AddVary(h, "Accept-Encoding", "Origin", "origin")
+	if got := h.Values("Vary"); len(got) != 2 || got[0] != "accept-encoding, Cookie" || got[1] != "Origin" {
+		t.Fatalf("Vary = %q", got)
+	}
+	h = http.Header{}
+	h.Set("Vary", "*")
+	AddVary(h, "Origin")
+	if got := h.Values("Vary"); len(got) != 1 {
+		t.Fatalf("Vary = %q, want * alone", got)
+	}
+}
+
 func TestPreflightDisallowedOrigin(t *testing.T) {
-	h := Preflight([]string{"https://example.com"}, "POST, GET, OPTIONS")
+	h := Preflight(CORSPolicy{Origins: []string{"https://example.com"}, AllowMethods: "POST, GET, OPTIONS"})
 	rec := do(h, "OPTIONS", "/graphql", map[string]string{"Origin": "https://evil.com"})
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rec.Code)
@@ -107,7 +156,7 @@ func TestPreflightDisallowedOrigin(t *testing.T) {
 }
 
 func TestCORSWithPreflight(t *testing.T) {
-	h := CORSWithPreflight([]string{"*"}, "GET, POST, OPTIONS", health())
+	h := CORSWithPreflight(CORSPolicy{Origins: []string{"*"}, AllowMethods: "GET, POST, OPTIONS"}, health())
 	rec := do(h, "OPTIONS", "/anything", map[string]string{
 		"Origin": "https://a.example", "Access-Control-Request-Method": "POST",
 	})
@@ -154,8 +203,8 @@ func TestGzipSkippedWithoutAcceptEncoding(t *testing.T) {
 
 func TestGzipSkipsCORSPreflight(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.Handle("OPTIONS /graphql", Preflight([]string{"*"}, "POST, GET, OPTIONS"))
-	h := Gzip(CORS([]string{"*"}, mux))
+	mux.Handle("OPTIONS /graphql", Preflight(CORSPolicy{Origins: []string{"*"}, AllowMethods: "POST, GET, OPTIONS"}))
+	h := Gzip(CORS(CORSPolicy{Origins: []string{"*"}}, mux))
 	rec := do(h, "OPTIONS", "/graphql", map[string]string{"Origin": "https://example.com", "Accept-Encoding": "gzip"})
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("preflight status = %d, want 204", rec.Code)

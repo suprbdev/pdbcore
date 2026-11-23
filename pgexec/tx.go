@@ -27,22 +27,24 @@ type TxBeginner interface {
 	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
 }
 
-// DefaultClaimsPrefix is the set_config namespace used when
-// Identity.ClaimsPrefix is empty (kept as pdbq's so existing RLS policies
-// work with either product).
-const DefaultClaimsPrefix = "pdbq.claims"
-
 // Identity is the request identity applied inside a transaction.
 type Identity struct {
 	// Role is the database role to SET LOCAL ROLE to ("" = no switch).
 	Role string
-	// Claims are exposed as set_config(ClaimsPrefix.key, value, true).
-	// String values are set verbatim; anything else is JSON-encoded. Keys
-	// failing ValidClaimKey are skipped.
+	// Claims are exposed as set_config(ClaimsPrefix.key, value, true)
+	// and, as one JSON object, as set_config(ClaimsJSONSetting, json,
+	// true). String values are set verbatim; anything else is
+	// JSON-encoded. Keys failing ValidClaimKey are skipped by the
+	// per-claim settings.
 	Claims map[string]any
-	// ClaimsPrefix defaults to DefaultClaimsPrefix and must pass
-	// ValidateClaimsPrefix.
+	// ClaimsPrefix is the namespace of the per-claim settings; it must
+	// pass ValidateClaimsPrefix. Empty sets no per-claim settings.
 	ClaimsPrefix string
+	// ClaimsJSONSetting names the setting that receives every claim as
+	// one JSON object ("{}" when there are none), e.g.
+	// request.jwt.claims; it must pass ValidateClaimsSetting. Empty sets
+	// no JSON setting.
+	ClaimsJSONSetting string
 }
 
 // TxOptions controls RunTx and QueryTx.
@@ -147,45 +149,60 @@ const claimsSQL = `SELECT count(set_config(c.k, c.v, true)) FROM unnest($1::text
 // role passed as a bind parameter instead of a quoted identifier.
 const identitySQL = `SELECT set_config('role', $1, true), (SELECT count(set_config(c.k, c.v, true)) FROM unnest($2::text[], $3::text[]) AS c(k, v))`
 
-// claimSettings returns the set_config names (ClaimsPrefix + "." + key) and
-// values for id.Claims, sorted by name. String values are used verbatim and
-// anything else is JSON-encoded; keys failing [ValidClaimKey] and values
-// that cannot be encoded are skipped. A prefix failing
-// [ValidateClaimsPrefix] is an error.
+// claimSettings returns the set_config names and values for id: one
+// ClaimsPrefix + "." + key setting per claim, sorted by name, then the
+// ClaimsJSONSetting holding every claim as a JSON object. String values are
+// used verbatim and anything else is JSON-encoded; keys failing
+// [ValidClaimKey] and values that cannot be encoded are skipped. A prefix
+// failing [ValidateClaimsPrefix], a JSON setting failing
+// [ValidateClaimsSetting] and claims that cannot be encoded as one JSON
+// object are errors.
 func claimSettings(id Identity) (names, values []string, err error) {
 	if err := ValidateClaimsPrefix(id.ClaimsPrefix); err != nil {
 		return nil, nil, err
 	}
-	if len(id.Claims) == 0 {
-		return nil, nil, nil
-	}
-	prefix := id.ClaimsPrefix
-	if prefix == "" {
-		prefix = DefaultClaimsPrefix
-	}
-	keys := make([]string, 0, len(id.Claims))
-	for k := range id.Claims {
-		if ValidClaimKey(k) {
-			keys = append(keys, k)
+	if id.ClaimsJSONSetting != "" {
+		if err := ValidateClaimsSetting(id.ClaimsJSONSetting); err != nil {
+			return nil, nil, err
 		}
 	}
-	sort.Strings(keys)
-	names = make([]string, 0, len(keys))
-	values = make([]string, 0, len(keys))
-	for _, k := range keys {
-		var val string
-		switch tv := id.Claims[k].(type) {
-		case string:
-			val = tv
-		default:
-			b, err := json.Marshal(tv)
-			if err != nil {
-				continue
+	if id.ClaimsPrefix != "" && len(id.Claims) > 0 {
+		keys := make([]string, 0, len(id.Claims))
+		for k := range id.Claims {
+			if ValidClaimKey(k) {
+				keys = append(keys, k)
 			}
-			val = string(b)
 		}
-		names = append(names, prefix+"."+k)
-		values = append(values, val)
+		sort.Strings(keys)
+		names = make([]string, 0, len(keys)+1)
+		values = make([]string, 0, len(keys)+1)
+		for _, k := range keys {
+			var val string
+			switch tv := id.Claims[k].(type) {
+			case string:
+				val = tv
+			default:
+				b, err := json.Marshal(tv)
+				if err != nil {
+					continue
+				}
+				val = string(b)
+			}
+			names = append(names, id.ClaimsPrefix+"."+k)
+			values = append(values, val)
+		}
+	}
+	if id.ClaimsJSONSetting != "" {
+		doc := "{}"
+		if len(id.Claims) > 0 {
+			b, err := json.Marshal(id.Claims)
+			if err != nil {
+				return nil, nil, fmt.Errorf("encode claims: %w", err)
+			}
+			doc = string(b)
+		}
+		names = append(names, id.ClaimsJSONSetting)
+		values = append(values, doc)
 	}
 	return names, values, nil
 }
