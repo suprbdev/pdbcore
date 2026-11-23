@@ -603,3 +603,74 @@ func TestIntrospectPartitionsLive(t *testing.T) {
 		t.Errorf("customers = %+v", c)
 	}
 }
+
+// TestIntrospectBaseTypesAndRangesLive checks that BaseTypeSchema follows a
+// domain chain into another schema (and that a same-named type elsewhere
+// keeps its own schema), and that range types outside pg_catalog are
+// recorded with their subtype and multirange.
+func TestIntrospectBaseTypesAndRangesLive(t *testing.T) {
+	tx := liveTx(t,
+		`CREATE SCHEMA pdbcore_base_a`,
+		`CREATE SCHEMA pdbcore_base_b`,
+		`CREATE TYPE pdbcore_base_a.hstore AS (k text)`,
+		`CREATE DOMAIN pdbcore_base_b.words AS pdbcore_base_a.hstore`,
+		`CREATE DOMAIN pdbcore_base_b.words2 AS pdbcore_base_b.words`,
+		`CREATE TYPE pdbcore_base_a.floatrange AS RANGE (subtype = float8)`,
+		`CREATE DOMAIN pdbcore_base_b.span AS pdbcore_base_a.floatrange`,
+		`CREATE TABLE pdbcore_base_b.t (
+			h  pdbcore_base_a.hstore,
+			w  pdbcore_base_b.words2,
+			r  pdbcore_base_a.floatrange,
+			s  pdbcore_base_b.span,
+			ra pdbcore_base_a.floatrange[],
+			n  int4
+		)`,
+		`CREATE TYPE pdbcore_base_b.c AS (w pdbcore_base_b.words)`,
+	)
+	ctx := context.Background()
+	cat, err := Introspect(ctx, tx, []string{"pdbcore_base_b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := cat.Table("pdbcore_base_b", "t")
+	if tbl == nil {
+		t.Fatal("table not introspected")
+	}
+	for name, want := range map[string][3]string{
+		"h":  {"hstore", "pdbcore_base_a", "pdbcore_base_a"},
+		"w":  {"hstore", "pdbcore_base_b", "pdbcore_base_a"},
+		"r":  {"floatrange", "pdbcore_base_a", "pdbcore_base_a"},
+		"s":  {"floatrange", "pdbcore_base_b", "pdbcore_base_a"},
+		"ra": {"_floatrange", "pdbcore_base_a", "pdbcore_base_a"},
+		"n":  {"int4", "pg_catalog", "pg_catalog"},
+	} {
+		c := tbl.Column(name)
+		if got := [3]string{c.PGType, c.TypeSchema, c.BaseTypeSchema}; got != want {
+			t.Errorf("column %s: (PGType, TypeSchema, BaseTypeSchema) = %v, want %v", name, got, want)
+		}
+	}
+	comp := cat.Composite("pdbcore_base_b", "c")
+	if comp == nil || comp.Fields[0].BaseTypeSchema != "pdbcore_base_a" || comp.Fields[0].TypeSchema != "pdbcore_base_b" {
+		t.Errorf("composite field = %+v", comp)
+	}
+
+	r := cat.Range("pdbcore_base_a", "floatrange")
+	if r == nil {
+		t.Fatalf("floatrange not recorded: %+v", cat.Ranges)
+	}
+	want := RangeType{Schema: "pdbcore_base_a", Name: "floatrange", Subtype: "float8", SubtypeSchema: "pg_catalog"}
+	if cat.ServerVersionNum >= 140000 {
+		want.Multirange, want.MultirangeSchema = "floatmultirange", "pdbcore_base_a"
+		if got := cat.RangeOfMultirange("pdbcore_base_a", "floatmultirange"); got != r {
+			t.Errorf("RangeOfMultirange = %+v", got)
+		}
+	}
+	if *r != want {
+		t.Errorf("floatrange = %+v, want %+v", *r, want)
+	}
+	for _, rt := range cat.Ranges {
+		if rt.Schema == "pg_catalog" {
+			t.Errorf("built-in range recorded: %+v", rt)
+		}
+	}
+}

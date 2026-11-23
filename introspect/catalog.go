@@ -11,7 +11,7 @@ import (
 
 // CatalogFormatVersion is bumped whenever the Catalog wire format changes
 // incompatibly; the cache layer refuses to load mismatched versions.
-const CatalogFormatVersion = 6
+const CatalogFormatVersion = 7
 
 // Catalog is the complete introspected model of the database. It is the only
 // input to API building, which keeps caching trivial and plugin transforms
@@ -31,6 +31,26 @@ type Catalog struct {
 	// Extensions lists every extension installed in the database
 	// (pg_extension), regardless of which schemas were introspected.
 	Extensions []*Extension `json:"extensions"`
+	// Ranges lists every range type outside pg_catalog (CREATE TYPE ...
+	// AS RANGE, including those extensions install), regardless of which
+	// schemas were introspected, so a column whose range type lives
+	// elsewhere still resolves. The built-in range types are not listed.
+	Ranges []*RangeType `json:"ranges,omitempty"`
+}
+
+// RangeType is a range type as recorded in pg_range.
+type RangeType struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+	// Subtype is the element type (pg_range.rngsubtype) as Column.PGType
+	// spells a type, e.g. "float8", and SubtypeSchema its schema.
+	Subtype       string `json:"subtype"`
+	SubtypeSchema string `json:"subtype_schema"`
+	// Multirange is the multirange type PostgreSQL 14+ creates alongside
+	// the range (pg_range.rngmultitypid), and MultirangeSchema its schema;
+	// both are empty on older servers.
+	Multirange       string `json:"multirange,omitempty"`
+	MultirangeSchema string `json:"multirange_schema,omitempty"`
 }
 
 // Extension is an installed extension as recorded in pg_extension.
@@ -164,6 +184,12 @@ type Column struct {
 	// (pg_catalog) types declared with a modifier, so it never depends on
 	// the session's search_path; empty otherwise.
 	SQLType string `json:"sql_type,omitempty"`
+	// BaseTypeSchema is the schema of PGType: the declared type's schema,
+	// or for a domain the schema of the base type its chain resolves to
+	// (an extension type such as hstore lives in the extension's schema
+	// while a domain over it may live anywhere). Empty when unknown
+	// (hand-built catalogs).
+	BaseTypeSchema string `json:"base_type_schema,omitempty"`
 }
 
 // GeneratedKind distinguishes identity columns from stored and virtual
@@ -444,6 +470,28 @@ func (c *Catalog) Extension(name string) *Extension {
 // HasExtension reports whether the named extension is installed.
 func (c *Catalog) HasExtension(name string) bool { return c.Extension(name) != nil }
 
+// Range returns the range type with the given schema+name from
+// [Catalog.Ranges], or nil.
+func (c *Catalog) Range(schema, name string) *RangeType {
+	for _, r := range c.Ranges {
+		if r.Schema == schema && r.Name == name {
+			return r
+		}
+	}
+	return nil
+}
+
+// RangeOfMultirange returns the range type whose multirange type has the
+// given schema+name, or nil.
+func (c *Catalog) RangeOfMultirange(schema, name string) *RangeType {
+	for _, r := range c.Ranges {
+		if r.Multirange != "" && r.MultirangeSchema == schema && r.Multirange == name {
+			return r
+		}
+	}
+	return nil
+}
+
 // Composite returns the composite type with the given schema+name, or nil.
 func (c *Catalog) Composite(schema, name string) *Composite {
 	for _, ct := range c.Composites {
@@ -493,4 +541,10 @@ func (c *Catalog) sortStable() {
 		return c.Functions[i].Name < c.Functions[j].Name
 	})
 	sort.Slice(c.Extensions, func(i, j int) bool { return c.Extensions[i].Name < c.Extensions[j].Name })
+	sort.Slice(c.Ranges, func(i, j int) bool {
+		if c.Ranges[i].Schema != c.Ranges[j].Schema {
+			return c.Ranges[i].Schema < c.Ranges[j].Schema
+		}
+		return c.Ranges[i].Name < c.Ranges[j].Name
+	})
 }

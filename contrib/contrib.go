@@ -50,7 +50,9 @@
 // types as "ext".hstore, functions as "ext".similarity(...), and operators
 // with the OPERATOR("ext".@>) syntax. An unbound vocabulary (schema "")
 // renders bare names and relies on the search_path. Core types (tsvector,
-// ranges, inet) are always rendered unqualified.
+// the built-in ranges, inet) are always rendered unqualified; range types
+// recorded in [introspect.Catalog.Ranges] are rendered qualified with their
+// own schemas ([RangeOf]).
 package contrib
 
 import (
@@ -528,32 +530,48 @@ func FindOp(vs []Vocabulary, name string) (Op, bool) {
 // vocabularies are returned only when the catalog records the extension.
 // Columns that other layers own (PostGIS spatial columns, table-backed
 // enums) get none.
+//
+// The column's resolved base type is matched by name and by
+// [introspect.Column.BaseTypeSchema]: core types must be in pg_catalog,
+// extension types in their extension's schema, and range types recorded in
+// [introspect.Catalog.Ranges] get the range vocabulary ([RangeOf]), so a
+// user type that merely shares a name (an "hstore" in another schema) gets
+// none. A column without BaseTypeSchema is matched by name alone.
 func ForColumn(cat *introspect.Catalog, col *introspect.Column) []Vocabulary {
 	if col == nil || col.Spatial != nil || col.EnumRef != "" {
 		return nil
 	}
-	return ForType(cat, col.PGType, col.IsArray)
+	schema, name, arr := splitType(col.PGType)
+	if col.BaseTypeSchema != "" {
+		schema = col.BaseTypeSchema
+	}
+	return forType(cat, schema, name, arr || col.IsArray)
 }
 
 // ForType returns the vocabularies for a pg type name as Column.PGType
 // spells it (the resolved base type of a domain; "_ltree" for an array),
 // also accepting schema-qualified and quoted spellings ("ext.hstore",
-// `"ext"."ltree"[]`). isArray marks an array type whose name carries no
-// array marker. cat supplies installed extensions and their schemas; nil
+// `"ext"."ltree"[]`). A schema qualifier is matched as in [ForColumn]; an
+// unqualified name is matched by name alone, preferring built-in types.
+// isArray marks an array type whose name carries no array marker. cat
+// supplies installed extensions with their schemas and range types; nil
 // means none are installed.
 func ForType(cat *introspect.Catalog, pgType string, isArray bool) []Vocabulary {
-	base, arr := normalizeType(pgType)
-	arr = arr || isArray
-	var ver string
-	ext := func(name string) (string, bool) {
+	schema, name, arr := splitType(pgType)
+	return forType(cat, schema, name, arr || isArray)
+}
+
+func forType(cat *introspect.Catalog, schema, name string, arr bool) []Vocabulary {
+	base := strings.ToLower(name)
+	core := schema == "" || schema == "pg_catalog"
+	ext := func(extName string) (string, bool) {
 		if cat == nil {
 			return "", false
 		}
-		e := cat.Extension(name)
-		if e == nil {
+		e := cat.Extension(extName)
+		if e == nil || (schema != "" && schema != e.Schema) {
 			return "", false
 		}
-		ver = e.Version
 		return e.Schema, true
 	}
 	if arr {
@@ -564,9 +582,29 @@ func ForType(cat *introspect.Catalog, pgType string, isArray bool) []Vocabulary 
 		}
 		return nil
 	}
+	if core {
+		switch base {
+		case "tsvector":
+			return []Vocabulary{FullText()}
+		case "inet", "cidr":
+			v, _ := Inet(base)
+			return []Vocabulary{v}
+		}
+		if v, ok := Range(base); ok {
+			return []Vocabulary{v}
+		}
+		if v, ok := Multirange(base); ok {
+			return []Vocabulary{v}
+		}
+	}
+	if r, multi := catalogRange(cat, schema, name); r != nil {
+		if multi {
+			v, _ := MultirangeOf(r)
+			return []Vocabulary{v}
+		}
+		return []Vocabulary{RangeOf(r)}
+	}
 	switch base {
-	case "tsvector":
-		return []Vocabulary{FullText()}
 	case "hstore":
 		if s, ok := ext(ExtHstore); ok {
 			return []Vocabulary{Hstore().Bind(s)}
@@ -577,15 +615,6 @@ func ForType(cat *introspect.Catalog, pgType string, isArray bool) []Vocabulary 
 			return []Vocabulary{Ltree().Bind(s)}
 		}
 		return nil
-	case "inet", "cidr":
-		v, _ := Inet(base)
-		return []Vocabulary{v}
-	}
-	if v, ok := Range(base); ok {
-		return []Vocabulary{v}
-	}
-	if v, ok := Multirange(base); ok {
-		return []Vocabulary{v}
 	}
 	if !IsText(base) {
 		return nil
@@ -597,30 +626,63 @@ func ForType(cat *introspect.Catalog, pgType string, isArray bool) []Vocabulary 
 			return nil
 		}
 		out = append(out, Citext().Bind(s))
+	} else if !core {
+		return nil
 	}
 	out = append(out, TextSearch(base))
-	if s, ok := ext(ExtTrgm); ok {
-		out = append(out, Trgm(base).Bind(s).ForVersion(ver))
+	if cat != nil {
+		if e := cat.Extension(ExtTrgm); e != nil {
+			out = append(out, Trgm(base).Bind(e.Schema).ForVersion(e.Version))
+		}
 	}
 	return out
 }
 
-// normalizeType strips quoting, a schema qualifier and an array marker
-// ("_x" or "x[]") from a type name.
-func normalizeType(t string) (string, bool) {
+// catalogRange finds the range type recorded in cat that a range or
+// multirange type name refers to, reporting whether it is the multirange.
+// An empty schema matches any.
+func catalogRange(cat *introspect.Catalog, schema, name string) (*introspect.RangeType, bool) {
+	if cat == nil {
+		return nil, false
+	}
+	for _, r := range cat.Ranges {
+		if (schema == "" || r.Schema == schema) && r.Name == name {
+			return r, false
+		}
+	}
+	for _, r := range cat.Ranges {
+		if r.Multirange != "" && (schema == "" || r.MultirangeSchema == schema) && r.Multirange == name {
+			return r, true
+		}
+	}
+	return nil, false
+}
+
+// splitType splits a type name into its schema qualifier ("" when
+// unqualified), its name, and whether it is an array ("_x" or "x[]"),
+// stripping double quotes.
+func splitType(t string) (string, string, bool) {
 	t = strings.TrimSpace(t)
 	arr := false
 	if s, ok := strings.CutSuffix(t, "[]"); ok {
 		t, arr = s, true
 	}
 	t = strings.ReplaceAll(t, `"`, "")
+	schema := ""
 	if i := strings.LastIndexByte(t, '.'); i >= 0 {
-		t = t[i+1:]
+		schema, t = t[:i], t[i+1:]
 	}
 	if s, ok := strings.CutPrefix(t, "_"); ok && !arr {
 		t, arr = s, true
 	}
-	return strings.ToLower(t), arr
+	return schema, t, arr
+}
+
+// normalizeType strips quoting, a schema qualifier and an array marker
+// ("_x" or "x[]") from a type name.
+func normalizeType(t string) (string, bool) {
+	_, name, arr := splitType(t)
+	return strings.ToLower(name), arr
 }
 
 // IsText reports whether a pg type (as Column.PGType spells it) is a

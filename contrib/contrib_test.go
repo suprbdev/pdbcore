@@ -112,6 +112,7 @@ func allVocabularies(t *testing.T) []contrib.Vocabulary {
 		mr := strings.Replace(r, "range", "multirange", 1)
 		vs = append(vs, m(contrib.Multirange(mr)))
 	}
+	vs = append(vs, contrib.RangeOf(customRange), m(contrib.MultirangeOf(customRange)))
 	for i := range vs {
 		vs[i] = vs[i].Bind(`my "ext"`)
 	}
@@ -474,6 +475,129 @@ func TestParseRangeLiteral(t *testing.T) {
 	}
 }
 
+// customRange is a range type as introspection records CREATE TYPE
+// "my schema"."Float Range" AS RANGE (subtype = float8).
+var customRange = &introspect.RangeType{
+	Schema: "my schema", Name: "Float Range", Subtype: "float8", SubtypeSchema: "pg_catalog",
+	Multirange: "Float Multi", MultirangeSchema: "my schema",
+}
+
+func TestCustomRangeRenders(t *testing.T) {
+	m := must(t)
+	r := contrib.RangeOf(customRange)
+	mr := m(contrib.MultirangeOf(customRange))
+	if r.Name != contrib.VocabRange || r.Type != "Float Range" || mr.Name != contrib.VocabMultirange || mr.Type != "Float Multi" {
+		t.Errorf("vocabularies %s %s / %s %s", r.Name, r.Type, mr.Name, mr.Type)
+	}
+	ctor := `"my schema"."Float Range"($1::float8, $2::float8, $3::text)`
+	for _, tc := range []struct {
+		v    contrib.Vocabulary
+		op   string
+		args []string
+		want string
+	}{
+		{r, "overlaps", []string{"$1", "$2", "$3"}, "(t.c) && " + ctor},
+		{r, "containsElement", []string{"$1"}, "(t.c) @> $1::float8"},
+		{mr, "contains", []string{"$1", "$2", "$3"}, "(t.c) @> " + ctor},
+	} {
+		op, ok := tc.v.Op(tc.op)
+		if !ok {
+			t.Fatalf("%s: no op %s", tc.v.Type, tc.op)
+		}
+		if got := op.Render("t.c", tc.args...); got != tc.want {
+			t.Errorf("%s %s = %s, want %s", tc.v.Type, tc.op, got, tc.want)
+		}
+	}
+	if got := r.Codec.SQL("$1", "$2", "$3"); got != ctor {
+		t.Errorf("codec = %s", got)
+	}
+	want := `"my schema"."Float Multi"(VARIADIC ARRAY(SELECT "my schema"."Float Range"(__l, __u, __b) FROM unnest($1::float8[], $2::float8[], $3::text[]) AS __r(__l, __u, __b)))`
+	if got := mr.Codec.SQL("$1", "$2", "$3"); got != want {
+		t.Errorf("multirange codec = %s", got)
+	}
+	if a, _ := r.Accessor("start"); a.Type != "float8" {
+		t.Errorf("start accessor type %q", a.Type)
+	}
+	if ps, err := r.Codec.Params("empty"); err != nil || !reflect.DeepEqual(ps, []any{"0", "0", "[)"}) {
+		t.Errorf("empty params = %v, %v", ps, err)
+	}
+	if ps, err := r.Codec.Params(map[string]any{"start": 1.5}); err != nil || !reflect.DeepEqual(ps, []any{"1.5", nil, "[)"}) {
+		t.Errorf("params = %v, %v", ps, err)
+	}
+
+	ints := contrib.RangeOf(&introspect.RangeType{Schema: "s", Name: "r", Subtype: "int2", SubtypeSchema: "pg_catalog"})
+	if _, err := ints.Codec.Params(map[string]any{"start": 1.5}); err == nil {
+		t.Error("int2 subtype accepted a fractional bound")
+	}
+	if _, ok := contrib.MultirangeOf(&introspect.RangeType{Schema: "s", Name: "r", Subtype: "int2", SubtypeSchema: "pg_catalog"}); ok {
+		t.Error("MultirangeOf without a multirange type")
+	}
+	odd := contrib.RangeOf(&introspect.RangeType{Schema: "s", Name: "r", Subtype: "semver", SubtypeSchema: "s"})
+	if got := odd.Codec.SQL("$1", "$2", "$3"); got != `"s"."r"($1::"s"."semver", $2::"s"."semver", $3::text)` {
+		t.Errorf("custom subtype codec = %s", got)
+	}
+	if _, err := odd.Codec.Params("empty"); err == nil {
+		t.Error("empty range accepted without a known sentinel")
+	}
+	if _, err := odd.Codec.Params("[1.0.0,2.0.0)"); err != nil {
+		t.Errorf("custom subtype bounds: %v", err)
+	}
+}
+
+func TestForColumnMatchesBaseTypeSchema(t *testing.T) {
+	cat := &introspect.Catalog{
+		Extensions: []*introspect.Extension{
+			{Name: "pg_trgm", Schema: "trgm"}, {Name: "hstore", Schema: "ext"},
+			{Name: "ltree", Schema: "ext"}, {Name: "citext", Schema: "ext"},
+		},
+		Ranges: []*introspect.RangeType{customRange},
+	}
+	col := func(typ, schema string) *introspect.Column {
+		return &introspect.Column{PGType: typ, TypeSchema: "app", BaseTypeSchema: schema, IsArray: strings.HasPrefix(typ, "_")}
+	}
+	tests := []struct {
+		col  *introspect.Column
+		want string
+	}{
+		{col("hstore", "ext"), "hstore"},
+		{col("hstore", "app"), ""},
+		{col("hstore", ""), "hstore"},
+		{col("ltree", "app"), ""},
+		{col("_ltree", "ext"), "ltree[]"},
+		{col("_ltree", "app"), ""},
+		{col("citext", "ext"), "citext,textsearch,trgm"},
+		{col("citext", "app"), ""},
+		{col("text", "pg_catalog"), "textsearch,trgm"},
+		{col("text", "app"), ""},
+		{col("tsvector", "app"), ""},
+		{col("inet", "app"), ""},
+		{col("int4range", "pg_catalog"), "range"},
+		{col("int4range", "app"), ""},
+		{col("Float Range", "my schema"), "range"},
+		{col("Float Range", "other"), ""},
+		{col("Float Multi", "my schema"), "multirange"},
+		{col("_Float Range", "my schema"), ""},
+	}
+	for _, tc := range tests {
+		var got []string
+		for _, v := range contrib.ForColumn(cat, tc.col) {
+			got = append(got, v.Name)
+		}
+		if s := strings.Join(got, ","); s != tc.want {
+			t.Errorf("%s in %q: %q, want %q", tc.col.PGType, tc.col.BaseTypeSchema, s, tc.want)
+		}
+	}
+	if vs := contrib.ForType(cat, `"my schema"."Float Range"`, false); len(vs) != 1 || vs[0].Type != "Float Range" {
+		t.Errorf("qualified custom range: %v", vs)
+	}
+	if vs := contrib.ForType(cat, "Float Multi", false); len(vs) != 1 || vs[0].Name != contrib.VocabMultirange {
+		t.Errorf("unqualified custom multirange: %v", vs)
+	}
+	if vs := contrib.ForType(cat, "app.hstore", false); len(vs) != 0 {
+		t.Errorf("app.hstore: %v", vs)
+	}
+}
+
 func TestForType(t *testing.T) {
 	all := &introspect.Catalog{Extensions: []*introspect.Extension{
 		{Name: "pg_trgm", Schema: "trgm"}, {Name: "hstore", Schema: "ext"},
@@ -507,6 +631,10 @@ func TestForType(t *testing.T) {
 		{nil, "hstore", false, ""},
 		{all, "hstore", false, "hstore@ext"},
 		{all, "ext.hstore", false, "hstore@ext"},
+		{all, "public.hstore", false, ""},
+		{all, "pg_catalog.text", false, "textsearch,trgm@trgm"},
+		{all, "public.text", false, ""},
+		{all, "public.int4range", false, ""},
 		{all, "_hstore", true, ""},
 		{all, "ltree", false, "ltree@public"},
 		{all, "_ltree", true, "ltree[]@public"},
