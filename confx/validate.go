@@ -3,7 +3,8 @@ package confx
 import (
 	"fmt"
 	"net"
-	"net/netip"
+	"net/url"
+	"os"
 	"strings"
 
 	"github.com/suprbdev/pdbcore/auth"
@@ -29,50 +30,97 @@ func ValidateErrors(e Errors) []string {
 	return []string{fmt.Sprintf("errors.detail: %q is not 'dev', 'prod' or 'strict'", e.Detail)}
 }
 
-// ValidateRLS checks the rls section: auth mode, trusted proxies, JWT
-// secret/JWKS presence, jwt_type shape, the headers-mode prefix and claim
-// names (auth.ValidHeaderClaim), the anonymous role, the configured role
-// names (pgexec.ValidRole) and claims_prefix (pgexec.ValidateClaimsPrefix).
-func ValidateRLS(c RLS) []string {
+// ValidateIdentity checks the auth, roles and claims sections together:
+// the auth mode; in jwt mode a secret, secret file or JWKS URL (a secret
+// file must be readable), the role claim path and a non-negative leeway;
+// in headers mode the prefix, the claim names (auth.ValidHeaderClaim) and
+// at least one trusted proxy; every trusted_proxies entry; mint_type's
+// shape and secret; the role names (pgexec.ValidRole), and an anonymous
+// role in mode none while roles switch; the claims prefix
+// (pgexec.ValidateClaimsPrefix) and JSON setting
+// (pgexec.ValidateClaimsSetting), which must not lie under the prefix.
+func ValidateIdentity(a Auth, r Roles, c Claims) []string {
 	var errs []string
-	switch c.Auth.Mode {
-	case "jwt", "headers", "none":
-	default:
-		errs = append(errs, fmt.Sprintf("rls.auth.mode: %q is not 'jwt', 'headers' or 'none'", c.Auth.Mode))
+	add := func(format string, args ...any) { errs = append(errs, fmt.Sprintf(format, args...)) }
+	if _, err := auth.ParseMode(string(a.Mode)); err != nil {
+		add("auth.mode: %q is not 'jwt', 'headers' or 'none'", a.Mode)
 	}
-	for _, p := range c.Auth.TrustedProxies {
+	j := a.JWT
+	if j.Secret != "" && j.SecretFile != "" {
+		add("auth.jwt.secret and auth.jwt.secret_file are mutually exclusive")
+	}
+	if j.SecretFile != "" {
+		if _, err := j.ResolveSecret(); err != nil {
+			add("auth.jwt.secret_file: %v", err)
+		}
+	}
+	if j.JWKSURL != "" {
+		if u, err := url.Parse(j.JWKSURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			add("auth.jwt.jwks_url: %q is not an http(s) URL", j.JWKSURL)
+		}
+	}
+	if j.Leeway < 0 {
+		add("auth.jwt.leeway must be >= 0")
+	}
+	if a.Mode == auth.ModeJWT {
+		if j.Secret == "" && j.SecretFile == "" && j.JWKSURL == "" {
+			add("auth.jwt.secret, auth.jwt.secret_file or auth.jwt.jwks_url is required in auth mode jwt (use auth.mode: none to accept no credentials)")
+		}
+		if err := auth.ValidateClaimPath(j.RoleClaimPath); err != nil {
+			add("auth.jwt.role_claim_path: %v", err)
+		}
+	}
+	for _, p := range a.Headers.TrustedProxies {
 		if _, err := ParseTrustedProxy(p); err != nil {
-			errs = append(errs, fmt.Sprintf("rls.auth.trusted_proxies: %q is not a valid IP or CIDR block", p))
+			add("auth.headers.trusted_proxies: %q is not a valid IP or CIDR block", p)
 		}
 	}
-	if c.Auth.Mode == "headers" {
-		errs = append(errs, validateHeadersMode(c)...)
+	if a.Mode == auth.ModeHeaders {
+		errs = append(errs, validateHeadersMode(a.Headers)...)
 	}
-	if c.Enabled && c.Auth.Mode == "jwt" && c.Auth.JWTSecret == "" && c.Auth.JWKSURL == "" {
-		errs = append(errs, "rls.auth.jwt_secret or rls.auth.jwks_url is required when rls.enabled and auth mode is jwt")
+	if a.MintType != "" && j.Secret == "" && j.SecretFile == "" {
+		add("auth.mint_type requires auth.jwt.secret or auth.jwt.secret_file: minting signs with the HMAC secret (JWKS keys are verify-only)")
 	}
-	if c.Auth.JWTType != "" && c.Auth.JWTSecret == "" {
-		errs = append(errs, "rls.auth.jwt_type requires rls.auth.jwt_secret: minting signs with the HMAC secret (JWKS keys are verify-only)")
+	if mt := a.MintType; mt != "" && (strings.Count(mt, ".") != 1 || strings.HasPrefix(mt, ".") || strings.HasSuffix(mt, ".")) {
+		add("auth.mint_type: %q must be schema-qualified, e.g. public.jwt", mt)
 	}
-	if jt := c.Auth.JWTType; jt != "" && (strings.Count(jt, ".") != 1 || strings.HasPrefix(jt, ".") || strings.HasSuffix(jt, ".")) {
-		errs = append(errs, fmt.Sprintf("rls.auth.jwt_type: %q must be schema-qualified, e.g. public.jwt", jt))
+	if a.Mode == auth.ModeNone && r.Switch && r.Anonymous == "" {
+		add("roles.anonymous is required in auth mode none while roles.switch is on: every request runs as the anonymous role (set roles.switch: false to run as the connection role)")
 	}
-	if c.Enabled && c.AnonymousRole == "" {
-		errs = append(errs, "rls.anonymous_role is required when rls.enabled: an empty role would run unauthenticated requests as the privileged connection role, bypassing RLS")
+	roles := []struct{ key, role string }{{"roles.anonymous", r.Anonymous}, {"roles.default", r.Default}}
+	for _, ar := range r.Allowed {
+		roles = append(roles, struct{ key, role string }{"roles.allowed", ar})
 	}
-	roles := []struct{ key, role string }{{"rls.anonymous_role", c.AnonymousRole}, {"rls.default_role", c.DefaultRole}}
-	for _, r := range c.AllowedRoles {
-		roles = append(roles, struct{ key, role string }{"rls.allowed_roles", r})
-	}
-	for _, r := range roles {
-		if r.role != "" && !pgexec.ValidRole(r.role) {
-			errs = append(errs, fmt.Sprintf("%s: %q is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role", r.key, r.role))
+	for _, kr := range roles {
+		if kr.role != "" && !pgexec.ValidRole(kr.role) {
+			add("%s: %q is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role", kr.key, kr.role)
 		}
 	}
-	if err := pgexec.ValidateClaimsPrefix(c.ClaimsPrefix); err != nil {
-		errs = append(errs, "rls.claims_prefix: "+err.Error())
+	if err := pgexec.ValidateClaimsPrefix(c.Prefix); err != nil {
+		add("claims.prefix: %v", err)
+	}
+	if c.JSONSetting != "" {
+		if err := pgexec.ValidateClaimsSetting(c.JSONSetting); err != nil {
+			add("claims.json_setting: %v", err)
+		} else if c.Prefix != "" && strings.HasPrefix(strings.ToLower(c.JSONSetting), strings.ToLower(c.Prefix)+".") {
+			add("claims.json_setting: %q lies under claims.prefix %q, where a claim of that name would overwrite it", c.JSONSetting, c.Prefix)
+		}
 	}
 	return errs
+}
+
+// IdentityWarnings returns the startup warnings for a valid identity
+// configuration that is legal but risky: role switching off, and any role
+// claim accepted in jwt or headers mode.
+func IdentityWarnings(a Auth, r Roles) []string {
+	var out []string
+	if !r.Switch {
+		out = append(out, "roles.switch is off: every request runs as the connection role, so row-level security policies for request roles do not apply")
+	}
+	if r.Switch && a.Mode != auth.ModeNone && len(r.Allowed) == 0 {
+		out = append(out, "roles.allowed is empty: a valid credential may assume any role the connection role can switch to; list the roles requests may use")
+	}
+	return out
 }
 
 // ValidateTX checks transactions.isolation and transactions.max_retries.
@@ -218,27 +266,58 @@ func ValidateSchema(s Schema) []string {
 	return nil
 }
 
-// ValidateLog checks log.level.
+// ValidateLog checks log.level and log.format.
 func ValidateLog(l Log) []string {
+	var errs []string
 	switch l.Level {
 	case "debug", "info", "warn", "error":
-		return nil
+	default:
+		errs = append(errs, fmt.Sprintf("log.level: %q is not 'debug', 'info', 'warn' or 'error'", l.Level))
 	}
-	return []string{fmt.Sprintf("log.level: %q invalid", l.Level)}
+	switch l.Format {
+	case "text", "json":
+	default:
+		errs = append(errs, fmt.Sprintf("log.format: %q is not 'text' or 'json'", l.Format))
+	}
+	return errs
 }
 
-func validateHeadersMode(c RLS) []string {
+// ValidatePluginNames checks that every plugins.disabled entry names a
+// plugin in known, suggesting the closest name for a typo.
+func ValidatePluginNames(disabled, known []string) []string {
 	var errs []string
-	if p := c.Auth.HeaderPrefix; !validHeaderPrefix(p) {
-		errs = append(errs, fmt.Sprintf("rls.auth.header_prefix: %q must be letters, digits and hyphens ending in a hyphen, e.g. X-Pdbq-Claim-", p))
+	set := make(map[string]bool, len(known))
+	for _, k := range known {
+		set[k] = true
 	}
-	if c.RoleClaim != "" && !auth.ValidHeaderClaim(c.RoleClaim) {
-		errs = append(errs, fmt.Sprintf("rls.role_claim: %q cannot be sent as a claim header: use lower-case letters and digits joined by single underscores", c.RoleClaim))
-	}
-	for _, claim := range c.Auth.HeaderClaims {
-		if !auth.ValidHeaderClaim(claim) {
-			errs = append(errs, fmt.Sprintf("rls.auth.header_claims: %q cannot be sent as a claim header: use lower-case letters and digits joined by single underscores", claim))
+	for _, d := range disabled {
+		if set[d] {
+			continue
 		}
+		msg := fmt.Sprintf("plugins.disabled: unknown plugin %q", d)
+		if s := closest(d, known); s != "" {
+			msg += fmt.Sprintf(", did you mean %q?", s)
+		}
+		errs = append(errs, msg)
+	}
+	return errs
+}
+
+func validateHeadersMode(h Headers) []string {
+	var errs []string
+	if !validHeaderPrefix(h.Prefix) {
+		errs = append(errs, fmt.Sprintf("auth.headers.prefix: %q must be letters, digits and hyphens ending in a hyphen, e.g. X-Claim-", h.Prefix))
+	}
+	if !auth.ValidHeaderClaim(h.RoleClaim) {
+		errs = append(errs, fmt.Sprintf("auth.headers.role_claim: %q cannot be sent as a claim header: use lower-case letters and digits joined by single underscores", h.RoleClaim))
+	}
+	for _, claim := range h.Claims {
+		if !auth.ValidHeaderClaim(claim) {
+			errs = append(errs, fmt.Sprintf("auth.headers.claims: %q cannot be sent as a claim header: use lower-case letters and digits joined by single underscores", claim))
+		}
+	}
+	if len(h.TrustedProxies) == 0 {
+		errs = append(errs, "auth.headers.trusted_proxies is required in auth mode headers: list the gateway addresses allowed to send claim headers")
 	}
 	return errs
 }
@@ -269,33 +348,54 @@ func ValidChannelName(s string) bool {
 	return s != ""
 }
 
-// AuthConfig converts the rls section into an auth.Config. Invalid
-// trusted_proxies entries are dropped (ValidateRLS rejects them; skipping
-// here only shrinks the trusted set, never widens it); nil when none were
-// configured, which auth treats as "trust every peer".
-func AuthConfig(c RLS) auth.Config {
-	cfg := auth.Config{
-		Enabled:       c.Enabled,
-		Mode:          c.Auth.Mode,
-		JWTSecret:     c.Auth.JWTSecret,
-		JWKSURL:       c.Auth.JWKSURL,
-		JWKSCacheTTL:  c.Auth.JWKSCacheTTL,
-		JWTIssuer:     c.Auth.JWTIssuer,
-		JWTAudience:   c.Auth.JWTAudience,
-		HeaderPrefix:  c.Auth.HeaderPrefix,
-		HeaderClaims:  c.Auth.HeaderClaims,
-		RoleClaim:     c.RoleClaim,
-		DefaultRole:   c.DefaultRole,
-		AnonymousRole: c.AnonymousRole,
-		AllowedRoles:  c.AllowedRoles,
+// ResolveSecret returns the HMAC secret: Secret, or the contents of
+// SecretFile with trailing newlines stripped. A secret file that cannot be
+// read or is empty is an error.
+func (j JWT) ResolveSecret() (string, error) {
+	if j.SecretFile == "" {
+		return j.Secret, nil
 	}
-	if len(c.Auth.TrustedProxies) > 0 {
-		cfg.TrustedProxies = make([]netip.Prefix, 0, len(c.Auth.TrustedProxies))
-		for _, p := range c.Auth.TrustedProxies {
-			if pfx, err := ParseTrustedProxy(p); err == nil {
-				cfg.TrustedProxies = append(cfg.TrustedProxies, pfx)
-			}
+	b, err := os.ReadFile(j.SecretFile)
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimRight(string(b), "\r\n")
+	if s == "" {
+		return "", fmt.Errorf("%s is empty", j.SecretFile)
+	}
+	return s, nil
+}
+
+// AuthConfig converts the auth and roles sections into an auth.Config,
+// reading the secret file. Invalid trusted_proxies entries are dropped
+// (ValidateIdentity rejects them; skipping here only shrinks the trusted
+// set, never widens it).
+func AuthConfig(a Auth, r Roles) (auth.Config, error) {
+	secret, err := a.JWT.ResolveSecret()
+	if err != nil {
+		return auth.Config{}, fmt.Errorf("auth.jwt.secret_file: %w", err)
+	}
+	cfg := auth.Config{
+		Mode:            a.Mode,
+		JWTSecret:       secret,
+		JWKSURL:         a.JWT.JWKSURL,
+		JWKSCacheTTL:    a.JWT.JWKSCacheTTL,
+		JWTIssuer:       a.JWT.Issuer,
+		JWTAudience:     a.JWT.Audience,
+		Leeway:          a.JWT.Leeway,
+		RoleClaimPath:   a.JWT.RoleClaimPath,
+		HeaderPrefix:    a.Headers.Prefix,
+		HeaderClaims:    a.Headers.Claims,
+		HeaderRoleClaim: a.Headers.RoleClaim,
+		DefaultRole:     r.Default,
+		AnonymousRole:   r.Anonymous,
+		AllowedRoles:    r.Allowed,
+		SkipRoleSwitch:  !r.Switch,
+	}
+	for _, p := range a.Headers.TrustedProxies {
+		if pfx, err := ParseTrustedProxy(p); err == nil {
+			cfg.TrustedProxies = append(cfg.TrustedProxies, pfx)
 		}
 	}
-	return cfg
+	return cfg, nil
 }

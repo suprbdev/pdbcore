@@ -17,7 +17,7 @@ func TestClassifyClasses(t *testing.T) {
 		code string
 		want Class
 	}{
-		{"22P02", UserInput}, {"22001", UserInput},
+		{"21000", UserInput}, {"22P02", UserInput}, {"22001", UserInput},
 		{"23502", UserInput}, {"23514", UserInput},
 		{"23505", Conflict}, {"23503", Conflict}, {"23001", Conflict}, {"23P01", Conflict},
 		{"23000", Internal},
@@ -41,6 +41,7 @@ func TestClassifyMessagePolicy(t *testing.T) {
 	perm := pgErr("42501", `permission denied for table users`)
 	undef := pgErr("42703", `column "secret" does not exist`)
 	raise := pgErr("P0001", "nope")
+	card := pgErr("21000", "ON CONFLICT DO UPDATE command cannot affect row a second time")
 
 	cases := []struct {
 		name   string
@@ -57,6 +58,8 @@ func TestClassifyMessagePolicy(t *testing.T) {
 		{"permission strict", perm, Strict, "permission denied"},
 		{"permission dev", perm, Dev, perm.Message},
 		{"undefined column prod", undef, Prod, "invalid operation"},
+		{"cardinality prod passes through", card, Prod, card.Message},
+		{"cardinality strict hidden", card, Strict, "invalid input value"},
 		{"raise prod", raise, Prod, "database error"},
 		{"raise strict", raise, Strict, "database error"},
 		{"raise dev", raise, Dev, "nope"},

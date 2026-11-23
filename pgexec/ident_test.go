@@ -63,3 +63,16 @@ func TestValidateClaimsPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateClaimsSetting(t *testing.T) {
+	for _, s := range []string{"request.jwt.claims", "app.claims", "_x.y1"} {
+		if err := ValidateClaimsSetting(s); err != nil {
+			t.Errorf("ValidateClaimsSetting(%q) = %v, want nil", s, err)
+		}
+	}
+	for _, s := range []string{"", "claims", ".claims", "a..b", "1a.b", "plpgsql.x", "pg_trgm.x", "pgrst.claims", "a.b;"} {
+		if err := ValidateClaimsSetting(s); err == nil {
+			t.Errorf("ValidateClaimsSetting(%q) = nil, want an error", s)
+		}
+	}
+}

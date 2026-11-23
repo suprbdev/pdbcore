@@ -16,14 +16,42 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// Mode is the credential source of an Authenticator.
+type Mode string
+
+const (
+	// ModeJWT verifies a bearer JWT: HS* with a shared secret, RS*/ES*
+	// with keys from a JWKS endpoint.
+	ModeJWT Mode = "jwt"
+	// ModeHeaders reads claims from headers set by a trusted gateway.
+	ModeHeaders Mode = "headers"
+	// ModeNone accepts no credentials: every request is anonymous.
+	ModeNone Mode = "none"
+)
+
+// ParseMode returns the Mode spelled s, or an error naming the valid modes.
+func ParseMode(s string) (Mode, error) {
+	switch m := Mode(s); m {
+	case ModeJWT, ModeHeaders, ModeNone:
+		return m, nil
+	}
+	return "", fmt.Errorf("unknown auth mode %q: use jwt, headers or none", s)
+}
+
 // ErrInvalidToken marks a present-but-unusable credential: malformed
 // Authorization header, bad signature, expired, wrong issuer/audience, JWKS
-// miss or outage, claim headers from an untrusted peer, or malformed,
-// repeated, conflicting or unlisted claim headers. Products map it to 401.
+// miss or outage, a role claim that is not a string, claim headers from an
+// untrusted peer, or malformed, repeated, conflicting or unlisted claim
+// headers. Products map it to 401.
 var ErrInvalidToken = errors.New("invalid token")
 
+// ErrAuthRequired marks a request without credentials while anonymous
+// access is off (Config.AnonymousRole is empty). Products map it to 401.
+var ErrAuthRequired = errors.New("authentication required")
+
 // ErrRoleNotAllowed marks a valid credential whose role claim is outside the
-// AllowedRoles policy. Products map it to 403 (or 401 for pdbq parity).
+// AllowedRoles policy, or that resolves to no role at all. Products map it
+// to 403 (or 401 for pdbq parity).
 var ErrRoleNotAllowed = errors.New("role not allowed")
 
 // authError carries the sentinel for errors.Is while keeping the message
@@ -47,14 +75,11 @@ func invalidToken(msg string, cause error) error {
 	return &authError{kind: ErrInvalidToken, cause: cause, msg: msg}
 }
 
-// Config is the claim-source configuration; products fill it from their own
-// config sections (see confx.RLS / confx.Auth).
+// Config is the credential and role configuration; products fill it from
+// their auth and roles config sections (see confx.AuthConfig).
 type Config struct {
-	// Enabled false makes Authenticate a no-op returning no claims and no
-	// role (the product runs as the connection role).
-	Enabled bool
-	// Mode is "jwt", "headers", or "none".
-	Mode string
+	// Mode selects the credential source; New rejects any other value.
+	Mode Mode
 	// JWTSecret verifies HS256/384/512 tokens; ignored when JWKSURL is set.
 	JWTSecret string
 	// JWKSURL enables asymmetric verification (RS*/ES*) with a key cache.
@@ -63,6 +88,11 @@ type Config struct {
 	// JWTIssuer / JWTAudience are checked when non-empty.
 	JWTIssuer   string
 	JWTAudience string
+	// Leeway is the clock skew tolerated on exp, nbf and iat.
+	Leeway time.Duration
+	// RoleClaimPath locates the role in a JWT's claims (see
+	// ValidateClaimPath); empty means "role".
+	RoleClaimPath string
 	// HeaderPrefix is the claim-header prefix in headers mode
 	// (pdbq: X-Pdbq-Claim-, pdbr: X-Pdbr-Claim-), matched
 	// case-insensitively. The rest of the header name must be
@@ -77,81 +107,172 @@ type Config struct {
 	// starts with the prefix, in any letter case, before adding its own.
 	HeaderPrefix string
 	// HeaderClaims, when non-empty, lists the claim keys (user_id, not
-	// User-Id) that claim headers may carry; RoleClaim is always allowed.
-	// A request with any other claim header is rejected with
+	// User-Id) that claim headers may carry; HeaderRoleClaim is always
+	// allowed. A request with any other claim header is rejected with
 	// ErrInvalidToken.
 	HeaderClaims []string
-	// TrustedProxies gates claim headers by peer address; nil trusts every
-	// peer, an empty non-nil slice trusts none.
+	// HeaderRoleClaim is the claim carrying the role in headers mode;
+	// empty means "role".
+	HeaderRoleClaim string
+	// TrustedProxies are the peers allowed to send claim headers; headers
+	// mode requires at least one.
 	TrustedProxies []netip.Prefix
-	// RoleClaim names the claim carrying the database role.
-	RoleClaim     string
-	DefaultRole   string
+	// DefaultRole is the role of an authenticated request without a role
+	// claim.
+	DefaultRole string
+	// AnonymousRole is the role of a request without credentials (and of
+	// every request in ModeNone, and of an authenticated request when
+	// DefaultRole is empty too). Empty refuses requests without
+	// credentials with ErrAuthRequired.
 	AnonymousRole string
 	// AllowedRoles restricts claim-supplied roles; empty allows any.
 	AllowedRoles []string
+	// SkipRoleSwitch makes Authenticate return "" as the role of every
+	// accepted request, so it runs as the connection role. Credentials are
+	// still verified, roles resolved and AllowedRoles enforced.
+	SkipRoleSwitch bool
 	// Logger receives JWKS fetch failures, with the endpoint URL and cause
 	// that clients never see; nil uses slog.Default().
 	Logger *slog.Logger
 }
 
 // Authenticator turns an HTTP request into (claims, role) per the configured
-// claim source: verified JWT, trusted gateway headers, or none.
+// credential source: verified JWT, trusted gateway headers, or none.
 type Authenticator struct {
 	cfg Config
 	// jwks verifies asymmetric tokens when JWKSURL is set.
 	jwks *jwksCache
-	// headerClaims is the HeaderClaims allowlist plus RoleClaim; nil
+	// rolePath locates the role in JWT claims.
+	rolePath claimPath
+	// headerClaims is the HeaderClaims allowlist plus HeaderRoleClaim; nil
 	// allows every claim.
 	headerClaims map[string]bool
 }
 
-// New builds an Authenticator. Invalid TrustedProxies entries cannot occur
-// (they are typed); a nil slice means every peer is trusted.
-func New(cfg Config) *Authenticator {
+// New builds an Authenticator. It returns an error for an unknown mode, a
+// JWT mode without a secret or JWKS URL, a headers mode without a header
+// prefix or trusted proxies, an invalid role claim path or header role
+// claim, and a negative leeway.
+func New(cfg Config) (*Authenticator, error) {
+	if _, err := ParseMode(string(cfg.Mode)); err != nil {
+		return nil, err
+	}
+	if cfg.Leeway < 0 {
+		return nil, fmt.Errorf("auth: negative leeway %s", cfg.Leeway)
+	}
+	if cfg.RoleClaimPath == "" {
+		cfg.RoleClaimPath = "role"
+	}
+	if cfg.HeaderRoleClaim == "" {
+		cfg.HeaderRoleClaim = "role"
+	}
 	a := &Authenticator{cfg: cfg}
-	if cfg.JWKSURL != "" {
-		log := cfg.Logger
-		if log == nil {
-			log = slog.Default()
+	switch cfg.Mode {
+	case ModeJWT:
+		if cfg.JWTSecret == "" && cfg.JWKSURL == "" {
+			return nil, errors.New("auth: jwt mode needs a JWT secret or a JWKS URL")
 		}
-		a.jwks = newJWKSCache(cfg.JWKSURL, cfg.JWKSCacheTTL, log)
+		p, err := parseClaimPath(cfg.RoleClaimPath)
+		if err != nil {
+			return nil, err
+		}
+		a.rolePath = p
+		if cfg.JWKSURL != "" {
+			log := cfg.Logger
+			if log == nil {
+				log = slog.Default()
+			}
+			a.jwks = newJWKSCache(cfg.JWKSURL, cfg.JWKSCacheTTL, log)
+		}
+	case ModeHeaders:
+		if cfg.HeaderPrefix == "" {
+			return nil, errors.New("auth: headers mode needs a claim header prefix")
+		}
+		if len(cfg.TrustedProxies) == 0 {
+			return nil, errors.New("auth: headers mode needs at least one trusted proxy")
+		}
+		if !ValidHeaderClaim(cfg.HeaderRoleClaim) {
+			return nil, fmt.Errorf("auth: role claim %q cannot be sent as a claim header", cfg.HeaderRoleClaim)
+		}
+		if len(cfg.HeaderClaims) > 0 {
+			a.headerClaims = make(map[string]bool, len(cfg.HeaderClaims)+1)
+			for _, c := range cfg.HeaderClaims {
+				a.headerClaims[c] = true
+			}
+			a.headerClaims[cfg.HeaderRoleClaim] = true
+		}
 	}
-	if len(cfg.HeaderClaims) > 0 {
-		a.headerClaims = make(map[string]bool, len(cfg.HeaderClaims)+1)
-		for _, c := range cfg.HeaderClaims {
-			a.headerClaims[c] = true
-		}
-		if cfg.RoleClaim != "" {
-			a.headerClaims[cfg.RoleClaim] = true
-		}
-	}
-	return a
+	return a, nil
 }
 
+// Mode returns the credential source.
+func (a *Authenticator) Mode() Mode { return a.cfg.Mode }
+
 // Authenticate never fails open: a present-but-invalid credential is an
-// error; an absent credential yields the anonymous role. Errors wrap
-// ErrInvalidToken or ErrRoleNotAllowed.
+// error, and an absent one yields the anonymous role, or ErrAuthRequired
+// when there is none. Errors wrap ErrInvalidToken, ErrAuthRequired or
+// ErrRoleNotAllowed. The role is "" with SkipRoleSwitch.
 func (a *Authenticator) Authenticate(r *http.Request) (map[string]any, string, error) {
-	if !a.cfg.Enabled {
-		return nil, "", nil
-	}
 	switch a.cfg.Mode {
-	case "jwt":
+	case ModeJWT:
 		return a.fromJWT(r)
-	case "headers":
+	case ModeHeaders:
 		return a.fromHeaders(r)
-	default:
-		return map[string]any{}, a.cfg.AnonymousRole, nil
 	}
+	return map[string]any{}, a.switchTo(a.cfg.AnonymousRole), nil
+}
+
+// Challenge returns the WWW-Authenticate value (RFC 6750) of the response
+// to an Authenticate error: Bearer for ErrAuthRequired, with
+// error="invalid_token" for ErrInvalidToken and error="insufficient_scope"
+// for ErrRoleNotAllowed; "" for any other error.
+func Challenge(err error) string {
+	switch {
+	case errors.Is(err, ErrAuthRequired):
+		return "Bearer"
+	case errors.Is(err, ErrInvalidToken):
+		return `Bearer error="invalid_token"`
+	case errors.Is(err, ErrRoleNotAllowed):
+		return `Bearer error="insufficient_scope"`
+	}
+	return ""
+}
+
+// anonymous answers a request that carries no credentials.
+func (a *Authenticator) anonymous() (map[string]any, string, error) {
+	if a.cfg.AnonymousRole == "" {
+		return nil, "", &authError{kind: ErrAuthRequired, msg: "authentication required"}
+	}
+	return map[string]any{}, a.switchTo(a.cfg.AnonymousRole), nil
+}
+
+func (a *Authenticator) switchTo(role string) string {
+	if a.cfg.SkipRoleSwitch {
+		return ""
+	}
+	return role
+}
+
+// bearerToken extracts the token of an "Authorization: Bearer <token>"
+// header; the scheme is case-insensitive (RFC 7235).
+func bearerToken(authz string) (string, bool) {
+	scheme, token, ok := strings.Cut(authz, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	token = strings.TrimLeft(token, " ")
+	if token == "" || strings.ContainsAny(token, " \t") {
+		return "", false
+	}
+	return token, true
 }
 
 func (a *Authenticator) fromJWT(r *http.Request) (map[string]any, string, error) {
 	authz := r.Header.Get("Authorization")
 	if authz == "" {
-		return map[string]any{}, a.cfg.AnonymousRole, nil
+		return a.anonymous()
 	}
-	tokenStr, ok := strings.CutPrefix(authz, "Bearer ")
+	tokenStr, ok := bearerToken(authz)
 	if !ok {
 		return nil, "", invalidToken("malformed Authorization header", nil)
 	}
@@ -174,6 +295,7 @@ func (a *Authenticator) fromJWT(r *http.Request) (map[string]any, string, error)
 	parserOpts := []jwt.ParserOption{
 		jwt.WithValidMethods(methods),
 		jwt.WithExpirationRequired(),
+		jwt.WithLeeway(a.cfg.Leeway),
 	}
 	if a.cfg.JWTIssuer != "" {
 		parserOpts = append(parserOpts, jwt.WithIssuer(a.cfg.JWTIssuer))
@@ -188,7 +310,23 @@ func (a *Authenticator) fromJWT(r *http.Request) (map[string]any, string, error)
 		}
 		return nil, "", invalidToken("invalid token: "+err.Error(), err)
 	}
-	return a.resolve(map[string]any(claims))
+	role, found, err := a.jwtRole(claims)
+	if err != nil {
+		return nil, "", err
+	}
+	return a.resolve(map[string]any(claims), role, found)
+}
+
+func (a *Authenticator) jwtRole(claims map[string]any) (string, bool, error) {
+	v, ok := a.rolePath.lookup(claims)
+	if !ok {
+		return "", false, nil
+	}
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return "", false, invalidToken("invalid token: role claim is not a non-empty string", nil)
+	}
+	return s, true, nil
 }
 
 func (a *Authenticator) fromHeaders(r *http.Request) (map[string]any, string, error) {
@@ -201,7 +339,7 @@ func (a *Authenticator) fromHeaders(r *http.Request) (map[string]any, string, er
 		}
 	}
 	if !present {
-		return map[string]any{}, a.cfg.AnonymousRole, nil
+		return a.anonymous()
 	}
 	if !a.peerTrusted(r.RemoteAddr) {
 		return nil, "", invalidToken("claim headers from untrusted peer", nil)
@@ -226,7 +364,11 @@ func (a *Authenticator) fromHeaders(r *http.Request) (map[string]any, string, er
 		}
 		claims[key] = vals[0]
 	}
-	return a.resolve(claims)
+	role, found := claims[a.cfg.HeaderRoleClaim].(string)
+	if found && role == "" {
+		return nil, "", invalidToken("empty role claim header", nil)
+	}
+	return a.resolve(claims, role, found)
 }
 
 func hasPrefixFold(s, prefix string) bool {
@@ -274,13 +416,10 @@ func HeaderClaimName(prefix, claim string) string {
 	return http.CanonicalHeaderKey(prefix + strings.ReplaceAll(claim, "_", "-"))
 }
 
-// peerTrusted reports whether the direct peer may supply claim headers. With
-// no trusted proxies configured every peer is trusted (legacy behavior; the
-// product logs a startup warning). An unparseable RemoteAddr fails closed.
+// peerTrusted reports whether the direct peer may supply claim headers: its
+// address lies in a TrustedProxies prefix. An unparseable RemoteAddr fails
+// closed.
 func (a *Authenticator) peerTrusted(remoteAddr string) bool {
-	if a.cfg.TrustedProxies == nil {
-		return true
-	}
 	ap, err := netip.ParseAddrPort(remoteAddr)
 	if err != nil {
 		return false
@@ -294,25 +433,24 @@ func (a *Authenticator) peerTrusted(remoteAddr string) bool {
 	return false
 }
 
-// resolve extracts the database role from claims (falling back to
-// DefaultRole, then AnonymousRole) and enforces the AllowedRoles policy on
-// claim-supplied roles.
-func (a *Authenticator) resolve(claims map[string]any) (map[string]any, string, error) {
-	role := a.cfg.DefaultRole
-	fromClaim := false
-	if v, ok := claims[a.cfg.RoleClaim]; ok {
-		if s, ok := v.(string); ok && s != "" {
-			role = s
-			fromClaim = true
+// resolve picks the request role: the claimed role when found, else
+// DefaultRole, else AnonymousRole. A claimed role must pass AllowedRoles,
+// and a request that resolves to no role is refused unless SkipRoleSwitch
+// is set (it would otherwise run as the connection role).
+func (a *Authenticator) resolve(claims map[string]any, role string, fromClaim bool) (map[string]any, string, error) {
+	if !fromClaim {
+		role = a.cfg.DefaultRole
+		if role == "" {
+			role = a.cfg.AnonymousRole
 		}
-	}
-	if role == "" {
-		role = a.cfg.AnonymousRole
 	}
 	if fromClaim && !a.roleAllowed(role) {
 		return nil, "", &authError{kind: ErrRoleNotAllowed, msg: fmt.Sprintf("role %q is not allowed", role)}
 	}
-	return claims, role, nil
+	if role == "" && !a.cfg.SkipRoleSwitch {
+		return nil, "", &authError{kind: ErrRoleNotAllowed, msg: "credential carries no role and no default role is configured"}
+	}
+	return claims, a.switchTo(role), nil
 }
 
 // roleAllowed applies AllowedRoles: empty list allows everything; otherwise

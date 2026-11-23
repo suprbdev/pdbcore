@@ -1,6 +1,7 @@
 package confx
 
 import (
+	stdflag "flag"
 	"os"
 	"path/filepath"
 	"slices"
@@ -42,48 +43,69 @@ type pdbqTX struct {
 	MaxRetries int    `koanf:"max_retries" doc:"Automatic retries of a transactional operation after a serialization failure or deadlock (SQLSTATE 40001/40P01). 0 disables; the whole operation re-runs, which is safe because the failed attempt rolled back."`
 }
 
+// pdbqPlugins is a plugin settings struct shaped like a product's: one
+// section per configurable plugin.
+type pdbqPlugins struct {
+	AdvancedFilters struct {
+		Relations bool `koanf:"relations" doc:"Filter on related rows."`
+		MaxDepth  int  `koanf:"max_depth" doc:"Deepest relation filter."`
+	} `koanf:"advanced_filters" doc:"advanced_filters plugin."`
+}
+
 type pdbqConfig struct {
-	Database Database   `koanf:"database"`
-	Server   pdbqServer `koanf:"server"`
-	Schema   Schema     `koanf:"schema"`
-	Filters  Filters    `koanf:"filters"`
-	RLS      RLS        `koanf:"rls"`
-	TX       pdbqTX     `koanf:"transactions"`
-	Watch    Watch      `koanf:"watch"`
-	Errors   Errors     `koanf:"errors"`
-	Plugins  Plugins    `koanf:"plugins"`
-	Log      Log        `koanf:"log"`
-	Metrics  Metrics    `koanf:"metrics"`
+	Database Database             `koanf:"database"`
+	Server   pdbqServer           `koanf:"server"`
+	Schema   Schema               `koanf:"schema"`
+	Filters  Filters              `koanf:"filters"`
+	Auth     Auth                 `koanf:"auth"`
+	Roles    Roles                `koanf:"roles"`
+	Claims   Claims               `koanf:"claims"`
+	TX       pdbqTX               `koanf:"transactions"`
+	Watch    Watch                `koanf:"watch"`
+	Errors   Errors               `koanf:"errors"`
+	Plugins  Plugins[pdbqPlugins] `koanf:"plugins"`
+	Log      Log                  `koanf:"log"`
+	Metrics  Metrics              `koanf:"metrics"`
 }
 
 func pdbqDefaults() pdbqConfig {
 	return pdbqConfig{
-		Database: Database{MaxConns: 10, ConnectTimeout: 10 * time.Second, StatementTimeout: 30 * time.Second},
+		Database: Database{MaxConns: 10, ConnectTimeout: 10 * time.Second, StatementTimeout: 25 * time.Second},
 		Server: pdbqServer{
 			Addr: ":8080", RequestTimeout: 30 * time.Second, MaxBodyBytes: 1 << 20,
 			MaxDepth: 15, MaxCost: 10000, MaxPageSize: 100,
 		},
 		Schema:  Schema{Schemas: []string{"public"}, Functions: true},
 		Filters: Filters{IndexedOnly: true},
-		RLS: RLS{
-			Enabled: true, AnonymousRole: "anonymous", RoleClaim: "role", ClaimsPrefix: "pdbq.claims",
-			Auth: Auth{Mode: "jwt", HeaderPrefix: "X-Pdbq-Claim-", JWKSCacheTTL: time.Hour},
-		},
+		Auth:    DefaultAuth("X-Pdbq-Claim-"),
+		Roles:   DefaultRoles(),
+		Claims:  DefaultClaims(),
 		TX:      pdbqTX{Mutations: true, Isolation: "read_committed"},
 		Watch:   Watch{PollInterval: 5 * time.Second, Channel: "pdbq_ddl"},
 		Errors:  Errors{Detail: "prod"},
-		Plugins: Plugins{Settings: map[string]map[string]any{}},
+		Plugins: Plugins[pdbqPlugins]{},
 		Log:     Log{Level: "info", Format: "text"},
 		Metrics: DefaultMetrics(),
 	}
 }
 
+// secretFile holds "file-secret" and a trailing newline.
+const secretFile = "testdata/jwt-secret"
+
+var update = stdflag.Bool("update", false, "rewrite testdata/pdbq.example.yaml")
+
 func TestExampleYAMLMatchesPdbqGolden(t *testing.T) {
-	want, err := os.ReadFile(filepath.Join("testdata", "pdbq.example.yaml"))
+	golden := filepath.Join("testdata", "pdbq.example.yaml")
+	got := ExampleYAML(pdbqDefaults())
+	if *update {
+		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(golden)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := ExampleYAML(pdbqDefaults())
 	if got != string(want) {
 		t.Fatalf("ExampleYAML drifted from pdbq's example body:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -151,8 +173,8 @@ database:
   url: "postgres://file/db"
 server:
   addr: ":9999"
-rls:
-  enabled: false
+roles:
+  switch: false
 `
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
@@ -185,7 +207,7 @@ rls:
 	if cfg.Server.MaxDepth != 15 {
 		t.Errorf("default lost: %d", cfg.Server.MaxDepth)
 	}
-	if cfg.RLS.Enabled {
+	if cfg.Roles.Switch {
 		t.Error("file bool not applied")
 	}
 }
@@ -245,10 +267,10 @@ func TestParseTrustedProxy(t *testing.T) {
 
 func TestValidateDefaultsClean(t *testing.T) {
 	cfg := pdbqDefaults()
-	cfg.RLS.Auth.JWTSecret = "s"
+	cfg.Auth.JWT.Secret = "s"
 	var errs []string
 	errs = append(errs, ValidateErrors(cfg.Errors)...)
-	errs = append(errs, ValidateRLS(cfg.RLS)...)
+	errs = append(errs, ValidateIdentity(cfg.Auth, cfg.Roles, cfg.Claims)...)
 	errs = append(errs, ValidateTX(TX{Isolation: cfg.TX.Isolation, MaxRetries: cfg.TX.MaxRetries})...)
 	errs = append(errs, ValidateWatch(cfg.Watch, cfg.Schema.CachePath)...)
 	errs = append(errs, ValidateSchema(cfg.Schema)...)
@@ -273,50 +295,74 @@ func TestValidateRejects(t *testing.T) {
 	}{
 		"errors.detail": {func() []string { return ValidateErrors(Errors{Detail: "verbose"}) },
 			`errors.detail: "verbose" is not 'dev', 'prod' or 'strict'`},
-		"auth.mode": {func() []string { return ValidateRLS(RLS{Auth: Auth{Mode: "oauth"}}) },
-			`rls.auth.mode: "oauth" is not 'jwt', 'headers' or 'none'`},
+		"auth.mode": {func() []string { return ValidateIdentity(Auth{Mode: "oauth"}, Roles{}, Claims{}) },
+			`auth.mode: "oauth" is not 'jwt', 'headers' or 'none'`},
 		"jwt secret": {func() []string {
-			return ValidateRLS(RLS{Enabled: true, AnonymousRole: "a", Auth: Auth{Mode: "jwt"}})
-		}, "rls.auth.jwt_secret or rls.auth.jwks_url is required when rls.enabled and auth mode is jwt"},
-		"jwt_type needs secret": {func() []string {
-			return ValidateRLS(RLS{Auth: Auth{Mode: "none", JWTType: "public.jwt"}})
-		}, "rls.auth.jwt_type requires rls.auth.jwt_secret: minting signs with the HMAC secret (JWKS keys are verify-only)"},
-		"jwt_type qualified": {func() []string {
-			return ValidateRLS(RLS{Auth: Auth{Mode: "none", JWTType: "jwt", JWTSecret: "s"}})
-		}, `rls.auth.jwt_type: "jwt" must be schema-qualified, e.g. public.jwt`},
-		"anon role": {func() []string {
-			return ValidateRLS(RLS{Enabled: true, Auth: Auth{Mode: "none"}})
-		}, "rls.anonymous_role is required when rls.enabled: an empty role would run unauthenticated requests as the privileged connection role, bypassing RLS"},
+			return ValidateIdentity(Auth{Mode: "jwt", JWT: JWT{RoleClaimPath: "role"}}, Roles{}, Claims{})
+		}, "auth.jwt.secret, auth.jwt.secret_file or auth.jwt.jwks_url is required in auth mode jwt (use auth.mode: none to accept no credentials)"},
+		"secret and file": {func() []string {
+			return ValidateIdentity(Auth{Mode: "none", JWT: JWT{Secret: "s", SecretFile: secretFile}}, Roles{}, Claims{})
+		}, "auth.jwt.secret and auth.jwt.secret_file are mutually exclusive"},
+		"secret file missing": {func() []string {
+			return ValidateIdentity(Auth{Mode: "none", JWT: JWT{SecretFile: "/nonexistent/secret"}}, Roles{}, Claims{})
+		}, "auth.jwt.secret_file: open /nonexistent/secret: no such file or directory"},
+		"jwks url": {func() []string {
+			return ValidateIdentity(Auth{Mode: "jwt", JWT: JWT{JWKSURL: "idp.example/jwks", RoleClaimPath: "role"}}, Roles{}, Claims{})
+		}, `auth.jwt.jwks_url: "idp.example/jwks" is not an http(s) URL`},
+		"leeway": {func() []string {
+			return ValidateIdentity(Auth{Mode: "none", JWT: JWT{Leeway: -time.Second}}, Roles{}, Claims{})
+		}, "auth.jwt.leeway must be >= 0"},
+		"role claim path": {func() []string {
+			return ValidateIdentity(Auth{Mode: "jwt", JWT: JWT{Secret: "s", RoleClaimPath: "a..b"}}, Roles{}, Claims{})
+		}, `auth.jwt.role_claim_path: invalid role claim path "a..b": empty name`},
+		"mint_type needs secret": {func() []string {
+			return ValidateIdentity(Auth{Mode: "none", MintType: "public.jwt"}, Roles{}, Claims{})
+		}, "auth.mint_type requires auth.jwt.secret or auth.jwt.secret_file: minting signs with the HMAC secret (JWKS keys are verify-only)"},
+		"mint_type qualified": {func() []string {
+			return ValidateIdentity(Auth{Mode: "none", MintType: "jwt", JWT: JWT{Secret: "s"}}, Roles{}, Claims{})
+		}, `auth.mint_type: "jwt" must be schema-qualified, e.g. public.jwt`},
+		"none needs anonymous": {func() []string {
+			return ValidateIdentity(Auth{Mode: "none"}, Roles{Switch: true}, Claims{})
+		}, "roles.anonymous is required in auth mode none while roles.switch is on: every request runs as the anonymous role (set roles.switch: false to run as the connection role)"},
 		"trusted proxy": {func() []string {
-			return ValidateRLS(RLS{Auth: Auth{Mode: "none", TrustedProxies: []string{"10.0.0.0/8", "not-an-ip"}}})
-		}, `rls.auth.trusted_proxies: "not-an-ip" is not a valid IP or CIDR block`},
+			return ValidateIdentity(Auth{Mode: "none", Headers: Headers{TrustedProxies: []string{"10.0.0.0/8", "not-an-ip"}}}, Roles{}, Claims{})
+		}, `auth.headers.trusted_proxies: "not-an-ip" is not a valid IP or CIDR block`},
 		"anonymous role none": {func() []string {
-			return ValidateRLS(RLS{Enabled: true, AnonymousRole: "none", Auth: Auth{Mode: "none"}})
-		}, `rls.anonymous_role: "none" is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role`},
+			return ValidateIdentity(Auth{Mode: "none"}, Roles{Anonymous: "none"}, Claims{})
+		}, `roles.anonymous: "none" is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role`},
 		"default role pg_": {func() []string {
-			return ValidateRLS(RLS{AnonymousRole: "anon", DefaultRole: "pg_read_all_data", Auth: Auth{Mode: "none"}})
-		}, `rls.default_role: "pg_read_all_data" is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role`},
+			return ValidateIdentity(Auth{Mode: "none"}, Roles{Default: "pg_read_all_data"}, Claims{})
+		}, `roles.default: "pg_read_all_data" is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role`},
 		"allowed role none": {func() []string {
-			return ValidateRLS(RLS{AnonymousRole: "anon", AllowedRoles: []string{"app_user", "NONE"}, Auth: Auth{Mode: "none"}})
-		}, `rls.allowed_roles: "NONE" is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role`},
+			return ValidateIdentity(Auth{Mode: "none"}, Roles{Allowed: []string{"app_user", "NONE"}}, Claims{})
+		}, `roles.allowed: "NONE" is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role`},
 		"claims prefix": {func() []string {
-			return ValidateRLS(RLS{AnonymousRole: "anon", ClaimsPrefix: "plpgsql", Auth: Auth{Mode: "none"}})
-		}, `rls.claims_prefix: invalid claims prefix "plpgsql": "plpgsql" is a server or extension settings namespace`},
+			return ValidateIdentity(Auth{Mode: "none"}, Roles{}, Claims{Prefix: "plpgsql"})
+		}, `claims.prefix: invalid claims prefix "plpgsql": "plpgsql" is a server or extension settings namespace`},
+		"claims json setting": {func() []string {
+			return ValidateIdentity(Auth{Mode: "none"}, Roles{}, Claims{JSONSetting: "claims"})
+		}, `claims.json_setting: invalid claims setting "claims": use a dotted name such as "request.jwt.claims"`},
+		"claims json under prefix": {func() []string {
+			return ValidateIdentity(Auth{Mode: "none"}, Roles{}, Claims{Prefix: "jwt.claims", JSONSetting: "JWT.claims.all"})
+		}, `claims.json_setting: "JWT.claims.all" lies under claims.prefix "jwt.claims", where a claim of that name would overwrite it`},
 		"header prefix empty": {func() []string {
-			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "role", Auth: Auth{Mode: "headers"}})
-		}, `rls.auth.header_prefix: "" must be letters, digits and hyphens ending in a hyphen, e.g. X-Pdbq-Claim-`},
+			return ValidateIdentity(Auth{Mode: "headers", Headers: Headers{RoleClaim: "role", TrustedProxies: []string{"10.0.0.1"}}}, Roles{}, Claims{})
+		}, `auth.headers.prefix: "" must be letters, digits and hyphens ending in a hyphen, e.g. X-Claim-`},
 		"header prefix no trailing hyphen": {func() []string {
-			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "role", Auth: Auth{Mode: "headers", HeaderPrefix: "X-Pdbq-Claim"}})
-		}, `rls.auth.header_prefix: "X-Pdbq-Claim" must be letters, digits and hyphens ending in a hyphen, e.g. X-Pdbq-Claim-`},
+			return ValidateIdentity(Auth{Mode: "headers", Headers: Headers{Prefix: "X-Pdbq-Claim", RoleClaim: "role", TrustedProxies: []string{"10.0.0.1"}}}, Roles{}, Claims{})
+		}, `auth.headers.prefix: "X-Pdbq-Claim" must be letters, digits and hyphens ending in a hyphen, e.g. X-Claim-`},
 		"header prefix underscore": {func() []string {
-			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "role", Auth: Auth{Mode: "headers", HeaderPrefix: "X_Claim-"}})
-		}, `rls.auth.header_prefix: "X_Claim-" must be letters, digits and hyphens ending in a hyphen, e.g. X-Pdbq-Claim-`},
+			return ValidateIdentity(Auth{Mode: "headers", Headers: Headers{Prefix: "X_Claim-", RoleClaim: "role", TrustedProxies: []string{"10.0.0.1"}}}, Roles{}, Claims{})
+		}, `auth.headers.prefix: "X_Claim-" must be letters, digits and hyphens ending in a hyphen, e.g. X-Claim-`},
 		"header role claim": {func() []string {
-			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "AppRole", Auth: Auth{Mode: "headers", HeaderPrefix: "X-Pdbq-Claim-"}})
-		}, `rls.role_claim: "AppRole" cannot be sent as a claim header: use lower-case letters and digits joined by single underscores`},
+			return ValidateIdentity(Auth{Mode: "headers", Headers: Headers{Prefix: "X-Pdbq-Claim-", RoleClaim: "AppRole", TrustedProxies: []string{"10.0.0.1"}}}, Roles{}, Claims{})
+		}, `auth.headers.role_claim: "AppRole" cannot be sent as a claim header: use lower-case letters and digits joined by single underscores`},
 		"header claims": {func() []string {
-			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "role", Auth: Auth{Mode: "headers", HeaderPrefix: "X-Pdbq-Claim-", HeaderClaims: []string{"user_id", "user-id"}}})
-		}, `rls.auth.header_claims: "user-id" cannot be sent as a claim header: use lower-case letters and digits joined by single underscores`},
+			return ValidateIdentity(Auth{Mode: "headers", Headers: Headers{Prefix: "X-Pdbq-Claim-", RoleClaim: "role", Claims: []string{"user_id", "user-id"}, TrustedProxies: []string{"10.0.0.1"}}}, Roles{}, Claims{})
+		}, `auth.headers.claims: "user-id" cannot be sent as a claim header: use lower-case letters and digits joined by single underscores`},
+		"headers needs trusted proxies": {func() []string {
+			return ValidateIdentity(Auth{Mode: "headers", Headers: Headers{Prefix: "X-Pdbq-Claim-", RoleClaim: "role"}}, Roles{}, Claims{})
+		}, "auth.headers.trusted_proxies is required in auth mode headers: list the gateway addresses allowed to send claim headers"},
 		"watch channel length": {func() []string { return ValidateWatch(Watch{Enabled: true, Channel: strings.Repeat("c", 64)}, "") },
 			`watch.channel: "` + strings.Repeat("c", 64) + `" is longer than 63 bytes`},
 		"isolation": {func() []string { return ValidateTX(TX{Isolation: "chaos"}) },
@@ -329,8 +375,14 @@ func TestValidateRejects(t *testing.T) {
 			`watch.channel: "bad$$chan" invalid: only letters, digits and underscores are allowed`},
 		"no schemas": {func() []string { return ValidateSchema(Schema{}) },
 			"schema.schemas must list at least one schema"},
-		"log level": {func() []string { return ValidateLog(Log{Level: "loud"}) },
-			`log.level: "loud" invalid`},
+		"log level": {func() []string { return ValidateLog(Log{Level: "loud", Format: "text"}) },
+			`log.level: "loud" is not 'debug', 'info', 'warn' or 'error'`},
+		"log format": {func() []string { return ValidateLog(Log{Level: "info", Format: "jsn"}) },
+			`log.format: "jsn" is not 'text' or 'json'`},
+		"plugin names": {func() []string {
+			return ValidatePluginNames([]string{"postgis", "advanced-filters"}, []string{"postgis", "advanced_filters"})
+		},
+			`plugins.disabled: unknown plugin "advanced-filters", did you mean "advanced_filters"?`},
 		"metrics path relative": {func() []string { return ValidateMetrics(Metrics{Path: "metrics"}, "") },
 			`metrics.path: "metrics" must start with / and name a path other than /`},
 		"metrics path root": {func() []string { return ValidateMetrics(Metrics{Path: "/"}, "") },
@@ -359,29 +411,67 @@ func TestValidateRejects(t *testing.T) {
 }
 
 func TestAuthConfig(t *testing.T) {
-	rls := RLS{
-		Enabled: true, RoleClaim: "role", DefaultRole: "d", AnonymousRole: "anon", AllowedRoles: []string{"x"},
-		Auth: Auth{Mode: "headers", HeaderPrefix: "X-Pdbr-Claim-", HeaderClaims: []string{"user_id"}, TrustedProxies: []string{"10.0.0.0/8", "garbage", "192.168.1.1"}},
+	a := Auth{
+		Mode: "headers",
+		JWT:  JWT{SecretFile: secretFile, JWKSURL: "https://idp/jwks", Issuer: "i", Audience: "a", Leeway: time.Second, RoleClaimPath: "app.role"},
+		Headers: Headers{Prefix: "X-Pdbr-Claim-", Claims: []string{"user_id"}, RoleClaim: "app_role",
+			TrustedProxies: []string{"10.0.0.0/8", "garbage", "192.168.1.1"}},
 	}
-	cfg := AuthConfig(rls)
-	if !cfg.Enabled || cfg.Mode != "headers" || cfg.HeaderPrefix != "X-Pdbr-Claim-" || cfg.RoleClaim != "role" ||
-		cfg.DefaultRole != "d" || cfg.AnonymousRole != "anon" || len(cfg.AllowedRoles) != 1 ||
+	r := Roles{Switch: false, Default: "d", Anonymous: "anon", Allowed: []string{"x"}}
+	cfg, err := AuthConfig(a, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != "headers" || cfg.HeaderPrefix != "X-Pdbr-Claim-" || cfg.HeaderRoleClaim != "app_role" || cfg.RoleClaimPath != "app.role" ||
+		cfg.JWTSecret != "file-secret" || cfg.JWKSURL != "https://idp/jwks" || cfg.JWTIssuer != "i" || cfg.JWTAudience != "a" || cfg.Leeway != time.Second ||
+		cfg.DefaultRole != "d" || cfg.AnonymousRole != "anon" || len(cfg.AllowedRoles) != 1 || !cfg.SkipRoleSwitch ||
 		len(cfg.HeaderClaims) != 1 || cfg.HeaderClaims[0] != "user_id" {
 		t.Fatalf("AuthConfig = %+v", cfg)
 	}
 	if len(cfg.TrustedProxies) != 2 || cfg.TrustedProxies[1].Bits() != 32 {
 		t.Fatalf("TrustedProxies = %v (invalid entries dropped, singles /32)", cfg.TrustedProxies)
 	}
-	if AuthConfig(RLS{}).TrustedProxies != nil {
-		t.Fatal("no proxies configured must stay nil (trust every peer)")
+	if _, err := AuthConfig(Auth{JWT: JWT{SecretFile: "/nonexistent"}}, r); err == nil {
+		t.Fatal("unreadable secret file accepted")
 	}
-	if p := AuthConfig(RLS{Auth: Auth{TrustedProxies: []string{"junk"}}}).TrustedProxies; p == nil || len(p) != 0 {
-		t.Fatalf("all-invalid list must be empty non-nil (trust nobody), got %v", p)
+	if cfg, _ := AuthConfig(Auth{}, Roles{Switch: true}); cfg.SkipRoleSwitch {
+		t.Fatal("roles.switch on must switch roles")
+	}
+}
+
+func TestResolveSecret(t *testing.T) {
+	if s, err := (JWT{Secret: "inline"}).ResolveSecret(); err != nil || s != "inline" {
+		t.Fatalf("inline = %q, %v", s, err)
+	}
+	if s, err := (JWT{SecretFile: secretFile}).ResolveSecret(); err != nil || s != "file-secret" {
+		t.Fatalf("file = %q, %v", s, err)
+	}
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (JWT{SecretFile: empty}).ResolveSecret(); err == nil || !strings.HasSuffix(err.Error(), "is empty") {
+		t.Fatalf("empty file err = %v", err)
+	}
+}
+
+func TestIdentityWarnings(t *testing.T) {
+	if w := IdentityWarnings(DefaultAuth("X-C-"), Roles{Switch: true, Allowed: []string{"a"}}); len(w) != 0 {
+		t.Fatalf("warnings = %q", w)
+	}
+	if w := IdentityWarnings(DefaultAuth("X-C-"), Roles{Switch: false}); len(w) != 1 || !strings.HasPrefix(w[0], "roles.switch is off") {
+		t.Fatalf("warnings = %q", w)
+	}
+	if w := IdentityWarnings(DefaultAuth("X-C-"), Roles{Switch: true}); len(w) != 1 || !strings.HasPrefix(w[0], "roles.allowed is empty") {
+		t.Fatalf("warnings = %q", w)
+	}
+	if w := IdentityWarnings(Auth{Mode: "none"}, Roles{Switch: true, Anonymous: "a"}); len(w) != 0 {
+		t.Fatalf("warnings = %q", w)
 	}
 }
 
 func TestPluginsDisabledSet(t *testing.T) {
-	set := Plugins{Disabled: []string{"a", "b"}}.DisabledSet()
+	set := Plugins[struct{}]{Disabled: []string{"a", "b"}}.DisabledSet()
 	if !set["a"] || !set["b"] || set["c"] {
 		t.Fatalf("set = %v", set)
 	}

@@ -49,7 +49,7 @@ func TestRunTxRLSMatrix(t *testing.T) {
 		var n int
 		err := pgexec.RunTx(ctx, pool, pgexec.TxOptions{RLS: true}, id, func(q pgexec.Querier) error {
 			var role, uid string
-			if err := q.QueryRow(ctx, "SELECT current_user, coalesce(current_setting('pdbq.claims.user_id', true), '')").Scan(&role, &uid); err != nil {
+			if err := q.QueryRow(ctx, "SELECT current_user, coalesce(current_setting('jwt.claims.user_id', true), '')").Scan(&role, &uid); err != nil {
 				return err
 			}
 			if role != id.Role {
@@ -70,10 +70,10 @@ func TestRunTxRLSMatrix(t *testing.T) {
 	if n := count(pgexec.Identity{Role: "anonymous"}); n != 3 {
 		t.Fatalf("anonymous sees %d posts, want 3", n)
 	}
-	if n := count(pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "1"}}); n != 4 {
+	if n := count(pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "1"}}); n != 4 {
 		t.Fatalf("app_user#1 sees %d posts, want 4", n)
 	}
-	if n := count(pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "2"}}); n != 3 {
+	if n := count(pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "2"}}); n != 3 {
 		t.Fatalf("app_user#2 sees %d posts, want 3", n)
 	}
 	// SET LOCAL: identity must not leak to the pooled connection.
@@ -83,6 +83,55 @@ func TestRunTxRLSMatrix(t *testing.T) {
 	}
 	if user == "anonymous" || user == "app_user" {
 		t.Fatalf("role leaked out of the transaction: %s", user)
+	}
+}
+
+func TestClaimsJSONSettingVisibleToPolicies(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	admin, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Release()
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS json_claims_probe (owner text NOT NULL)`,
+		`TRUNCATE json_claims_probe`,
+		`INSERT INTO json_claims_probe VALUES ('u1'), ('u2'), ('u2')`,
+		`ALTER TABLE json_claims_probe ENABLE ROW LEVEL SECURITY`,
+		`DROP POLICY IF EXISTS own ON json_claims_probe`,
+		`CREATE POLICY own ON json_claims_probe FOR SELECT TO app_user
+			USING (owner = current_setting('request.jwt.claims', true)::json->>'sub')`,
+		`GRANT SELECT ON json_claims_probe TO app_user`,
+	} {
+		if _, err := admin.Exec(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS json_claims_probe`) })
+	count := func(id pgexec.Identity) (n int, doc string) {
+		err := pgexec.RunTx(ctx, pool, pgexec.TxOptions{RLS: true}, id, func(q pgexec.Querier) error {
+			return q.QueryRow(ctx, `SELECT (SELECT count(*) FROM json_claims_probe), current_setting('request.jwt.claims', true)`).Scan(&n, &doc)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n, doc
+	}
+	id := pgexec.Identity{Role: "app_user", ClaimsJSONSetting: "request.jwt.claims", Claims: map[string]any{"sub": "u2", "role": "app_user"}}
+	if n, doc := count(id); n != 2 || doc != `{"role":"app_user","sub":"u2"}` {
+		t.Fatalf("u2 sees %d rows with claims %s, want 2", n, doc)
+	}
+	id.Claims = nil
+	if n, doc := count(id); n != 0 || doc != "{}" {
+		t.Fatalf("no claims: %d rows with claims %q, want 0 and {}", n, doc)
+	}
+	var batched int
+	err = pgexec.QueryTx(ctx, pool, pgexec.TxOptions{RLS: true},
+		pgexec.Identity{Role: "app_user", ClaimsJSONSetting: "request.jwt.claims", Claims: map[string]any{"sub": "u1"}},
+		pgexec.Stmt{SQL: `SELECT count(*) FROM json_claims_probe`, Scan: func(r pgx.Row) error { return r.Scan(&batched) }})
+	if err != nil || batched != 1 {
+		t.Fatalf("QueryTx: %d rows, err %v, want 1", batched, err)
 	}
 }
 

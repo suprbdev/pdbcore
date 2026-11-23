@@ -11,15 +11,15 @@ import (
 	"github.com/suprbdev/pdbcore/pgexec"
 )
 
-const benchSQL = `SELECT jsonb_build_object('id', t.id, 'email', t.email, 'uid', current_setting('pdbq.claims.user_id', true)) FROM users AS t WHERE t.id = $1`
+const benchSQL = `SELECT jsonb_build_object('id', t.id, 'email', t.email, 'uid', current_setting('jwt.claims.user_id', true)) FROM users AS t WHERE t.id = $1`
 
 var benchIdentities = []struct {
 	name string
 	id   pgexec.Identity
 }{
 	{"anonymous", pgexec.Identity{Role: "anonymous"}},
-	{"role+2claims", pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "1", "role": "app_user"}}},
-	{"role+7claims", pgexec.Identity{Role: "app_user", Claims: map[string]any{
+	{"role+2claims", pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "1", "role": "app_user"}}},
+	{"role+7claims", pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{
 		"user_id": "1", "role": "app_user", "sub": "1", "iss": "https://issuer.example", "aud": "pdb", "exp": 1900000000, "iat": 1800000000,
 	}}},
 }

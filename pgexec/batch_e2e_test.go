@@ -73,7 +73,7 @@ type sessionState struct {
 }
 
 const stateSQL = `SELECT pg_backend_pid(), current_user, session_user, current_setting('role'),
-	coalesce(current_setting('pdbq.claims.user_id', true), ''), current_setting('is_superuser')`
+	coalesce(current_setting('jwt.claims.user_id', true), ''), current_setting('is_superuser')`
 
 func scanState(row pgx.Row) (sessionState, error) {
 	var s sessionState
@@ -106,15 +106,15 @@ func TestQueryTxRLSMatrix(t *testing.T) {
 					want int
 				}{
 					{pgexec.Identity{Role: "anonymous"}, 3},
-					{pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "1", "n": 5}}, 4},
-					{pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "2"}}, 3},
+					{pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "1", "n": 5}}, 4},
+					{pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "2"}}, 3},
 				} {
 					var in sessionState
 					var n int
 					var nClaim string
 					err := pgexec.QueryTx(ctx, pool, tm.opts, tc.id,
 						pgexec.Stmt{SQL: stateSQL, Scan: func(r pgx.Row) (err error) { in, err = scanState(r); return err }},
-						pgexec.Stmt{SQL: "SELECT count(*), coalesce(current_setting('pdbq.claims.n', true), '') FROM posts",
+						pgexec.Stmt{SQL: "SELECT count(*), coalesce(current_setting('jwt.claims.n', true), '') FROM posts",
 							Scan: func(r pgx.Row) error { return r.Scan(&n, &nClaim) }},
 					)
 					if err != nil {
@@ -144,7 +144,7 @@ func TestQueryTxRLSMatrix(t *testing.T) {
 func TestQueryTxRoleMatchesSetLocalRole(t *testing.T) {
 	pool := onePool(t, "")
 	ctx := context.Background()
-	id := pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "9"}}
+	id := pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "9"}}
 	var viaTx, viaBatch sessionState
 	err := pgexec.RunTx(ctx, pool, pgexec.TxOptions{RLS: true}, id, func(q pgexec.Querier) (err error) {
 		viaTx, err = scanState(q.QueryRow(ctx, stateSQL))
@@ -165,7 +165,7 @@ func TestQueryTxRoleMatchesSetLocalRole(t *testing.T) {
 }
 
 func TestQueryTxNoLeakAfterFailure(t *testing.T) {
-	id := pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "1"}}
+	id := pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "1"}}
 	boom := errors.New("scan veto")
 	for _, mode := range execModes {
 		for _, tm := range txModes {
@@ -214,7 +214,7 @@ func TestQueryTxNoLeakAfterFailure(t *testing.T) {
 func TestQueryTxAtomic(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
-	id := pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "1"}}
+	id := pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "1"}}
 	prefix := fmt.Sprintf("qtx-%d-", time.Now().UnixNano())
 	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DELETE FROM users WHERE email LIKE $1", prefix+"%") })
 	count := func(email string) int {
@@ -319,12 +319,12 @@ func TestQueryTxRetryProbe(t *testing.T) {
 					}
 				}
 			}
-			id := pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "1"}}
+			id := pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "1"}}
 			probe := func(retries int) (scans int, uid string, err error) {
 				opts := tm.opts
 				opts.MaxRetries, opts.Log = retries, quietLog
 				err = pgexec.QueryTx(ctx, pool, opts, id, pgexec.Stmt{
-					SQL: "SELECT retry_probe(), current_setting('pdbq.claims.user_id')",
+					SQL: "SELECT retry_probe(), current_setting('jwt.claims.user_id')",
 					Scan: func(r pgx.Row) error {
 						scans++
 						var v int
@@ -373,11 +373,11 @@ func TestQueryTxRejectsOpenTransaction(t *testing.T) {
 func TestRunTxClaimsOneStatement(t *testing.T) {
 	pool := onePool(t, "")
 	ctx := context.Background()
-	id := pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "3", "roles": []string{"a", "b"}, "exp": 17}}
+	id := pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "3", "roles": []string{"a", "b"}, "exp": 17}}
 	err := pgexec.RunTx(ctx, pool, pgexec.TxOptions{RLS: true}, id, func(q pgexec.Querier) error {
 		var uid, roles, exp string
-		if err := q.QueryRow(ctx, `SELECT current_setting('pdbq.claims.user_id'), current_setting('pdbq.claims.roles'),
-			current_setting('pdbq.claims.exp')`).Scan(&uid, &roles, &exp); err != nil {
+		if err := q.QueryRow(ctx, `SELECT current_setting('jwt.claims.user_id'), current_setting('jwt.claims.roles'),
+			current_setting('jwt.claims.exp')`).Scan(&uid, &roles, &exp); err != nil {
 			return err
 		}
 		if uid != "3" || roles != `["a","b"]` || exp != "17" {
@@ -481,7 +481,7 @@ func (o *errObserver) ObserveQuery(_ context.Context, ev pgexec.QueryEvent) {
 func TestQueryTxRequestedRollbackIsNotAnError(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
-	id := pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "1"}}
+	id := pgexec.Identity{Role: "app_user", ClaimsPrefix: "jwt.claims", Claims: map[string]any{"user_id": "1"}}
 	email := fmt.Sprintf("qtx-rb-%d@example.com", time.Now().UnixNano())
 	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", email) })
 	opts := pgexec.TxOptions{RLS: true, ScanBeforeCommit: true}

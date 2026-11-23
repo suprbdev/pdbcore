@@ -89,8 +89,9 @@ func serFail() error {
 func TestRunTxAppliesIdentityThenCommits(t *testing.T) {
 	db := &fakeDB{}
 	id := Identity{
-		Role:   "app_user",
-		Claims: map[string]any{"user_id": "7", "roles": []string{"a"}, "bad-key": "x"},
+		Role:         "app_user",
+		ClaimsPrefix: "jwt.claims",
+		Claims:       map[string]any{"user_id": "7", "roles": []string{"a"}, "bad-key": "x"},
 	}
 	calls := 0
 	err := RunTx(context.Background(), db, TxOptions{Isolation: pgx.Serializable, RLS: true}, id, func(q Querier) error {
@@ -110,7 +111,7 @@ func TestRunTxAppliesIdentityThenCommits(t *testing.T) {
 	if tx.stmts[0] != `SET LOCAL ROLE "app_user"` {
 		t.Fatalf("first stmt = %q", tx.stmts[0])
 	}
-	want := claimsSQL + ` [{pdbq.claims.roles,pdbq.claims.user_id}, {["a"],7}]`
+	want := claimsSQL + ` [{jwt.claims.roles,jwt.claims.user_id}, {["a"],7}]`
 	if len(tx.stmts) != 2 || tx.stmts[1] != want {
 		t.Fatalf("stmts = %q, want role then one claims statement %q", tx.stmts, want)
 	}
@@ -118,7 +119,7 @@ func TestRunTxAppliesIdentityThenCommits(t *testing.T) {
 
 func TestApplyIdentityNoClaimsNoStatement(t *testing.T) {
 	tx := &fakeTx{}
-	if err := ApplyIdentity(context.Background(), tx, Identity{Claims: map[string]any{"bad-key": "x"}}); err != nil {
+	if err := ApplyIdentity(context.Background(), tx, Identity{ClaimsPrefix: "jwt.claims", Claims: map[string]any{"bad-key": "x"}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(tx.stmts) != 0 {
@@ -321,6 +322,51 @@ func TestParseIsolation(t *testing.T) {
 	for in, want := range cases {
 		if got := ParseIsolation(in); got != want {
 			t.Errorf("ParseIsolation(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestApplyIdentityClaimsJSONSetting(t *testing.T) {
+	cases := []struct {
+		name string
+		id   Identity
+		want string
+	}{
+		{"json only", Identity{ClaimsJSONSetting: "request.jwt.claims", Claims: map[string]any{"sub": "u1", "n": 2}},
+			claimsSQL + ` [{request.jwt.claims}, {{"n":2,"sub":"u1"}}]`},
+		{"prefix and json", Identity{ClaimsPrefix: "jwt.claims", ClaimsJSONSetting: "request.jwt.claims", Claims: map[string]any{"bad-key": "x", "sub": "u1"}},
+			claimsSQL + ` [{jwt.claims.sub,request.jwt.claims}, {u1,{"bad-key":"x","sub":"u1"}}]`},
+		{"anonymous gets an empty object", Identity{ClaimsPrefix: "jwt.claims", ClaimsJSONSetting: "request.jwt.claims"},
+			claimsSQL + ` [{request.jwt.claims}, {{}}]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &fakeTx{}
+			if err := ApplyIdentity(context.Background(), tx, tc.id); err != nil {
+				t.Fatal(err)
+			}
+			if len(tx.stmts) != 1 || tx.stmts[0] != tc.want {
+				t.Fatalf("stmts = %q, want [%q]", tx.stmts, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyIdentityNoPrefixSetsNoClaims(t *testing.T) {
+	tx := &fakeTx{}
+	if err := ApplyIdentity(context.Background(), tx, Identity{Claims: map[string]any{"sub": "u1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tx.stmts) != 0 {
+		t.Fatalf("stmts = %q, want none", tx.stmts)
+	}
+}
+
+func TestApplyIdentityRejectsBadClaimsSetting(t *testing.T) {
+	for _, name := range []string{"claims", "plpgsql.claims", "pg_x.y", "a..b"} {
+		err := ApplyIdentity(context.Background(), &fakeTx{}, Identity{ClaimsJSONSetting: name})
+		if err == nil || !strings.HasPrefix(err.Error(), "invalid claims setting") {
+			t.Errorf("%q: err = %v", name, err)
 		}
 	}
 }

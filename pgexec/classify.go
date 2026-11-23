@@ -16,7 +16,10 @@ type Class int
 const (
 	// OK: err was nil.
 	OK Class = iota
-	// UserInput: 22* data exceptions, 23502/23514, and 42* other than 42501.
+	// UserInput: 21* cardinality violations (a row targeted twice by one
+	// INSERT ... ON CONFLICT DO UPDATE, a scalar subquery returning
+	// several rows), 22* data exceptions, 23502/23514, and 42* other
+	// than 42501.
 	UserInput
 	// Permission: 42501 insufficient privilege.
 	Permission
@@ -55,7 +58,7 @@ func (c Class) String() string {
 type Detail int
 
 const (
-	// Prod passes 22*/23* PG messages, and the messages of malformed
+	// Prod passes 21*/22*/23* PG messages, and the messages of malformed
 	// full-text/ltree operands, through and hides the rest.
 	Prod Detail = iota
 	// Dev exposes full PG messages (and non-PG error text).
@@ -194,7 +197,7 @@ func classOf(code string) Class {
 		return Resource
 	}
 	switch prefix(code) {
-	case "22", "42":
+	case "21", "22", "42":
 		return UserInput
 	case "53", "08":
 		return Resource
@@ -225,7 +228,7 @@ func SanitizeMessage(pgErr *pgconn.PgError, strict bool) string {
 			return "constraint violation"
 		}
 		return pgErr.Message
-	case "22": // data exceptions (bad input format)
+	case "21", "22": // cardinality violations and data exceptions (bad input)
 		if strict {
 			return "invalid input value"
 		}
