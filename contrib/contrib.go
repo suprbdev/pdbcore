@@ -2,7 +2,7 @@
 // PostgreSQL's non-scalar built-in types and the common contrib extensions —
 // full-text search (tsvector, and to_tsvector over text), pg_trgm, unaccent,
 // hstore, ltree, citext, range and multirange types, inet/cidr and pgvector's
-// vector, halfvec and sparsevec — as a small,
+// vector, halfvec and sparsevec types and bit distances — as a small,
 // catalog-driven layer shared by pdbq and pdbr, in the same style as the
 // postgis package.
 //
@@ -12,7 +12,8 @@
 //   - which filter operators ([Op]) apply, what operand each takes, how it
 //     renders and which index can serve it;
 //   - which operand-taking value expressions ([Expr]) exist for ordering or
-//     selection (trigram similarity and distance, vector distances);
+//     selection (trigram similarity and distance, vector and bit distances;
+//     [Expr.Score] marks the ones offered as selectable values);
 //   - which derived accessors ([Accessor]) exist (ltree nlevel, inet family,
 //     range bounds, vector dims);
 //   - how an input value for the column becomes bind parameters and back
@@ -90,6 +91,7 @@ const (
 	VocabInet       = "inet"
 	VocabUnaccent   = "unaccent" // unaccent over text-like columns
 	VocabVector     = "vector"   // pgvector vector, halfvec and sparsevec columns
+	VocabBit        = "bit"      // pgvector distances over bit and varbit columns
 )
 
 // ArgKind classifies an operand (or a column value fed to a [Codec]) so
@@ -120,8 +122,14 @@ const (
 	// string for numeric, date and timestamp elements); one parameter.
 	ArgElement
 	// ArgVector is a pgvector value: a list of numbers, or the type's text
-	// form as a string; one text parameter.
+	// form as a string; one text parameter. For bit columns ([Bit]) it is a
+	// bit string ("1010") or a list of 0/1 numbers or booleans.
 	ArgVector
+	// ArgVectorDistance is a distance threshold against a reference
+	// vector: an object {vector, distance} whose vector is as for
+	// ArgVector and whose distance is a finite number. Two parameters: the
+	// vector text and the threshold (float8).
+	ArgVectorDistance
 )
 
 func (k ArgKind) String() string {
@@ -142,6 +150,8 @@ func (k ArgKind) String() string {
 		return "element"
 	case ArgVector:
 		return "vector"
+	case ArgVectorDistance:
+		return "vector distance"
 	}
 	return ""
 }
@@ -154,6 +164,8 @@ func (k ArgKind) arity() (int, int) {
 		return 1, 2
 	case ArgRange, ArgMultirange:
 		return 3, 3
+	case ArgVectorDistance:
+		return 2, 2
 	}
 	return 1, 1
 }
@@ -296,6 +308,11 @@ type Expr struct {
 	Index []IndexHint
 	// Extension is the extension the expression needs, "" for core.
 	Extension string
+	// Score marks an expression consumers expose as a selectable value
+	// measured against the request's reference (the trigram similarities
+	// and the vector distances). The trigram distances are not scores:
+	// each is 1 - its similarity and serves index-assisted ordering only.
+	Score bool
 
 	q      qual
 	render func(q qual, col string, a []string) string
@@ -636,6 +653,15 @@ func forType(cat *introspect.Catalog, schema, name string, arr bool) []Vocabular
 			return []Vocabulary{v}
 		}
 		return []Vocabulary{RangeOf(r)}
+	}
+	if core && (base == "bit" || base == "varbit") {
+		if cat != nil {
+			if e := cat.Extension(ExtVector); e != nil {
+				v, _ := Bit(base)
+				return []Vocabulary{v.Bind(e.Schema).ForVersion(e.Version)}
+			}
+		}
+		return nil
 	}
 	switch base {
 	case "vector", "halfvec", "sparsevec":

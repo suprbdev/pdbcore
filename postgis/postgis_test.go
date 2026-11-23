@@ -720,3 +720,12 @@ func TestOutputJSONSQL(t *testing.T) {
 		}
 	}
 }
+
+func TestDistanceRenders(t *testing.T) {
+	if got, want := DistanceSQL("t.g", "$1"), "ST_Distance(t.g, $1)"; got != want {
+		t.Errorf("DistanceSQL = %s, want %s", got, want)
+	}
+	if got, want := SpheroidDistanceSQL("t.g", "$1"), "ST_Distance((t.g)::geography, ($1)::geography)"; got != want {
+		t.Errorf("SpheroidDistanceSQL = %s, want %s", got, want)
+	}
+}

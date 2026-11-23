@@ -2,6 +2,7 @@ package contrib_test
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -61,7 +62,7 @@ func openVector(t *testing.T) *liveDB {
 		t.Fatal(err)
 	}
 	ext := quote(d.schemaOf0(contrib.ExtVector))
-	d.exec(`CREATE TABLE vecs (id int PRIMARY KEY, e ` + ext + `.vector(3), h ` + ext + `.halfvec(3), s ` + ext + `.sparsevec(3))`)
+	d.exec(`CREATE TABLE vecs (id int PRIMARY KEY, e ` + ext + `.vector(3), h ` + ext + `.halfvec(3), s ` + ext + `.sparsevec(3), b bit(3), vb varbit)`)
 	cat, err := introspect.Introspect(d.ctx, d.tx, []string{dataSchema})
 	if err != nil {
 		t.Fatal(err)
@@ -220,5 +221,102 @@ func TestVectorOperandErrorsLive(t *testing.T) {
 	err = d.query("SELECT "+e.Render("t.e", "$1")+" FROM vecs AS t LIMIT 1", ps, new(any))
 	if err == nil || !strings.Contains(err.Error(), "dimensions") {
 		t.Errorf("mismatched dimensions: %v", err)
+	}
+}
+
+// TestVectorThresholdLive runs the <distance>LessThan filters of every
+// vector type against the same rows as the ordering.
+func TestVectorThresholdLive(t *testing.T) {
+	d := openVector(t)
+	d.exec(`INSERT INTO vecs (id, e, h, s) VALUES (1, '[1,0,0]', '[1,0,0]', '{1:1}/3'), (2, '[0,2,0]', '[0,2,0]', '{2:2}/3'), (3, '[1,1,0]', '[1,1,0]', '{1:1,2:1}/3'), (4, NULL, NULL, NULL)`)
+	tbl := d.cat.Table(dataSchema, "vecs")
+	ref := []any{0.0, 3.0, 0.0}
+	for _, col := range []string{"e", "h", "s"} {
+		v := contrib.ForColumn(d.cat, tbl.Column(col))[0]
+		for _, tc := range []struct {
+			op       string
+			distance float64
+			want     []int32
+		}{
+			{"l2DistanceLessThan", 2.5, []int32{2, 3}},
+			{"l2DistanceLessThan", 1.5, []int32{2}},
+			{"negativeInnerProductLessThan", -2, []int32{2, 3}},
+			{"cosineDistanceLessThan", 0.5, []int32{2, 3}},
+			{"l1DistanceLessThan", 2, []int32{2}},
+		} {
+			op, ok := v.Op(tc.op)
+			if !ok {
+				t.Fatalf("%s: %s missing", col, tc.op)
+			}
+			ps, err := op.Params(map[string]any{"vector": ref, "distance": tc.distance})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var a args
+			q := "SELECT coalesce(array_agg(id ORDER BY id), '{}') FROM vecs AS t WHERE " + op.Render("t."+col, a.add(ps...)...)
+			var ids []int32
+			if err := d.query(q, a.vals, &ids); err != nil {
+				t.Fatalf("%s %s: %v\n%s", col, tc.op, err, q)
+			}
+			if !reflect.DeepEqual(ids, tc.want) {
+				t.Errorf("%s %s < %v = %v, want %v", col, tc.op, tc.distance, ids, tc.want)
+			}
+		}
+	}
+}
+
+// TestBitLive orders, filters and scores bit and varbit columns by the
+// Hamming and Jaccard distances, with the reference given as a list.
+func TestBitLive(t *testing.T) {
+	d := openVector(t)
+	d.exec(`INSERT INTO vecs (id, b, vb) VALUES (1, '110', '110'), (2, '011', '011'), (3, '000', '000'), (4, NULL, NULL)`)
+	tbl := d.cat.Table(dataSchema, "vecs")
+	ref := []any{1, 1, 1}
+	for _, col := range []string{"b", "vb"} {
+		vs := contrib.ForColumn(d.cat, tbl.Column(col))
+		if len(vs) != 1 || vs[0].Name != contrib.VocabBit {
+			t.Fatalf("%s: vocabularies %+v", col, vs)
+		}
+		v := vs[0]
+		for _, tc := range []struct {
+			expr   string
+			scores []float64
+		}{
+			{"hammingDistance", []float64{1, 1, 3}},
+			{"jaccardDistance", []float64{1.0 / 3, 1.0 / 3, 1}},
+		} {
+			e, _ := v.Expr(tc.expr)
+			ps, err := e.Params(ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var a args
+			q := "SELECT array_agg((" + e.Render("t."+col, a.add(ps...)...) + ")::float8 ORDER BY id) FROM vecs AS t WHERE t." + col + " IS NOT NULL"
+			var got []float64
+			if err := d.query(q, a.vals, &got); err != nil {
+				t.Fatalf("%s %s: %v\n%s", col, tc.expr, err, q)
+			}
+			for i := range got {
+				if math.Abs(got[i]-tc.scores[i]) > 1e-9 {
+					t.Errorf("%s %s = %v, want %v", col, tc.expr, got, tc.scores)
+					break
+				}
+			}
+		}
+		op, _ := v.Op("hammingDistanceLessThan")
+		ps, _ := op.Params(map[string]any{"vector": "111", "distance": 2})
+		var a args
+		var ids []int32
+		if err := d.query("SELECT array_agg(id ORDER BY id) FROM vecs AS t WHERE "+op.Render("t."+col, a.add(ps...)...), a.vals, &ids); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(ids, []int32{1, 2}) {
+			t.Errorf("%s hamming < 2 = %v", col, ids)
+		}
+	}
+	e, _ := contrib.ForColumn(d.cat, tbl.Column("b"))[0].Expr("hammingDistance")
+	ps, _ := e.Params("11")
+	if err := d.query("SELECT "+e.Render("t.b", "$1")+" FROM vecs AS t WHERE id = 1", ps, new(any)); err == nil {
+		t.Error("length mismatch accepted")
 	}
 }

@@ -681,9 +681,21 @@ func SimplifySQL(ref, tolerance string, f Flavour) string {
 	return fmt.Sprintf("ST_SimplifyPreserveTopology(%s, %s)", ref, tolerance)
 }
 
-// DistanceSQL renders the ordering expression for distance-from-a-point sorts.
+// DistanceSQL renders the distance between col and geom (ST_Distance), the
+// value a nearest-first ordering sorts by: in the units of the SRID for
+// geometry (degrees for 4326), in metres on the spheroid for geography,
+// where geom must be geography too. Both arguments are evaluated once.
 func DistanceSQL(col, geom string) string {
 	return fmt.Sprintf("ST_Distance(%s, %s)", col, geom)
+}
+
+// SpheroidDistanceSQL renders the distance in metres on the WGS 84
+// spheroid between a geometry col and geom, by casting both to geography
+// (the PostGIS idiom for lon/lat data stored as geometry, as in
+// ST_DWithin's useSpheroid form). The geometries must carry a lon/lat SRID
+// (4326 or another geodetic one); PostgreSQL rejects the cast otherwise.
+func SpheroidDistanceSQL(col, geom string) string {
+	return fmt.Sprintf("ST_Distance((%s)::geography, (%s)::geography)", col, geom)
 }
 
 // KNNSQL renders the index-assisted nearest-neighbour operator (<->), which a

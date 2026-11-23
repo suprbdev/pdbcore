@@ -241,3 +241,166 @@ func TestForTypeVectorAndUnaccent(t *testing.T) {
 		t.Errorf("halfvec column = %v", names(got))
 	}
 }
+
+func TestVectorThresholdOps(t *testing.T) {
+	m := must(t)
+	tests := []struct {
+		vocab contrib.Vocabulary
+		op    string
+		want  string
+	}{
+		{m(contrib.Vector("vector")), "l2DistanceLessThan", `((t.c) OPERATOR("ext".<->) $1::"ext".vector) < $2::float8`},
+		{m(contrib.Vector("halfvec")), "negativeInnerProductLessThan", `((t.c) OPERATOR("ext".<#>) $1::"ext".halfvec) < $2::float8`},
+		{m(contrib.Vector("sparsevec")), "cosineDistanceLessThan", `((t.c) OPERATOR("ext".<=>) $1::"ext".sparsevec) < $2::float8`},
+		{m(contrib.Vector("vector")), "l1DistanceLessThan", `((t.c) OPERATOR("ext".<+>) $1::"ext".vector) < $2::float8`},
+		{m(contrib.Bit("bit")), "hammingDistanceLessThan", `((t.c) OPERATOR("ext".<~>) $1::varbit) < $2::float8`},
+		{m(contrib.Bit("varbit")), "jaccardDistanceLessThan", `((t.c) OPERATOR("ext".<%>) $1::varbit) < $2::float8`},
+	}
+	for _, tc := range tests {
+		op, ok := tc.vocab.Bind("ext").Op(tc.op)
+		if !ok {
+			t.Fatalf("%s: %s missing", tc.vocab.Type, tc.op)
+		}
+		if got := op.Render("t.c", "$1", "$2"); got != tc.want {
+			t.Errorf("%s %s = %s, want %s", tc.vocab.Type, tc.op, got, tc.want)
+		}
+		if op.Indexable() || op.Arg != contrib.ArgVectorDistance {
+			t.Errorf("%s: indexable %v, arg %v", tc.op, op.Indexable(), op.Arg)
+		}
+		if op.Render("t.c", "$1") != "" {
+			t.Errorf("%s renders with one placeholder", tc.op)
+		}
+	}
+	op, _ := m(contrib.Vector("vector")).Op("cosineDistanceLessThan")
+	got, err := op.Params(map[string]any{"vector": []any{1, 2.5}, "distance": json.Number("0.25")})
+	if err != nil || !reflect.DeepEqual(got, []any{"[1,2.5]", 0.25}) {
+		t.Errorf("params = %v, %v", got, err)
+	}
+	got, err = op.Params(map[string]any{"vector": "[1,2]", "distance": "-0.5"})
+	if err != nil || !reflect.DeepEqual(got, []any{"[1,2]", -0.5}) {
+		t.Errorf("string params = %v, %v", got, err)
+	}
+	for _, bad := range []any{
+		"[1,2]",
+		map[string]any{"distance": 1},
+		map[string]any{"vector": []any{1}},
+		map[string]any{"vector": []any{1}, "distance": "x"},
+		map[string]any{"vector": []any{1}, "distance": math.Inf(1)},
+		map[string]any{"vector": []any{"a"}, "distance": 1},
+	} {
+		if _, err := op.Params(bad); err == nil {
+			t.Errorf("accepted %#v", bad)
+		}
+	}
+	hop, _ := m(contrib.Bit("bit")).Op("hammingDistanceLessThan")
+	got, err = hop.Params(map[string]any{"vector": []any{true, 0, 1.0}, "distance": 2})
+	if err != nil || !reflect.DeepEqual(got, []any{"101", 2.0}) {
+		t.Errorf("bit params = %v, %v", got, err)
+	}
+}
+
+func TestBitVocabulary(t *testing.T) {
+	m := must(t)
+	v := m(contrib.Bit("bit")).Bind("ext")
+	if v.Name != contrib.VocabBit || v.Extension != contrib.ExtVector || v.Codec != nil {
+		t.Fatalf("vocabulary = %+v", v)
+	}
+	tests := []struct {
+		expr, sql string
+		hints     []string
+	}{
+		{"hammingDistance", `(t.c) OPERATOR("ext".<~>) $1::varbit`, []string{"hnsw:bit_hamming_ops", "ivfflat:bit_hamming_ops"}},
+		{"jaccardDistance", `(t.c) OPERATOR("ext".<%>) $1::varbit`, []string{"hnsw:bit_jaccard_ops"}},
+	}
+	for _, tc := range tests {
+		e, ok := v.Expr(tc.expr)
+		if !ok {
+			t.Fatalf("%s missing", tc.expr)
+		}
+		if got := e.Render("t.c", "$1"); got != tc.sql {
+			t.Errorf("%s = %s, want %s", tc.expr, got, tc.sql)
+		}
+		var hints []string
+		for _, h := range e.Index {
+			hints = append(hints, h.Method+":"+h.OpClass)
+		}
+		if !reflect.DeepEqual(hints, tc.hints) || !e.Ascending || !e.Score {
+			t.Errorf("%s: hints %v, ascending %v, score %v", tc.expr, hints, e.Ascending, e.Score)
+		}
+	}
+	if len(v.ForVersion("0.6.2").Exprs) != 0 || len(v.ForVersion("0.6.2").Ops) != 0 {
+		t.Error("bit distances offered before pgvector 0.7")
+	}
+	for _, typ := range []string{"bit[]", "_bit", "int4", "vector"} {
+		if _, ok := contrib.Bit(typ); ok {
+			t.Errorf("%s has a bit vocabulary", typ)
+		}
+	}
+	for _, tc := range []struct{ in, want string }{{" 0101 ", "0101"}, {"1", "1"}} {
+		if got, err := contrib.BitParam(tc.in); err != nil || got != tc.want {
+			t.Errorf("BitParam(%q) = %q, %v", tc.in, got, err)
+		}
+	}
+	for _, bad := range []any{"", "012", "10 1", []any{}, []any{2}, []any{"1"}, 5, strings.Repeat("1", contrib.MaxBitDims+1)} {
+		if _, err := contrib.BitParam(bad); err == nil {
+			t.Errorf("BitParam(%#v) accepted", bad)
+		}
+	}
+}
+
+func TestScoreExpressions(t *testing.T) {
+	m := must(t)
+	scores := func(v contrib.Vocabulary) []string {
+		var out []string
+		for _, e := range v.Exprs {
+			if e.Score {
+				out = append(out, e.Name)
+			}
+		}
+		return out
+	}
+	tests := []struct {
+		v    contrib.Vocabulary
+		want []string
+	}{
+		{contrib.Trgm("text"), []string{"similarity", "wordSimilarity", "strictWordSimilarity"}},
+		{m(contrib.Vector("vector")), []string{"l2Distance", "negativeInnerProduct", "cosineDistance", "l1Distance"}},
+		{m(contrib.Vector("sparsevec")), []string{"l2Distance", "negativeInnerProduct", "cosineDistance", "l1Distance"}},
+		{m(contrib.Bit("varbit")), []string{"hammingDistance", "jaccardDistance"}},
+	}
+	for _, tc := range tests {
+		if got := scores(tc.v); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s scores = %v, want %v", tc.v.Name, got, tc.want)
+		}
+	}
+}
+
+func TestBitForColumn(t *testing.T) {
+	with := &introspect.Catalog{Extensions: []*introspect.Extension{{Name: "vector", Schema: "ext", Version: "0.8.0"}}}
+	old := &introspect.Catalog{Extensions: []*introspect.Extension{{Name: "vector", Schema: "ext", Version: "0.6.0"}}}
+	col := func(typ string, arr bool) *introspect.Column {
+		return &introspect.Column{Name: "b", PGType: typ, BaseTypeSchema: "pg_catalog", IsArray: arr}
+	}
+	if vs := contrib.ForColumn(with, col("bit", false)); len(vs) != 1 || vs[0].Name != contrib.VocabBit || vs[0].Schema != "ext" || len(vs[0].Exprs) != 2 {
+		t.Errorf("bit: %+v", vs)
+	}
+	if vs := contrib.ForColumn(with, col("varbit", false)); len(vs) != 1 || vs[0].Type != "varbit" {
+		t.Errorf("varbit: %+v", vs)
+	}
+	if vs := contrib.ForColumn(old, col("bit", false)); len(vs) != 1 || len(vs[0].Exprs) != 0 {
+		t.Errorf("bit under pgvector 0.6: %+v", vs)
+	}
+	for _, c := range []struct {
+		cat *introspect.Catalog
+		col *introspect.Column
+	}{
+		{nil, col("bit", false)},
+		{&introspect.Catalog{}, col("bit", false)},
+		{with, col("bit", true)},
+		{with, &introspect.Column{Name: "b", PGType: "bit", BaseTypeSchema: "app"}},
+	} {
+		if vs := contrib.ForColumn(c.cat, c.col); len(vs) != 0 {
+			t.Errorf("%+v: %+v", c.col, vs)
+		}
+	}
+}

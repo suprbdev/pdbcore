@@ -110,6 +110,7 @@ func allVocabularies(t *testing.T) []contrib.Vocabulary {
 	for _, typ := range contrib.VectorTypes {
 		vs = append(vs, m(contrib.Vector(typ)))
 	}
+	vs = append(vs, m(contrib.Bit("bit")), m(contrib.Bit("varbit")))
 	for _, r := range contrib.RangeTypes() {
 		vs = append(vs, m(contrib.Range(r)))
 		mr := strings.Replace(r, "range", "multirange", 1)
@@ -189,6 +190,8 @@ func arity(k contrib.ArgKind) (int, int) {
 		return 1, 2
 	case contrib.ArgRange, contrib.ArgMultirange:
 		return 3, 3
+	case contrib.ArgVectorDistance:
+		return 2, 2
 	}
 	return 1, 1
 }
