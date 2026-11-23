@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/suprbdev/pdbcore/auth"
+	"github.com/suprbdev/pdbcore/contract"
 	"github.com/suprbdev/pdbcore/pgexec"
 )
 
@@ -124,6 +125,89 @@ func ValidateMetrics(m Metrics, serverAddr string) []string {
 		}
 	}
 	return errs
+}
+
+// ValidateContracts checks the contracts list: every name is a valid
+// contract name and unique, every default is empty, include or exclude,
+// and every path (see [Contract.URLPath], resolved against base) is a
+// clean absolute URL path, unique, and neither nested in another
+// contract's path nor containing one, so a request URL selects one
+// contract. With rootShared, a contract served at "/" may sit next to
+// others (pdbq's contracts own fixed endpoints below their path); without
+// it "/" contains every other path.
+func ValidateContracts(cs []Contract, base string, rootShared bool) []string {
+	var errs []string
+	names := map[string]bool{}
+	type seen struct{ path, name string }
+	var paths []seen
+	for i, c := range cs {
+		key := fmt.Sprintf("contracts[%d]", i)
+		if !validContractName(c.Name) {
+			errs = append(errs, fmt.Sprintf("%s.name: %q must be 1-63 lower-case letters, digits, _ or -, starting with a letter", key, c.Name))
+		} else if names[c.Name] {
+			errs = append(errs, fmt.Sprintf("%s.name: %q is used by another contract", key, c.Name))
+		}
+		names[c.Name] = true
+		switch contract.Policy(c.Default) {
+		case "", contract.Include, contract.Exclude:
+		default:
+			errs = append(errs, fmt.Sprintf("%s.default: %q is not 'include' or 'exclude'", key, c.Default))
+		}
+		p := c.URLPath(base)
+		if !validContractPath(p) {
+			errs = append(errs, fmt.Sprintf("%s.path: %q must be / or start with / and name path segments of letters, digits, _ . ~ or -, without a trailing /", key, p))
+			continue
+		}
+		for _, o := range paths {
+			if o.path == p {
+				errs = append(errs, fmt.Sprintf("%s.path: %q is also the path of contract %q", key, p, o.name))
+			} else if root := p == "/" || o.path == "/"; (!root || !rootShared) && (nestedPath(p, o.path) || nestedPath(o.path, p)) {
+				errs = append(errs, fmt.Sprintf("%s.path: %q overlaps the path %q of contract %q", key, p, o.path, o.name))
+			}
+		}
+		paths = append(paths, seen{p, c.Name})
+	}
+	return errs
+}
+
+func validContractName(s string) bool {
+	if s == "" || len(s) > 63 || s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	for _, r := range s {
+		ok := r == '_' || r == '-' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func validContractPath(p string) bool {
+	if p == "/" {
+		return true
+	}
+	if !strings.HasPrefix(p, "/") || strings.HasSuffix(p, "/") {
+		return false
+	}
+	for _, seg := range strings.Split(p[1:], "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+		for _, r := range seg {
+			ok := r == '_' || r == '-' || r == '.' || r == '~' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+			if !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// nestedPath reports whether path p lies below parent ("/" contains
+// everything).
+func nestedPath(p, parent string) bool {
+	return parent == "/" || strings.HasPrefix(p, parent+"/")
 }
 
 // ValidateSchema checks schema.schemas.

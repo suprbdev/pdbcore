@@ -370,3 +370,37 @@ func TestRegisterPoolUnconnected(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedRegistryPerContract(t *testing.T) {
+	reg, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := mustNew(t, Options{Namespace: "pdbq", Registerer: reg, ConstLabels: prometheus.Labels{"contract": "public"}})
+	partner := mustNew(t, Options{Namespace: "pdbq", Registerer: reg, ConstLabels: prometheus.Labels{"contract": "partner"}})
+	cfg, err := pgxpool.ParseConfig("postgres://u@127.0.0.1:1/db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 3
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := RegisterPoolOn(reg, "pdbq", pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterPoolOn(reg, "pdbq", (*pgxpool.Pool)(nil)); err != nil {
+		t.Fatal(err)
+	}
+	public.SchemaRebuilt(nil)
+	partner.SchemaRebuilt(errors.New("boom"))
+	got := scrape(t, partner.Handler())
+	want(t, got, `pdbq_schema_rebuilds_total{contract="public",result="success"}`, 1)
+	want(t, got, `pdbq_schema_rebuilds_total{contract="partner",result="failure"}`, 1)
+	want(t, got, "pdbq_db_pool_max_conns", 3)
+	if _, ok := got["go_goroutines"]; !ok {
+		t.Error("NewRegistry lacks the Go collector")
+	}
+}

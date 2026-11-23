@@ -76,12 +76,9 @@ func New(o Options) (*Metrics, error) {
 	}
 	reg, gatherer := o.Registerer, o.Gatherer
 	if reg == nil {
-		r := prometheus.NewRegistry()
-		if err := r.Register(collectors.NewGoCollector()); err != nil {
-			return nil, fmt.Errorf("metrics: %w", err)
-		}
-		if err := r.Register(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})); err != nil {
-			return nil, fmt.Errorf("metrics: %w", err)
+		r, err := NewRegistry()
+		if err != nil {
+			return nil, err
 		}
 		reg = r
 		if gatherer == nil {
@@ -155,6 +152,22 @@ func New(o Options) (*Metrics, error) {
 	m.schemaRebuilds.WithLabelValues("success")
 	m.schemaRebuilds.WithLabelValues("failure")
 	return m, nil
+}
+
+// NewRegistry returns a registry carrying the Go runtime and process
+// collectors, the one [New] creates when Options.Registerer is nil. Share
+// it between several Metrics told apart by ConstLabels, for example one
+// per schema contract with a contract label, and register a pool they
+// share with [RegisterPoolOn].
+func NewRegistry() (*prometheus.Registry, error) {
+	r := prometheus.NewRegistry()
+	if err := r.Register(collectors.NewGoCollector()); err != nil {
+		return nil, fmt.Errorf("metrics: %w", err)
+	}
+	if err := r.Register(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})); err != nil {
+		return nil, fmt.Errorf("metrics: %w", err)
+	}
+	return r, nil
 }
 
 // Handler serves the gathered metrics in the Prometheus exposition format.
