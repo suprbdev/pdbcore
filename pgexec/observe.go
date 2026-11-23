@@ -2,6 +2,7 @@ package pgexec
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -24,7 +25,7 @@ type QueryEvent struct {
 	// connection or beginning the transaction to the commit or failure.
 	Duration time.Duration
 	// Err is the attempt's error, as the helper would return it; nil on
-	// success.
+	// success or when the caller requested a rollback with [ErrRollback].
 	Err error
 }
 
@@ -50,6 +51,9 @@ func Observe(ctx context.Context, o Observer, op string, start time.Time, err er
 func observeAttempt(ctx context.Context, o Observer, op string, attempt int, start time.Time, err error) {
 	if o == nil {
 		return
+	}
+	if errors.Is(err, ErrRollback) {
+		err = nil
 	}
 	o.ObserveQuery(ctx, QueryEvent{Op: op, Attempt: attempt, Duration: time.Since(start), Err: err})
 }
