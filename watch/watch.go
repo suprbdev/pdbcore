@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -44,7 +45,24 @@ type Watcher struct {
 	// calls OnChange and the first poll only records the hash.
 	InitialHash string
 
-	lastHash string
+	lastHash  string
+	readyOnce sync.Once
+	ready     chan struct{}
+}
+
+func (w *Watcher) readyChan() chan struct{} {
+	w.readyOnce.Do(func() { w.ready = make(chan struct{}) })
+	return w.ready
+}
+
+// Ready returns a channel that is closed once Run is listening for DDL
+// notifications, or, when the event trigger cannot be installed, once the
+// polling loop has started. Every change made after Ready is closed reaches
+// OnChange, as does any change made since InitialHash was taken. The channel
+// is never closed if Run returns an error before reaching that point. It may
+// be called before Run.
+func (w *Watcher) Ready() <-chan struct{} {
+	return w.readyChan()
 }
 
 // Run blocks until ctx is cancelled. It tries to install the event trigger;
@@ -72,9 +90,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		w.Schemas = []string{"public"}
 	}
 	w.lastHash = w.InitialHash
-	// LISTEN before installing the trigger so no notification fired after
-	// the install can be lost; the "installed" log line therefore also means
-	// "listening".
+	ready := w.readyChan()
 	conn, err := w.Pool.Acquire(ctx)
 	if err != nil {
 		return err
@@ -89,6 +105,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return w.poll(ctx)
 	}
 	w.Log.Info("watch: DDL event trigger installed", "channel", w.Channel)
+	close(ready)
 	if w.lastHash != "" {
 		w.reintrospect(ctx)
 	}
@@ -196,6 +213,7 @@ func drainNotifications(ctx context.Context, conn *pgx.Conn) {
 func (w *Watcher) poll(ctx context.Context) error {
 	ticker := time.NewTicker(w.PollInterval)
 	defer ticker.Stop()
+	close(w.readyChan())
 	for {
 		select {
 		case <-ctx.Done():
