@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"sort"
 	"strings"
 	"testing"
 
@@ -30,7 +29,12 @@ func (f *fakeTx) Exec(_ context.Context, sql string, args ...any) (pgconn.Comman
 	if len(args) > 0 {
 		parts := make([]string, len(args))
 		for i, a := range args {
-			parts[i] = a.(string)
+			switch v := a.(type) {
+			case string:
+				parts[i] = v
+			case []string:
+				parts[i] = "{" + strings.Join(v, ",") + "}"
+			}
 		}
 		rendered += " [" + strings.Join(parts, ", ") + "]"
 	}
@@ -106,14 +110,19 @@ func TestRunTxAppliesIdentityThenCommits(t *testing.T) {
 	if tx.stmts[0] != `SET LOCAL ROLE "app_user"` {
 		t.Fatalf("first stmt = %q", tx.stmts[0])
 	}
-	claims := append([]string(nil), tx.stmts[1:]...)
-	sort.Strings(claims)
-	want := []string{
-		`SELECT set_config($1, $2, true) [pdbq.claims.roles, ["a"]]`,
-		`SELECT set_config($1, $2, true) [pdbq.claims.user_id, 7]`,
+	want := claimsSQL + ` [{pdbq.claims.roles,pdbq.claims.user_id}, {["a"],7}]`
+	if len(tx.stmts) != 2 || tx.stmts[1] != want {
+		t.Fatalf("stmts = %q, want role then one claims statement %q", tx.stmts, want)
 	}
-	if strings.Join(claims, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("claims:\n%s\nwant:\n%s", strings.Join(claims, "\n"), strings.Join(want, "\n"))
+}
+
+func TestApplyIdentityNoClaimsNoStatement(t *testing.T) {
+	tx := &fakeTx{}
+	if err := ApplyIdentity(context.Background(), tx, Identity{Claims: map[string]any{"bad-key": "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tx.stmts) != 0 {
+		t.Fatalf("stmts = %q, want none", tx.stmts)
 	}
 }
 
@@ -123,7 +132,7 @@ func TestRunTxCustomPrefixAndNoRLS(t *testing.T) {
 	if err := RunTx(context.Background(), db, TxOptions{RLS: true}, id, func(Querier) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if got := db.txs[0].stmts[1]; got != `SELECT set_config($1, $2, true) [pdbr.claims.k, v]` {
+	if got := db.txs[0].stmts[1]; got != claimsSQL+` [{pdbr.claims.k}, {v}]` {
 		t.Fatalf("stmt = %q", got)
 	}
 	db = &fakeDB{}
@@ -146,6 +155,26 @@ func TestRunTxInvalidRole(t *testing.T) {
 	}
 	if !db.txs[0].rolled {
 		t.Fatal("expected rollback")
+	}
+}
+
+func TestRunTxRejectsRoleNoneAndReservedPrefix(t *testing.T) {
+	for _, id := range []Identity{
+		{Role: "none"},
+		{Role: "pg_read_all_data"},
+		{Role: "app_user", Claims: map[string]any{"variable_conflict": "use_column"}, ClaimsPrefix: "plpgsql"},
+	} {
+		db := &fakeDB{}
+		err := RunTx(context.Background(), db, TxOptions{RLS: true}, id, func(Querier) error {
+			t.Fatalf("fn must not run for %+v", id)
+			return nil
+		})
+		if err == nil || !strings.HasPrefix(err.Error(), "invalid ") {
+			t.Fatalf("%+v: err = %v", id, err)
+		}
+		if len(db.txs[0].stmts) != 0 || !db.txs[0].rolled {
+			t.Fatalf("%+v: stmts=%q rolled=%v, want no statement and a rollback", id, db.txs[0].stmts, db.txs[0].rolled)
+		}
 	}
 }
 

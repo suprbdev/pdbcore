@@ -21,6 +21,18 @@ func TestRunRejectsInvalidNames(t *testing.T) {
 	if err := w.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid trigger name") {
 		t.Fatalf("err = %v", err)
 	}
+	w = &Watcher{Channel: strings.Repeat("c", 64)}
+	if err := w.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "longer than 63 bytes") {
+		t.Fatalf("err = %v", err)
+	}
+	w = &Watcher{Channel: "ok", TriggerName: strings.Repeat("t", 57)}
+	if err := w.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "is too long") {
+		t.Fatalf("err = %v", err)
+	}
+	w = &Watcher{Channel: strings.Repeat("c", 51)}
+	if err := w.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "is too long") {
+		t.Fatalf("default trigger name from a long channel: err = %v", err)
+	}
 }
 
 func TestQuoting(t *testing.T) {
@@ -53,6 +65,7 @@ func TestWatchEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS watch_test CASCADE")
+	defer dropTriggers(pool, "pdbcore_test_ddl_watch")
 
 	changes := make(chan *introspect.Catalog, 4)
 	w := &Watcher{
