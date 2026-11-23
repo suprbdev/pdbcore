@@ -85,6 +85,16 @@ func TestOpRenders(t *testing.T) {
 		{m(contrib.Inet("inet")), "contains", 1, "(t.c) >> $1::inet"},
 		{m(contrib.Inet("inet")), "containsOrEquals", 1, "(t.c) >>= $1::inet"},
 		{m(contrib.Inet("inet")), "containsOrContainedBy", 1, "(t.c) && $1::inet"},
+		{contrib.Hstore().Bind("ext"), "hasDefinedKey", 1, `"ext".defined(t.c, $1::text)`},
+		{contrib.Fuzzy("text").Bind("ext"), "levenshteinDistanceLessThan", 2,
+			`CASE WHEN char_length((t.c)::text) <= 255 THEN "ext".levenshtein_less_equal((t.c)::text, $1::text, $2::int4) END < $2::int4`},
+		{contrib.Fuzzy("text").Bind("ext"), "soundexEqualTo", 1, `"ext".soundex(t.c) = "ext".soundex($1::text)`},
+		{contrib.Fuzzy("text").Bind("ext"), "metaphoneEqualTo", 1,
+			`"ext".metaphone(CASE WHEN octet_length((t.c)::text) <= 255 THEN (t.c)::text END, 255) = "ext".metaphone($1::text, 255)`},
+		{contrib.Fuzzy("text").Bind("ext"), "doubleMetaphoneEqualTo", 1, `"ext".dmetaphone(t.c) = "ext".dmetaphone($1::text)`},
+		{contrib.Fuzzy("text"), "soundexEqualTo", 1, `soundex(t.c) = soundex($1::text)`},
+		{contrib.Intarray().Bind("ext"), "matchesQueryInt", 1, `(t.c) OPERATOR("ext".@@) $1::"ext".query_int`},
+		{contrib.Intarray(), "matchesQueryInt", 1, `(t.c) @@ $1::query_int`},
 	}
 	for _, tc := range tests {
 		op, ok := tc.v.Op(tc.op)
@@ -106,6 +116,7 @@ func allVocabularies(t *testing.T) []contrib.Vocabulary {
 		contrib.FullText(), contrib.TextSearch("text"), contrib.Trgm("citext"),
 		contrib.Hstore(), contrib.Ltree(), contrib.LtreeArray(), contrib.Citext(),
 		m(contrib.Inet("inet")), m(contrib.Inet("cidr")), contrib.Unaccent("varchar"),
+		contrib.Fuzzy("bpchar"), contrib.Intarray(),
 	}
 	for _, typ := range contrib.VectorTypes {
 		vs = append(vs, m(contrib.Vector(typ)))
@@ -164,9 +175,15 @@ func TestEveryRenderIsParameterized(t *testing.T) {
 			}
 		}
 		for _, e := range v.Exprs {
-			check(e.Name, e.Render("t.c", "$1"), 1)
-			if e.Render("t.c") != "" {
-				t.Errorf("%s %s: accepts no placeholders", v.Name, e.Name)
+			lo, hi := arity(e.Arg)
+			for n := lo; n <= hi; n++ {
+				check(e.Name, e.Render("t.c", placeholders(n)...), n)
+			}
+			if e.Render("t.c") != "" || e.Render("t.c", placeholders(hi+1)...) != "" {
+				t.Errorf("%s %s: accepts a wrong placeholder count", v.Name, e.Name)
+			}
+			if e.Derived && (e.Score || e.Ascending) {
+				t.Errorf("%s %s: a derived value is neither a score nor an ordering", v.Name, e.Name)
 			}
 		}
 		for _, a := range v.Accessors {
@@ -190,7 +207,7 @@ func arity(k contrib.ArgKind) (int, int) {
 		return 1, 2
 	case contrib.ArgRange, contrib.ArgMultirange:
 		return 3, 3
-	case contrib.ArgVectorDistance:
+	case contrib.ArgVectorDistance, contrib.ArgTextDistance, contrib.ArgSubpath:
 		return 2, 2
 	}
 	return 1, 1
@@ -243,6 +260,34 @@ func TestExprRenders(t *testing.T) {
 	if got := contrib.Trgm("text").Exprs[0].Render("c", "$1"); got != "similarity(c, $1::text)" {
 		t.Errorf("unbound similarity = %s", got)
 	}
+
+	derived := []struct {
+		v                contrib.Vocabulary
+		name             string
+		n                int
+		want, typ        string
+		derived, ordered bool
+	}{
+		{contrib.Hstore().Bind("ext"), "value", 1, `(t.c) OPERATOR("ext".->) $1::text`, "text", true, false},
+		{contrib.Ltree().Bind("ext"), "lca", 1, `"ext".lca(t.c, $1::"ext".ltree)`, "ltree", true, false},
+		{contrib.Ltree().Bind("ext"), "subpath", 2,
+			`CASE WHEN $1::int4 < "ext".nlevel(t.c) AND -$1::int4 <= "ext".nlevel(t.c) THEN "ext".subpath(t.c, $1::int4, COALESCE($2::int4, 65535)) END`,
+			"ltree", true, false},
+		{contrib.Fuzzy("varchar").Bind("ext"), "levenshteinDistance", 1,
+			`CASE WHEN char_length((t.c)::text) <= 255 THEN "ext".levenshtein((t.c)::text, $1::text) END`, "int4", false, true},
+	}
+	for _, tc := range derived {
+		e, ok := tc.v.Expr(tc.name)
+		if !ok {
+			t.Fatalf("%s: expr %q not found", tc.v.Name, tc.name)
+		}
+		if got := e.Render("t.c", placeholders(tc.n)...); got != tc.want {
+			t.Errorf("%s %s = %s, want %s", tc.v.Name, tc.name, got, tc.want)
+		}
+		if e.Type != tc.typ || e.Derived != tc.derived || e.Ascending != tc.ordered || e.Score != tc.ordered {
+			t.Errorf("%s %s: type %s derived %v ascending %v score %v", tc.v.Name, tc.name, e.Type, e.Derived, e.Ascending, e.Score)
+		}
+	}
 }
 
 func TestRankSQL(t *testing.T) {
@@ -279,6 +324,10 @@ func TestAccessors(t *testing.T) {
 		{m(contrib.Range("numrange")), "startInfinite", "lower_inf(t.c)", "bool"},
 		{m(contrib.Range("numrange")), "endInfinite", "upper_inf(t.c)", "bool"},
 		{m(contrib.Multirange("tstzmultirange")), "isEmpty", "isempty(t.c)", "bool"},
+		{contrib.Ltree().Bind("ext"), "parent",
+			`CASE WHEN "ext".nlevel(t.c) > 0 THEN "ext".subpath(t.c, 0, "ext".nlevel(t.c) - 1) END`, "ltree"},
+		{contrib.LtreeArray().Bind("ext"), "lca", `"ext".lca(array_remove(t.c, NULL))`, "ltree"},
+		{contrib.Intarray().Bind("ext"), "icount", `"ext".icount(t.c)`, "int4"},
 	}
 	for _, tc := range tests {
 		a, ok := tc.v.Accessor(tc.name)
@@ -423,6 +472,74 @@ func TestParams(t *testing.T) {
 			mr := m(contrib.Multirange("int4multirange"))
 			return mr.Codec.Params("{[1,3), (,7]}")
 		}, []any{[]*string{strp("1"), nil}, []*string{strp("3"), strp("7")}, []string{"[)", "(]"}}, ""},
+		{"hstore value key", func() ([]any, error) {
+			e, _ := hs.Expr("value")
+			return e.Params("color")
+		}, []any{"color"}, ""},
+		{"text distance", func() ([]any, error) {
+			op, _ := contrib.Fuzzy("text").Op("levenshteinDistanceLessThan")
+			return op.Params(map[string]any{"text": "Jon", "distance": 2.0})
+		}, []any{"Jon", int32(2)}, ""},
+		{"text distance string", func() ([]any, error) {
+			op, _ := contrib.Fuzzy("text").Op("levenshteinDistanceLessThan")
+			return op.Params(map[string]any{"text": "Jon", "distance": "3"})
+		}, []any{"Jon", int32(3)}, ""},
+		{"text distance fraction", func() ([]any, error) {
+			op, _ := contrib.Fuzzy("text").Op("levenshteinDistanceLessThan")
+			return op.Params(map[string]any{"text": "Jon", "distance": 1.5})
+		}, nil, "distance must be an integer"},
+		{"text distance negative", func() ([]any, error) {
+			op, _ := contrib.Fuzzy("text").Op("levenshteinDistanceLessThan")
+			return op.Params(map[string]any{"text": "Jon", "distance": -1})
+		}, nil, "distance must be between"},
+		{"text distance missing", func() ([]any, error) {
+			op, _ := contrib.Fuzzy("text").Op("levenshteinDistanceLessThan")
+			return op.Params(map[string]any{"text": "Jon"})
+		}, nil, "requires a distance"},
+		{"text distance not object", func() ([]any, error) {
+			op, _ := contrib.Fuzzy("text").Op("levenshteinDistanceLessThan")
+			return op.Params("Jon")
+		}, nil, "object with text and distance"},
+		{"text distance too long", func() ([]any, error) {
+			op, _ := contrib.Fuzzy("text").Op("levenshteinDistanceLessThan")
+			return op.Params(map[string]any{"text": strings.Repeat("é", 256), "distance": 1})
+		}, nil, "at most 255 characters"},
+		{"levenshtein reference 255 characters", func() ([]any, error) {
+			e, _ := contrib.Fuzzy("text").Expr("levenshteinDistance")
+			return e.Params(strings.Repeat("é", 255))
+		}, []any{strings.Repeat("é", 255)}, ""},
+		{"levenshtein reference too long", func() ([]any, error) {
+			e, _ := contrib.Fuzzy("text").Expr("levenshteinDistance")
+			return e.Params(strings.Repeat("a", 256))
+		}, nil, "at most 255 characters"},
+		{"metaphone bytes", func() ([]any, error) {
+			op, _ := contrib.Fuzzy("text").Op("metaphoneEqualTo")
+			return op.Params(strings.Repeat("é", 128))
+		}, nil, "at most 255 bytes"},
+		{"soundex unlimited", func() ([]any, error) {
+			op, _ := contrib.Fuzzy("text").Op("soundexEqualTo")
+			return op.Params(strings.Repeat("a", 1000))
+		}, []any{strings.Repeat("a", 1000)}, ""},
+		{"subpath", func() ([]any, error) {
+			e, _ := contrib.Ltree().Expr("subpath")
+			return e.Params(map[string]any{"offset": -2.0, "length": json.Number("1")})
+		}, []any{int32(-2), int32(1)}, ""},
+		{"subpath rest", func() ([]any, error) {
+			e, _ := contrib.Ltree().Expr("subpath")
+			return e.Params(map[string]any{"offset": 1, "length": nil})
+		}, []any{int32(1), nil}, ""},
+		{"subpath negative length", func() ([]any, error) {
+			e, _ := contrib.Ltree().Expr("subpath")
+			return e.Params(map[string]any{"offset": 1, "length": -1})
+		}, nil, "length must be between 0"},
+		{"subpath offset range", func() ([]any, error) {
+			e, _ := contrib.Ltree().Expr("subpath")
+			return e.Params(map[string]any{"offset": 70000})
+		}, nil, "offset must be between"},
+		{"subpath missing offset", func() ([]any, error) {
+			e, _ := contrib.Ltree().Expr("subpath")
+			return e.Params(map[string]any{"length": 1})
+		}, nil, "requires an offset"},
 		{"multirange empty literal", func() ([]any, error) {
 			mr := m(contrib.Multirange("int4multirange"))
 			return mr.Codec.Params("{}")
@@ -627,6 +744,7 @@ func TestForType(t *testing.T) {
 	all := &introspect.Catalog{Extensions: []*introspect.Extension{
 		{Name: "pg_trgm", Schema: "trgm"}, {Name: "hstore", Schema: "ext"},
 		{Name: "ltree", Schema: "public"}, {Name: "citext", Schema: "ci"},
+		{Name: "fuzzystrmatch", Schema: "fz"}, {Name: "intarray", Schema: "ia"},
 	}}
 	names := func(vs []contrib.Vocabulary) string {
 		var out []string
@@ -646,18 +764,18 @@ func TestForType(t *testing.T) {
 		want    string
 	}{
 		{all, "tsvector", false, "fulltext"},
-		{all, "text", false, "textsearch,trgm@trgm"},
-		{all, "varchar", false, "textsearch,trgm@trgm"},
-		{all, "bpchar", false, "textsearch,trgm@trgm"},
-		{all, "citext", false, "citext@ci,textsearch,trgm@trgm"},
-		{all, `"ci"."citext"`, false, "citext@ci,textsearch,trgm@trgm"},
+		{all, "text", false, "textsearch,trgm@trgm,fuzzy@fz"},
+		{all, "varchar", false, "textsearch,trgm@trgm,fuzzy@fz"},
+		{all, "bpchar", false, "textsearch,trgm@trgm,fuzzy@fz"},
+		{all, "citext", false, "citext@ci,textsearch,trgm@trgm,fuzzy@fz"},
+		{all, `"ci"."citext"`, false, "citext@ci,textsearch,trgm@trgm,fuzzy@fz"},
 		{nil, "text", false, "textsearch"},
 		{nil, "citext", false, ""},
 		{nil, "hstore", false, ""},
 		{all, "hstore", false, "hstore@ext"},
 		{all, "ext.hstore", false, "hstore@ext"},
 		{all, "public.hstore", false, ""},
-		{all, "pg_catalog.text", false, "textsearch,trgm@trgm"},
+		{all, "pg_catalog.text", false, "textsearch,trgm@trgm,fuzzy@fz"},
 		{all, "public.text", false, ""},
 		{all, "public.int4range", false, ""},
 		{all, "_hstore", true, ""},
@@ -672,6 +790,12 @@ func TestForType(t *testing.T) {
 		{all, "cidr", false, "inet"},
 		{all, "_text", true, ""},
 		{all, "int4", false, ""},
+		{all, "_int4", true, "intarray@ia"},
+		{all, "int4[]", false, "intarray@ia"},
+		{all, "pg_catalog._int4", true, "intarray@ia"},
+		{all, "public._int4", true, ""},
+		{nil, "_int4", true, ""},
+		{all, "_int8", true, ""},
 		{all, "jsonb", false, ""},
 	}
 	for _, tc := range tests {
