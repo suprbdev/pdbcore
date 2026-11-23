@@ -35,7 +35,7 @@ type RLS struct {
 	Enabled       bool     `koanf:"enabled" doc:"Run each request as a switched role with claims exposed via set_config (SET LOCAL). Disabling uses the privileged connection directly and logs a loud warning."`
 	DefaultRole   string   `koanf:"default_role" doc:"Role assumed for authenticated requests without a role claim."`
 	AnonymousRole string   `koanf:"anonymous_role" doc:"Role assumed for unauthenticated requests."`
-	RoleClaim     string   `koanf:"role_claim" doc:"JWT claim (or header name in header mode) carrying the database role."`
+	RoleClaim     string   `koanf:"role_claim" doc:"JWT claim (or claim header in headers mode: app_role is <header_prefix>App-Role) carrying the database role."`
 	AllowedRoles  []string `koanf:"allowed_roles" doc:"Roles a request may assume via the role claim. Empty allows any role (subject to database grants); default_role and anonymous_role are always allowed."`
 	ClaimsPrefix  string   `koanf:"claims_prefix" doc:"set_config namespace for request claims, e.g. pdbq.claims."`
 	Auth          Auth     `koanf:"auth"`
@@ -46,10 +46,11 @@ type Auth struct {
 	Mode           string        `koanf:"mode" doc:"Claim source: 'jwt', 'headers' (behind a trusted gateway), or 'none'."`
 	JWTSecret      string        `koanf:"jwt_secret" doc:"HMAC secret for HS256/384/512 verification (jwt mode; ignored when jwks_url is set)."`
 	JWKSURL        string        `koanf:"jwks_url" doc:"JWKS endpoint for asymmetric JWT verification (RS256/384/512, ES256/384/512). Takes precedence over jwt_secret."`
-	JWKSCacheTTL   time.Duration `koanf:"jwks_cache_ttl" doc:"How long fetched JWKS keys are cached; an unknown kid triggers an early refresh (key rotation)."`
+	JWKSCacheTTL   time.Duration `koanf:"jwks_cache_ttl" doc:"How long fetched JWKS keys are cached; an unknown kid triggers an early refresh (key rotation) at most once a minute. After the TTL, keys refresh in the background and stay in use for up to one more TTL while the endpoint fails; failed fetches back off from 1s to 1m."`
 	JWTIssuer      string        `koanf:"jwt_issuer" doc:"Expected iss claim; empty skips the check."`
 	JWTAudience    string        `koanf:"jwt_audience" doc:"Expected aud claim; empty skips the check."`
-	HeaderPrefix   string        `koanf:"header_prefix" doc:"Header prefix mapped to claims in headers mode, e.g. X-Pdbq-Claim-."`
+	HeaderPrefix   string        `koanf:"header_prefix" doc:"Header prefix mapped to claims in headers mode, e.g. X-Pdbq-Claim-. The rest of the name maps to one claim (User-Id is user_id); requests with a claim header containing an underscore or other punctuation, repeated, or folding onto another claim header are rejected. The gateway must strip every client-supplied header with this prefix, in any letter case."`
+	HeaderClaims   []string      `koanf:"header_claims" doc:"Claim names (e.g. user_id) accepted from claim headers in headers mode; role_claim is always accepted. Requests carrying any other claim header are rejected. Empty accepts any claim."`
 	TrustedProxies []string      `koanf:"trusted_proxies" doc:"CIDR blocks (or single IPs) allowed to supply claim headers in headers mode. Requests from other peers that carry claim headers are rejected. Empty trusts every peer and logs a startup warning."`
 	JWTType        string        `koanf:"jwt_type" doc:"Schema-qualified composite type (e.g. public.jwt) minted into a signed JWT: any function returning it yields an HS256 token string built from the composite's fields (an exp field becomes the token expiry). Requires jwt_secret; jwt_issuer/jwt_audience are embedded when set. Empty disables minting."`
 }

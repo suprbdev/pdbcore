@@ -272,3 +272,179 @@ func TestModeNoneIsAnonymous(t *testing.T) {
 		t.Fatalf("mode none = (%q, %v)", role, err)
 	}
 }
+
+func claimRequest(headers map[string][]string) *http.Request {
+	r := httptest.NewRequest("POST", "/graphql", nil)
+	r.RemoteAddr = "10.0.0.5:1234"
+	for k, v := range headers {
+		r.Header[k] = v
+	}
+	return r
+}
+
+func TestHeadersClaimMapping(t *testing.T) {
+	a := headersAuth("10.0.0.0/8")
+	r := claimRequest(nil)
+	r.Header.Set("x-pdbq-claim-role", "app_user")
+	r.Header.Set("X-Pdbq-Claim-User-Id", "42")
+	r.Header.Set("X-PDBQ-CLAIM-TENANT", "acme")
+	r.Header.Set("X-Pdbq-Claim-Org2-Unit3", "u")
+	r.Header.Set("X-Other", "ignored")
+	claims, role, err := a.Authenticate(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role != "app_user" {
+		t.Fatalf("role = %q", role)
+	}
+	want := map[string]any{"role": "app_user", "user_id": "42", "tenant": "acme", "org2_unit3": "u"}
+	if len(claims) != len(want) {
+		t.Fatalf("claims = %v, want %v", claims, want)
+	}
+	for k, v := range want {
+		if claims[k] != v {
+			t.Fatalf("claims = %v, want %v", claims, want)
+		}
+	}
+}
+
+func TestHeadersRejectsCollidingClaims(t *testing.T) {
+	cases := []struct {
+		name    string
+		headers map[string][]string
+		msg     string
+	}{
+		{"issue 36: User-Id vs User_id", map[string][]string{
+			"X-Pdbq-Claim-User-Id": {"gateway-42"}, "X-Pdbq-Claim-User_id": {"client-1"},
+		}, "malformed claim header"},
+		{"issue 37: User-Id vs User_Id", map[string][]string{
+			"X-Pdbq-Claim-User-Id": {"2"}, "X-Pdbq-Claim-User_Id": {"1"},
+		}, "malformed claim header"},
+		{"underscore alone", map[string][]string{"X-Pdbq-Claim-User_id": {"1"}}, "malformed claim header"},
+		{"underscore role claim", map[string][]string{"X-Pdbq-Claim-App_Role": {"admin"}}, "malformed claim header"},
+		{"non-canonical case key", map[string][]string{
+			"X-Pdbq-Claim-Role": {"app_user"}, "X-Pdbq-Claim-ROLE": {"admin"},
+		}, "conflicting claim headers"},
+		{"lower-case prefix key", map[string][]string{
+			"X-Pdbq-Claim-User-Id": {"2"}, "x-pdbq-claim-user-id": {"1"},
+		}, "conflicting claim headers"},
+		{"repeated values (gateway appended)", map[string][]string{
+			"X-Pdbq-Claim-User-Id": {"1", "2"},
+		}, "repeated claim header"},
+		{"double hyphen", map[string][]string{"X-Pdbq-Claim-User--Id": {"1"}}, "malformed claim header"},
+		{"trailing hyphen", map[string][]string{"X-Pdbq-Claim-User-": {"1"}}, "malformed claim header"},
+		{"leading hyphen", map[string][]string{"X-Pdbq-Claim--User": {"1"}}, "malformed claim header"},
+		{"empty suffix", map[string][]string{"X-Pdbq-Claim-": {"1"}}, "malformed claim header"},
+		{"dot", map[string][]string{"X-Pdbq-Claim-User.Id": {"1"}}, "malformed claim header"},
+		{"non-ASCII", map[string][]string{"X-Pdbq-Claim-Usér": {"1"}}, "malformed claim header"},
+	}
+	a := headersAuth("10.0.0.0/8")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for range 50 {
+				claims, _, err := a.Authenticate(claimRequest(tc.headers))
+				if !errors.Is(err, ErrInvalidToken) {
+					t.Fatalf("err = %v (claims %v), want ErrInvalidToken", err, claims)
+				}
+				if err.Error() != tc.msg {
+					t.Fatalf("message = %q, want %q", err.Error(), tc.msg)
+				}
+			}
+		})
+	}
+}
+
+func TestHeadersUntrustedPeerCheckedFirst(t *testing.T) {
+	a := headersAuth("10.0.0.0/8")
+	r := claimRequest(map[string][]string{"X-Pdbq-Claim-User_id": {"1"}})
+	r.RemoteAddr = "203.0.113.7:4444"
+	if _, _, err := a.Authenticate(r); err == nil || err.Error() != "claim headers from untrusted peer" {
+		t.Fatalf("err = %v, want untrusted peer", err)
+	}
+}
+
+func TestHeadersEndToEndWireCanonicalization(t *testing.T) {
+	var got map[string]any
+	var gotErr error
+	a := headersAuth("127.0.0.1")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _, gotErr = a.Authenticate(r)
+	}))
+	defer srv.Close()
+
+	send := func(headers [][2]string) {
+		t.Helper()
+		req, err := http.NewRequest("POST", srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, h := range headers {
+			req.Header[h[0]] = append(req.Header[h[0]], h[1])
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	send([][2]string{{"X-Pdbq-Claim-User-Id", "2"}, {"X-Pdbq-Claim-User_Id", "1"}})
+	if !errors.Is(gotErr, ErrInvalidToken) {
+		t.Fatalf("underscore spelling over the wire: claims %v, err %v", got, gotErr)
+	}
+	send([][2]string{{"X-Pdbq-Claim-User-Id", "2"}, {"x-pdbq-claim-user-id", "1"}})
+	if !errors.Is(gotErr, ErrInvalidToken) || gotErr.Error() != "repeated claim header" {
+		t.Fatalf("case variant over the wire: claims %v, err %v", got, gotErr)
+	}
+	send([][2]string{{"x-pdbq-claim-user-id", "2"}})
+	if gotErr != nil || got["user_id"] != "2" {
+		t.Fatalf("single header over the wire: claims %v, err %v", got, gotErr)
+	}
+}
+
+func TestHeadersClaimAllowlist(t *testing.T) {
+	a := New(Config{
+		Enabled:       true,
+		AnonymousRole: "anonymous",
+		RoleClaim:     "app_role",
+		Mode:          "headers",
+		HeaderPrefix:  "X-Pdbr-Claim-",
+		HeaderClaims:  []string{"user_id"},
+	})
+	r := claimRequest(map[string][]string{"X-Pdbr-Claim-User-Id": {"1"}, "X-Pdbr-Claim-App-Role": {"app_user"}})
+	claims, role, err := a.Authenticate(r)
+	if err != nil || role != "app_user" || claims["user_id"] != "1" {
+		t.Fatalf("allowlisted claims = (%v, %q, %v)", claims, role, err)
+	}
+	r = claimRequest(map[string][]string{"X-Pdbr-Claim-User-Id": {"1"}, "X-Pdbr-Claim-Is-Admin": {"true"}})
+	if _, _, err := a.Authenticate(r); !errors.Is(err, ErrInvalidToken) || err.Error() != "claim header not allowed" {
+		t.Fatalf("unlisted claim: err = %v", err)
+	}
+}
+
+func TestValidHeaderClaim(t *testing.T) {
+	for claim, want := range map[string]bool{
+		"role": true, "user_id": true, "org2_unit3": true, "a": true,
+		"": false, "User_id": false, "user__id": false, "_user": false, "user_": false,
+		"user-id": false, "user.id": false, "rôle": false,
+	} {
+		if got := ValidHeaderClaim(claim); got != want {
+			t.Errorf("ValidHeaderClaim(%q) = %v, want %v", claim, got, want)
+		}
+	}
+}
+
+func TestHeaderClaimName(t *testing.T) {
+	for _, tc := range []struct{ prefix, claim, want string }{
+		{"X-Pdbq-Claim-", "user_id", "X-Pdbq-Claim-User-Id"},
+		{"x-pdbr-claim-", "role", "X-Pdbr-Claim-Role"},
+	} {
+		if got := HeaderClaimName(tc.prefix, tc.claim); got != tc.want {
+			t.Errorf("HeaderClaimName(%q, %q) = %q, want %q", tc.prefix, tc.claim, got, tc.want)
+		}
+		key, ok := headerClaimKey(tc.want[len(tc.prefix):])
+		if !ok || key != tc.claim {
+			t.Errorf("round trip %q -> (%q, %v), want %q", tc.want, key, ok, tc.claim)
+		}
+	}
+}

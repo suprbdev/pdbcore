@@ -301,6 +301,21 @@ func TestValidateRejects(t *testing.T) {
 		"claims prefix": {func() []string {
 			return ValidateRLS(RLS{AnonymousRole: "anon", ClaimsPrefix: "plpgsql", Auth: Auth{Mode: "none"}})
 		}, `rls.claims_prefix: invalid claims prefix "plpgsql": "plpgsql" is a server or extension settings namespace`},
+		"header prefix empty": {func() []string {
+			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "role", Auth: Auth{Mode: "headers"}})
+		}, `rls.auth.header_prefix: "" must be letters, digits and hyphens ending in a hyphen, e.g. X-Pdbq-Claim-`},
+		"header prefix no trailing hyphen": {func() []string {
+			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "role", Auth: Auth{Mode: "headers", HeaderPrefix: "X-Pdbq-Claim"}})
+		}, `rls.auth.header_prefix: "X-Pdbq-Claim" must be letters, digits and hyphens ending in a hyphen, e.g. X-Pdbq-Claim-`},
+		"header prefix underscore": {func() []string {
+			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "role", Auth: Auth{Mode: "headers", HeaderPrefix: "X_Claim-"}})
+		}, `rls.auth.header_prefix: "X_Claim-" must be letters, digits and hyphens ending in a hyphen, e.g. X-Pdbq-Claim-`},
+		"header role claim": {func() []string {
+			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "AppRole", Auth: Auth{Mode: "headers", HeaderPrefix: "X-Pdbq-Claim-"}})
+		}, `rls.role_claim: "AppRole" cannot be sent as a claim header: use lower-case letters and digits joined by single underscores`},
+		"header claims": {func() []string {
+			return ValidateRLS(RLS{AnonymousRole: "anon", RoleClaim: "role", Auth: Auth{Mode: "headers", HeaderPrefix: "X-Pdbq-Claim-", HeaderClaims: []string{"user_id", "user-id"}}})
+		}, `rls.auth.header_claims: "user-id" cannot be sent as a claim header: use lower-case letters and digits joined by single underscores`},
 		"watch channel length": {func() []string { return ValidateWatch(Watch{Enabled: true, Channel: strings.Repeat("c", 64)}, "") },
 			`watch.channel: "` + strings.Repeat("c", 64) + `" is longer than 63 bytes`},
 		"isolation": {func() []string { return ValidateTX(TX{Isolation: "chaos"}) },
@@ -345,11 +360,12 @@ func TestValidateRejects(t *testing.T) {
 func TestAuthConfig(t *testing.T) {
 	rls := RLS{
 		Enabled: true, RoleClaim: "role", DefaultRole: "d", AnonymousRole: "anon", AllowedRoles: []string{"x"},
-		Auth: Auth{Mode: "headers", HeaderPrefix: "X-Pdbr-Claim-", TrustedProxies: []string{"10.0.0.0/8", "garbage", "192.168.1.1"}},
+		Auth: Auth{Mode: "headers", HeaderPrefix: "X-Pdbr-Claim-", HeaderClaims: []string{"user_id"}, TrustedProxies: []string{"10.0.0.0/8", "garbage", "192.168.1.1"}},
 	}
 	cfg := AuthConfig(rls)
 	if !cfg.Enabled || cfg.Mode != "headers" || cfg.HeaderPrefix != "X-Pdbr-Claim-" || cfg.RoleClaim != "role" ||
-		cfg.DefaultRole != "d" || cfg.AnonymousRole != "anon" || len(cfg.AllowedRoles) != 1 {
+		cfg.DefaultRole != "d" || cfg.AnonymousRole != "anon" || len(cfg.AllowedRoles) != 1 ||
+		len(cfg.HeaderClaims) != 1 || cfg.HeaderClaims[0] != "user_id" {
 		t.Fatalf("AuthConfig = %+v", cfg)
 	}
 	if len(cfg.TrustedProxies) != 2 || cfg.TrustedProxies[1].Bits() != 32 {
