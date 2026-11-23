@@ -44,12 +44,12 @@ func FixtureCatalog() *introspect.Catalog {
 		PrimaryKey: &introspect.Constraint{Name: "users_pkey", Columns: []string{"id"}},
 		Uniques:    []*introspect.Constraint{{Name: "users_email_key", Columns: []string{"email"}}},
 		Indexes: []*introspect.Index{
-			{Name: "users_email_key", Columns: []string{"email"}, Unique: true, Method: "btree"},
-			{Name: "users_mood_idx", Columns: []string{"mood"}, Method: "btree"},
-			{Name: "users_moods_idx", Columns: []string{"moods"}, Method: "gin"},
-			{Name: "users_pkey", Columns: []string{"id"}, Unique: true, Method: "btree"},
-			{Name: "users_settings_idx", Columns: []string{"settings"}, Method: "gin"},
-			{Name: "users_tags_idx", Columns: []string{"tags"}, Method: "gin"},
+			{Name: "users_email_key", Columns: []string{"email"}, Unique: true, Method: "btree", OpClasses: []string{"text_ops"}},
+			{Name: "users_mood_idx", Columns: []string{"mood"}, Method: "btree", OpClasses: []string{"enum_ops"}},
+			{Name: "users_moods_idx", Columns: []string{"moods"}, Method: "gin", OpClasses: []string{"array_ops"}},
+			{Name: "users_pkey", Columns: []string{"id"}, Unique: true, Method: "btree", OpClasses: []string{"int4_ops"}},
+			{Name: "users_settings_idx", Columns: []string{"settings"}, Method: "gin", OpClasses: []string{"jsonb_ops"}},
+			{Name: "users_tags_idx", Columns: []string{"tags"}, Method: "gin", OpClasses: []string{"array_ops"}},
 		},
 	}
 	posts := &introspect.Table{
@@ -69,9 +69,9 @@ func FixtureCatalog() *introspect.Catalog {
 			RefSchema: "public", RefTable: "users", RefColumns: []string{"id"},
 		}},
 		Indexes: []*introspect.Index{
-			{Name: "posts_author_id_idx", Columns: []string{"author_id"}, Method: "btree"},
-			{Name: "posts_pkey", Columns: []string{"id"}, Unique: true, Method: "btree"},
-			{Name: "posts_title_idx", Columns: []string{"title"}, Method: "btree"},
+			{Name: "posts_author_id_idx", Columns: []string{"author_id"}, Method: "btree", OpClasses: []string{"int4_ops"}},
+			{Name: "posts_pkey", Columns: []string{"id"}, Unique: true, Method: "btree", OpClasses: []string{"int4_ops"}},
+			{Name: "posts_title_idx", Columns: []string{"title"}, Method: "btree", OpClasses: []string{"text_ops"}},
 		},
 	}
 	// comments is self-referential (parent_id -> comments.id): a Reddit-style
@@ -96,9 +96,9 @@ func FixtureCatalog() *introspect.Catalog {
 			RefSchema: "public", RefTable: "posts", RefColumns: []string{"id"},
 		}},
 		Indexes: []*introspect.Index{
-			{Name: "comments_parent_id_idx", Columns: []string{"parent_id"}, Method: "btree"},
-			{Name: "comments_pkey", Columns: []string{"id"}, Unique: true, Method: "btree"},
-			{Name: "comments_post_id_idx", Columns: []string{"post_id"}, Method: "btree"},
+			{Name: "comments_parent_id_idx", Columns: []string{"parent_id"}, Method: "btree", OpClasses: []string{"int4_ops"}},
+			{Name: "comments_pkey", Columns: []string{"id"}, Unique: true, Method: "btree", OpClasses: []string{"int4_ops"}},
+			{Name: "comments_post_id_idx", Columns: []string{"post_id"}, Method: "btree", OpClasses: []string{"int4_ops"}},
 		},
 	}
 	// places carries the PostGIS columns: geometry (planar, SRID units) and
@@ -123,10 +123,10 @@ func FixtureCatalog() *introspect.Catalog {
 			RefSchema: "public", RefTable: "users", RefColumns: []string{"id"},
 		}},
 		Indexes: []*introspect.Index{
-			{Name: "places_area_idx", Columns: []string{"area"}, Method: "gist"},
-			{Name: "places_location_idx", Columns: []string{"location"}, Method: "gist"},
-			{Name: "places_owner_id_idx", Columns: []string{"owner_id"}, Method: "btree"},
-			{Name: "places_pkey", Columns: []string{"id"}, Unique: true, Method: "btree"},
+			{Name: "places_area_idx", Columns: []string{"area"}, Method: "gist", OpClasses: []string{"gist_geography_ops"}},
+			{Name: "places_location_idx", Columns: []string{"location"}, Method: "gist", OpClasses: []string{"gist_geometry_ops_2d"}},
+			{Name: "places_owner_id_idx", Columns: []string{"owner_id"}, Method: "btree", OpClasses: []string{"int4_ops"}},
+			{Name: "places_pkey", Columns: []string{"id"}, Unique: true, Method: "btree", OpClasses: []string{"int4_ops"}},
 		},
 	}
 	// events references the event_type @enum table. The fixture carries the
@@ -143,8 +143,8 @@ func FixtureCatalog() *introspect.Catalog {
 		},
 		PrimaryKey: &introspect.Constraint{Name: "events_pkey", Columns: []string{"id"}},
 		Indexes: []*introspect.Index{
-			{Name: "events_pkey", Columns: []string{"id"}, Unique: true, Method: "btree"},
-			{Name: "events_type_code_idx", Columns: []string{"type_code"}, Method: "btree"},
+			{Name: "events_pkey", Columns: []string{"id"}, Unique: true, Method: "btree", OpClasses: []string{"int4_ops"}},
+			{Name: "events_type_code_idx", Columns: []string{"type_code"}, Method: "btree", OpClasses: []string{"text_ops"}},
 		},
 	}
 	// metrics is a PK-less view: no node identity, offset pagination only.

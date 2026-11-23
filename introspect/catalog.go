@@ -274,9 +274,13 @@ type Column struct {
 	PGType     string `json:"pg_type"`     // canonical type name, e.g. int4, text, _text (array)
 	TypeSchema string `json:"type_schema"` // pg schema of the type (for enums/domains/composites)
 	IsArray    bool   `json:"is_array"`
-	NotNull    bool   `json:"not_null"`
-	HasDefault bool   `json:"has_default"`
-	Generated  bool   `json:"generated"` // identity or generated column: excluded from create/update input
+	// NotNull reports that no row holds NULL in the column: a validated NOT
+	// NULL constraint. A NOT NULL ... NOT VALID constraint (PostgreSQL 18+)
+	// rejects new NULLs but leaves the column nullable here, since rows
+	// that predate it may still hold NULL.
+	NotNull    bool `json:"not_null"`
+	HasDefault bool `json:"has_default"`
+	Generated  bool `json:"generated"` // identity or generated column: excluded from create/update input
 	// GeneratedKind says what kind of Generated column this is; empty when
 	// Generated is false.
 	GeneratedKind GeneratedKind `json:"generated_kind,omitempty"`
@@ -392,7 +396,15 @@ type ForeignKey struct {
 	// PostgreSQL never checks it, so a child may reference no row even when
 	// its Columns are all non-null; it still names the intended relation.
 	NotEnforced bool `json:"not_enforced,omitempty"`
+	// NotValid marks a foreign key added NOT VALID and not validated since:
+	// PostgreSQL checks new and updated rows only, so rows that predate it
+	// may reference no row.
+	NotValid bool `json:"not_valid,omitempty"`
 }
+
+// MayDangle reports whether a child row may reference no row although its
+// Columns are all non-null: the key is NotEnforced or NotValid.
+func (fk *ForeignKey) MayDangle() bool { return fk.NotEnforced || fk.NotValid }
 
 // JoinOp is the operator relating a foreign key column to its referenced
 // column in a join predicate.
@@ -443,6 +455,19 @@ type Index struct {
 	ExpressionColumns []string `json:"expression_columns,omitempty"`
 	Unique            bool     `json:"unique"`
 	Method            string   `json:"method"` // btree, gin, gist, ...
+	// OpClasses holds the operator class name (pg_opclass.opcname, without
+	// its schema) of each Columns entry, "" for an INCLUDE column. It is nil
+	// in hand-built catalogs that do not record operator classes.
+	OpClasses []string `json:"op_classes,omitempty"`
+}
+
+// OpClass returns the operator class of the i-th entry of Columns, or ""
+// when it is not recorded.
+func (ix *Index) OpClass(i int) string {
+	if i < 0 || i >= len(ix.OpClasses) {
+		return ""
+	}
+	return ix.OpClasses[i]
 }
 
 type Privileges struct {
