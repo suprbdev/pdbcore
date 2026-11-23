@@ -11,12 +11,11 @@ import (
 )
 
 // DBObserver returns the [pgexec.Observer] that records database operation
-// durations, errors by SQLSTATE class and retries. pgx.ErrNoRows is not
-// counted as an error, so a QueryRow that found nothing can be reported
-// as-is. Set it as
+// durations, errors by SQLSTATE class and retries. Set it as
 // pgexec.TxOptions.Observer and pass it to pgexec.Observe for statements
-// run outside the transaction helpers. On a nil Metrics it returns nil, so
-// observation is skipped entirely.
+// run outside the transaction helpers. pgx.ErrNoRows is not counted as an
+// error, so a QueryRow that found nothing can be reported as-is. On a nil
+// Metrics it returns nil, so observation is skipped entirely.
 func (m *Metrics) DBObserver() pgexec.Observer {
 	if m == nil {
 		return nil
