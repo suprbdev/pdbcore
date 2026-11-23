@@ -118,3 +118,38 @@ func TestHelpers(t *testing.T) {
 		t.Error("Strip must not alter tag-free comments")
 	}
 }
+
+func TestContracts(t *testing.T) {
+	cases := []struct {
+		comment string
+		def     bool
+		want    map[string]bool
+	}{
+		{"plain description", true, map[string]bool{"public": true, "partner": true}},
+		{"plain description", false, map[string]bool{"public": false, "partner": false}},
+		{"@contract public, Partner", true, map[string]bool{"public": true, "partner": true, "internal": false}},
+		{"@contract public\n@contract internal", false, map[string]bool{"public": true, "internal": true, "partner": false}},
+		{"@contract", true, map[string]bool{"public": false}},
+		{"@contract\n@behavior +contract:public", true, map[string]bool{"public": true, "partner": false}},
+		{"@behavior -contract:partner -insert", true, map[string]bool{"public": true, "partner": false}},
+		{"@behavior +contract:partner contract:Internal", false, map[string]bool{"partner": true, "internal": true, "public": false}},
+		{"@contract partner\n@behavior -contract:partner", true, map[string]bool{"partner": false, "public": false}},
+		{"@behavior -contract: +contracts:x -select", true, map[string]bool{"x": true}},
+	}
+	for _, tc := range cases {
+		tags, _ := Parse(tc.comment)
+		m := tags.Contracts()
+		for name, want := range tc.want {
+			if got := m.In(name, tc.def); got != want {
+				t.Errorf("%q (default %v): In(%q) = %v, want %v", tc.comment, tc.def, name, got, want)
+			}
+		}
+	}
+	if m := Tags(nil).Contracts(); m.Listed || m.In("x", true) != true {
+		t.Errorf("nil tags = %+v", m)
+	}
+	tags, _ := Parse("@behavior -contract:partner")
+	if actions, everything := tags.Omits(); everything || len(actions) != 0 {
+		t.Errorf("contract tokens must not count as omits: %v %v", actions, everything)
+	}
+}

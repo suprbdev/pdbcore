@@ -18,8 +18,9 @@ fixture both products are tested against.
 
 | Package | What it holds |
 |---|---|
-| `introspect` | `Catalog` model (`Table`, `Column`, `Constraint`, `ForeignKey`, `Index`, `Enum`, `Composite`, `Function`, `Extension`, privileges, RLS flag, comments; `Column.Spatial` (`SpatialType`: PostGIS subtype, SRID, Z/M from the geometry/geography typmod) and `Column.SQLType` (built-in modifiers such as `character varying(255)`, `numeric(10,2)`); `Catalog.ServerVersionNum` for version gating; `Column.GeneratedKind` (identity, stored, virtual); domains (`Catalog.Domains`: base type, parent domain, NOT NULL, CHECK constraints, default, comment; `Column.Domain` / `FuncArg.Domain` / `Function.ReturnDomain` refs, `Catalog.Domain`, `DomainByRef`, `DomainChain`); PostgreSQL 18 temporal keys (`Constraint.WithoutOverlaps`, `ForeignKey.Period` with `JoinPairs`, `Table.RowKeys`) and `ForeignKey.NotEnforced`), `Introspect(ctx, querier, schemas)` (pg_catalog reader incl. `@enum` table conversion and installed extensions), `HasExtension`, `Diff` (human-readable drift lines), `Hash`, `CatalogFormatVersion` |
-| `smarttags` | PostGraphile-style smart-comment parser: `Parse`, `Strip`, `Tags`, `Omits`, `@behavior`, list splitting |
+| `introspect` | `Catalog` model (`Table`, `Column`, `Constraint`, `ForeignKey`, `Index`, `Enum`, `Composite`, `Function`, `Extension`, privileges, RLS flag, comments; `Column.Spatial` (`SpatialType`: PostGIS subtype, SRID, Z/M from the geometry/geography typmod) and `Column.SQLType` (built-in modifiers such as `character varying(255)`, `numeric(10,2)`); `Catalog.ServerVersionNum` for version gating; `Column.GeneratedKind` (identity, stored, virtual); domains (`Catalog.Domains`: base type, parent domain, NOT NULL, CHECK constraints, default, comment; `Column.Domain` / `FuncArg.Domain` / `Function.ReturnDomain` refs, `Catalog.Domain`, `DomainByRef`, `DomainChain`); PostgreSQL 18 temporal keys (`Constraint.WithoutOverlaps`, `ForeignKey.Period` with `JoinPairs`, `Table.RowKeys`) and `ForeignKey.NotEnforced`), `Introspect(ctx, querier, schemas)` (pg_catalog reader incl. `@enum` table conversion and installed extensions), `HasExtension`, `Clone` (deep copy for per-contract catalog hooks), `Diff` (human-readable drift lines), `Hash`, `CatalogFormatVersion` |
+| `smarttags` | PostGraphile-style smart-comment parser: `Parse`, `Strip`, `Tags`, `Omits`, `@behavior`, `Contracts` (`@contract` / `@behavior ±contract:<name>` membership), list splitting |
+| `contract` | schema contracts (see [Schema contracts](#schema-contracts)): `Contract{Name, Default}` with the `Include`/`Exclude` policies, `View` (clone + filter), `Apply`, `OmitAll`; also a `CatalogHook` |
 | `inflect` | naming pipeline types (`Kind`, `Input`, `Next`) + string helpers (`UpperCamel`, `LowerCamel`, `Singularize`, `Pluralize`, `EnumValue`, `ByColumns`); products define their own `Kind` constants and `Default` |
 | `cache` | gzip+JSON catalog cache: `Save` / `Load` / `Check`, format-version and content-hash checks, 256 MiB decompression guard |
 | `watch` | `Watcher`: DDL event trigger + `LISTEN/NOTIFY` (`TriggerName`, `Channel`), hash-polling fallback when the trigger cannot be installed → `OnChange(*Catalog)` |
@@ -29,8 +30,8 @@ fixture both products are tested against.
 | `pgexec` | pool `Connect`, `RunTx` (isolation, `SET LOCAL ROLE`, claims via `set_config(prefix.k, v, true)`, 40001/40P01 retries), `QueryTx` (one pipelined round trip), `Observer` (per-attempt duration and error via `TxOptions.Observer`, `Observe` for direct statements), `Identity`, `Classify` PG errors into classes with `dev`/`prod`/`strict` message policies (malformed tsquery/ltree operands and unknown text search configs are user input), `QuoteIdent`/`ValidRole`/`ValidClaimKey` |
 | `jwtmint` | composite-typed function results → signed HS256 JWT (`MintsFunction`, `Mint`, `Sign`) |
 | `httpx` | CORS + preflight, gzip, `Healthz`, `ListenAndServe` with the standard timeouts and graceful shutdown |
-| `metrics` | Prometheus instrumentation on a per-instance registry (or a caller's `Registerer` + `ConstLabels`): HTTP `Middleware` (requests, duration, in flight by route class, method, status class; `SetRoute`), `DBObserver` (a `pgexec.Observer`: duration, errors by SQLSTATE class, retries), `RegisterPool` (pgxpool `Stat`), `SchemaRebuilt`, `ObserveCompile`, product counters via `NewCounter`; a nil `*Metrics` records nothing (see [Metrics](#metrics)) |
-| `confx` | koanf `Load` (defaults < YAML < env < changed flags), env key mapper (`_` → `.`, `__` → `_`, comma-separated lists), `ExampleYAML` from `koanf`/`doc` tags, `Discover`, `ParseTrustedProxy`, shared config sections (`Database`, `Schema`, `Filters`, `RLS`/`Auth`, `TX`, `Watch`, `Errors`, `Plugins`, `Log`, `Metrics`) + `Validate*` helpers, `AuthConfig(RLS)` |
+| `metrics` | Prometheus instrumentation on a per-instance registry (or a caller's `Registerer` + `ConstLabels`): HTTP `Middleware` (requests, duration, in flight by route class, method, status class; `SetRoute`), `DBObserver` (a `pgexec.Observer`: duration, errors by SQLSTATE class, retries), `RegisterPool` (pgxpool `Stat`), `SchemaRebuilt`, `ObserveCompile`, product counters via `NewCounter`; `NewRegistry` + `RegisterPoolOn` for several instances (one per contract) on one registry; a nil `*Metrics` records nothing (see [Metrics](#metrics)) |
+| `confx` | koanf `Load` (defaults < YAML < env < changed flags), env key mapper (`_` → `.`, `__` → `_`, comma-separated lists), `ExampleYAML` from `koanf`/`doc` tags, `Discover`, `ParseTrustedProxy`, shared config sections (`Database`, `Schema`, `Filters`, `RLS`/`Auth`, `TX`, `Watch`, `Errors`, `Plugins`, `Log`, `Metrics`, `Contract` list entries) + `Validate*` helpers (`ValidateContracts`), `AuthConfig(RLS)` |
 | `plugin` | `Plugin`, `Registry` (priority + registration order), `CatalogHook`, `InflectionHook`, `TransformCatalog`, `Inflector` chain |
 | `smartcomments/catalog` | catalog half of the smart-comments plugin (`@omit`, `@primaryKey`, `@unique`, `@foreignKey`, `@notNull`, `@filterable`, `@name` index) — products add their transport half on top |
 | `testutil` | `FixtureSQL` (embedded DDL) and `FixtureCatalog()`, the one fixture both products test against; `testutil/cmd/fixture` prints the SQL; `drift_test.go` is the fixture drift gate |
@@ -104,6 +105,45 @@ hits, _ := m.NewCounter("document_cache_requests_total", "Document cache lookups
 `confx.Metrics` (`metrics.enabled`, default off; `metrics.path`, default
 `/metrics`; `metrics.addr`, an optional separate listener) and
 `confx.ValidateMetrics` are the shared config section.
+
+## Schema contracts
+
+A contract is a named view of the catalog for one audience (`public`,
+`partner`, `internal`): the products build one API per configured contract
+from the same introspected catalog and serve each under its own path. The
+catalog half lives here so both products read the same tags the same way:
+
+```sql
+COMMENT ON TABLE app.audit_log IS '@contract internal';           -- only in internal
+COMMENT ON COLUMN app.users.email IS '@behavior -contract:public'; -- everywhere but public
+COMMENT ON FUNCTION app.feed() IS '@behavior +contract:partner';   -- into a default-exclude partner contract
+```
+
+```go
+ct := contract.Contract{Name: "partner", Default: contract.Exclude}
+view, sum := ct.View(cat) // deep copy, filtered; cat is untouched
+// ... run the plugin catalog hooks and the normal API build on view ...
+```
+
+- `-contract:<name>` hides; `@contract a, b` and `+contract:<name>` include;
+  a `@contract` list naming other contracts hides; otherwise tables and
+  functions follow the contract's `Default` policy (`include` or `exclude`)
+  and columns, foreign keys and partitions follow their table.
+- A contract only removes: hidden tables, functions and foreign keys leave
+  the copy (with every foreign key, function and row-typed column
+  referencing a hidden table), and a hidden column gets a leading bare
+  `@omit` line so the products' existing `@omit` handling removes it from
+  every surface. The products therefore require the `smart-comments`
+  plugin when contracts are configured.
+- Row-level security is unchanged: a contract narrows the API, PostgreSQL
+  still decides which rows a role sees.
+- `confx.Contract` is the config entry (`name`, `default`, `path`;
+  `contracts: [public, partner]` and `PDBQ_CONTRACTS=public,partner` give
+  names only) and `confx.ValidateContracts` its checks (names, policies,
+  unique non-overlapping paths).
+- Per-contract metrics: one `metrics.Metrics` per contract on a shared
+  `metrics.NewRegistry()` with `ConstLabels{"contract": name}`, the shared
+  pool registered once with `metrics.RegisterPoolOn`.
 
 ## Contrib vocabularies
 

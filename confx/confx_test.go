@@ -3,6 +3,7 @@ package confx
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -411,5 +412,91 @@ func TestValidateMetricsAccepts(t *testing.T) {
 		if errs := ValidateMetrics(m, ":8080"); len(errs) != 0 {
 			t.Errorf("%+v rejected: %v", m, errs)
 		}
+	}
+}
+
+func TestValidateContracts(t *testing.T) {
+	ok := []Contract{
+		{Name: "internal", Path: "/"},
+		{Name: "public"},
+		{Name: "partner-v2", Default: "exclude", Path: "/partners/v2"},
+	}
+	if errs := ValidateContracts(ok, "", true); len(errs) != 0 {
+		t.Fatalf("valid contracts rejected: %v", errs)
+	}
+	if errs := ValidateContracts(ok[1:], "/api", false); len(errs) != 0 {
+		t.Fatalf("valid contracts under a base path rejected: %v", errs)
+	}
+	if got := (Contract{Name: "public"}).URLPath("/api/"); got != "/api/public" {
+		t.Errorf("URLPath = %q", got)
+	}
+	if got := (Contract{Name: "public"}).URLPath(""); got != "/public" {
+		t.Errorf("URLPath = %q", got)
+	}
+	cases := []struct {
+		cs         []Contract
+		rootShared bool
+		want       string
+	}{
+		{[]Contract{{Name: ""}}, true, `contracts[0].name: "" must be 1-63 lower-case letters, digits, _ or -, starting with a letter`},
+		{[]Contract{{Name: "Public"}}, true, `contracts[0].name: "Public" must be 1-63 lower-case letters, digits, _ or -, starting with a letter`},
+		{[]Contract{{Name: "a"}, {Name: "a", Path: "/b"}}, true, `contracts[1].name: "a" is used by another contract`},
+		{[]Contract{{Name: "a", Default: "deny"}}, true, `contracts[0].default: "deny" is not 'include' or 'exclude'`},
+		{[]Contract{{Name: "a", Path: "/a/"}}, true, `contracts[0].path: "/a/" must be / or start with / and name path segments of letters, digits, _ . ~ or -, without a trailing /`},
+		{[]Contract{{Name: "a", Path: "/x/../y"}}, true, `contracts[0].path: "/x/../y" must be / or start with / and name path segments of letters, digits, _ . ~ or -, without a trailing /`},
+		{[]Contract{{Name: "a", Path: "/{x}"}}, true, `contracts[0].path: "/{x}" must be / or start with / and name path segments of letters, digits, _ . ~ or -, without a trailing /`},
+		{[]Contract{{Name: "a", Path: "/x"}, {Name: "b", Path: "/x"}}, true, `contracts[1].path: "/x" is also the path of contract "a"`},
+		{[]Contract{{Name: "a", Path: "/x"}, {Name: "b", Path: "/x/y"}}, true, `contracts[1].path: "/x/y" overlaps the path "/x" of contract "a"`},
+		{[]Contract{{Name: "a", Path: "/"}, {Name: "b"}}, false, `contracts[1].path: "/b" overlaps the path "/" of contract "a"`},
+	}
+	for _, tc := range cases {
+		errs := ValidateContracts(tc.cs, "", tc.rootShared)
+		if !slices.Contains(errs, tc.want) {
+			t.Errorf("%+v: errors %q, want %q", tc.cs, errs, tc.want)
+		}
+	}
+	if c, ok := FindContract(ok, "public"); !ok || c.Name != "public" {
+		t.Error("FindContract")
+	}
+	if _, ok := FindContract(ok, "nope"); ok {
+		t.Error("FindContract found a missing contract")
+	}
+	if s := (Contract{Name: "p", Default: "exclude"}).Spec(); s.Name != "p" || s.Default != "exclude" {
+		t.Errorf("Spec = %+v", s)
+	}
+}
+
+func TestLoadContracts(t *testing.T) {
+	type cfg struct {
+		Contracts []Contract `koanf:"contracts"`
+	}
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	yaml := `
+contracts:
+  - name: public
+  - name: partner
+    default: exclude
+    path: /partners
+  - internal
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var c cfg
+	if err := Load("PDBX_", path, nil, &c); err != nil {
+		t.Fatal(err)
+	}
+	want := []Contract{{Name: "public"}, {Name: "partner", Default: "exclude", Path: "/partners"}, {Name: "internal"}}
+	if !slices.Equal(c.Contracts, want) {
+		t.Errorf("yaml contracts = %+v, want %+v", c.Contracts, want)
+	}
+
+	t.Setenv("PDBX_CONTRACTS", "public,partner")
+	c = cfg{}
+	if err := Load("PDBX_", "", nil, &c); err != nil {
+		t.Fatal(err)
+	}
+	if want := []Contract{{Name: "public"}, {Name: "partner"}}; !slices.Equal(c.Contracts, want) {
+		t.Errorf("env contracts = %+v, want %+v", c.Contracts, want)
 	}
 }

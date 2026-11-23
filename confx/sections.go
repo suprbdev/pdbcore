@@ -7,7 +7,12 @@
 // product-only sections (pdbq's Server/TX.PerRequest, pdbr's Server).
 package confx
 
-import "time"
+import (
+	"strings"
+	"time"
+
+	"github.com/suprbdev/pdbcore/contract"
+)
 
 // Database is the connection section.
 type Database struct {
@@ -107,4 +112,45 @@ type Metrics struct {
 // the main listener.
 func DefaultMetrics() Metrics {
 	return Metrics{Path: "/metrics"}
+}
+
+// Contract is one entry of the contracts list: a named, audience-specific
+// view of the API served under its own path (see package contract).
+type Contract struct {
+	Name    string `koanf:"name" doc:"Contract name, matched against @contract and @behavior ±contract:<name> smart tags: lower-case letters, digits, _ and -."`
+	Default string `koanf:"default" doc:"Policy for tables and functions without a tag for this contract: 'include' (the default: the contract is everything not tagged out) or 'exclude' (only what is tagged in)."`
+	Path    string `koanf:"path" doc:"URL path the contract is served under; defaults to its name."`
+}
+
+// UnmarshalText makes a bare string a contract of that name with the
+// default policy and path, so contracts can be listed by name in YAML
+// (contracts: [public, partner]) and in environment variables
+// (PDBQ_CONTRACTS=public,partner).
+func (c *Contract) UnmarshalText(b []byte) error {
+	*c = Contract{Name: string(b)}
+	return nil
+}
+
+// URLPath returns the contract's path: Path when set, else base joined
+// with the contract's name ("/" + name for an empty base).
+func (c Contract) URLPath(base string) string {
+	if c.Path != "" {
+		return c.Path
+	}
+	return strings.TrimSuffix(base, "/") + "/" + c.Name
+}
+
+// Spec returns the catalog filter of the contract.
+func (c Contract) Spec() contract.Contract {
+	return contract.Contract{Name: c.Name, Default: contract.Policy(c.Default)}
+}
+
+// FindContract returns the contract named name, or false.
+func FindContract(cs []Contract, name string) (Contract, bool) {
+	for _, c := range cs {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return Contract{}, false
 }

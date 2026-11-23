@@ -108,6 +108,79 @@ var behaviorOmits = map[string]string{
 	"-order":  "order",
 }
 
+// Membership is an object's schema-contract membership, read by
+// [Tags.Contracts] from the @contract tag and the contract tokens of
+// @behavior. Contract names are lowercased.
+type Membership struct {
+	// Listed reports that the object carries at least one @contract tag:
+	// it belongs to the contracts in Only (plus Include) and to no other.
+	Listed bool
+	// Only holds the names listed by @contract (@contract public, partner).
+	Only map[string]bool
+	// Include holds the names of +contract:<name> (or contract:<name>)
+	// @behavior tokens.
+	Include map[string]bool
+	// Exclude holds the names of -contract:<name> @behavior tokens.
+	Exclude map[string]bool
+}
+
+// Contracts collects the object's contract membership: the names listed
+// across every @contract occurrence (split on commas and whitespace, so
+// "@contract public, partner") and the @behavior tokens +contract:<name>,
+// contract:<name> and -contract:<name>. A bare @contract lists no names:
+// the object belongs to no contract unless a +contract token includes it.
+func (t Tags) Contracts() Membership {
+	var m Membership
+	add := func(set *map[string]bool, name string) {
+		if *set == nil {
+			*set = map[string]bool{}
+		}
+		(*set)[strings.ToLower(name)] = true
+	}
+	for _, v := range t["contract"] {
+		m.Listed = true
+		for _, name := range SplitList(v) {
+			add(&m.Only, name)
+		}
+	}
+	for _, v := range t["behavior"] {
+		for _, tok := range SplitList(v) {
+			sign, rest := tok[0], tok
+			if sign == '+' || sign == '-' {
+				rest = tok[1:]
+			}
+			name, ok := strings.CutPrefix(strings.ToLower(rest), "contract:")
+			if !ok || name == "" {
+				continue
+			}
+			if sign == '-' {
+				add(&m.Exclude, name)
+			} else {
+				add(&m.Include, name)
+			}
+		}
+	}
+	return m
+}
+
+// In reports whether the object belongs to contract name, given def, the
+// answer when the tags say nothing about it: the parent object's
+// membership for a column or relation, the contract's default policy for
+// a table or function.
+// -contract:<name> wins over everything, then @contract and +contract
+// include, then a @contract list naming other contracts excludes.
+func (m Membership) In(name string, def bool) bool {
+	switch {
+	case m.Exclude[name]:
+		return false
+	case m.Only[name] || m.Include[name]:
+		return true
+	case m.Listed:
+		return false
+	}
+	return def
+}
+
 // SplitList splits a tag value on commas and whitespace, dropping empties —
 // the list form shared by @omit, @primaryKey, and @unique values.
 func SplitList(v string) []string {

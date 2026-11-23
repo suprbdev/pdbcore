@@ -24,7 +24,18 @@ func (m *Metrics) RegisterPool(p PoolStater) error {
 	if pp, ok := p.(*pgxpool.Pool); m == nil || p == nil || (ok && pp == nil) {
 		return nil
 	}
-	if err := m.reg.Register(newPoolCollector(m.namespace, p)); err != nil {
+	return RegisterPoolOn(m.reg, m.namespace, p)
+}
+
+// RegisterPoolOn exports p's statistics as namespace_db_pool_* metrics on
+// reg, like [Metrics.RegisterPool] but without the ConstLabels of any
+// Metrics: for one pool shared by several Metrics on a registry from
+// [NewRegistry]. A nil p or nil *pgxpool.Pool does nothing.
+func RegisterPoolOn(reg prometheus.Registerer, namespace string, p PoolStater) error {
+	if pp, ok := p.(*pgxpool.Pool); p == nil || (ok && pp == nil) {
+		return nil
+	}
+	if err := reg.Register(newPoolCollector(namespace, p)); err != nil {
 		return fmt.Errorf("metrics: pool: %w", err)
 	}
 	return nil
