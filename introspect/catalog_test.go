@@ -1,9 +1,14 @@
 package introspect
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func TestConstraintTemporalHelpers(t *testing.T) {
@@ -59,13 +64,25 @@ func TestForeignKeyJoinPairs(t *testing.T) {
 	}
 }
 
-func TestColumnVirtual(t *testing.T) {
-	for kind, want := range map[GeneratedKind]bool{
-		"": false, GeneratedIdentity: false, GeneratedStored: false, GeneratedVirtual: true,
+func TestColumnGenerationHelpers(t *testing.T) {
+	for _, tc := range []struct {
+		kind                                 GeneratedKind
+		virtual, identity, always, omittable bool
+	}{
+		{"", false, false, false, false},
+		{GeneratedIdentityAlways, false, true, true, true},
+		{GeneratedIdentityByDefault, false, true, false, true},
+		{GeneratedStored, false, false, true, true},
+		{GeneratedVirtual, true, false, true, true},
 	} {
-		if got := (&Column{GeneratedKind: kind}).Virtual(); got != want {
-			t.Errorf("Virtual() for %q = %v, want %v", kind, got, want)
+		c := &Column{NotNull: true, GeneratedKind: tc.kind}
+		if c.Virtual() != tc.virtual || c.Identity() != tc.identity || c.GeneratedAlways() != tc.always || c.OmittableOnInsert() != tc.omittable {
+			t.Errorf("%q: Virtual %v Identity %v GeneratedAlways %v OmittableOnInsert %v, want %+v",
+				tc.kind, c.Virtual(), c.Identity(), c.GeneratedAlways(), c.OmittableOnInsert(), tc)
 		}
+	}
+	if !(&Column{}).OmittableOnInsert() || !(&Column{NotNull: true, HasDefault: true}).OmittableOnInsert() {
+		t.Error("nullable and defaulted columns must be omittable on insert")
 	}
 }
 
@@ -109,5 +126,34 @@ func TestConstraintColumns(t *testing.T) {
 		if want := slices.Contains(tc.cols, "secret"); refs != want || ok != tc.ok {
 			t.Errorf("ConstraintReferences(%s) = %v, %v, want %v, %v", tc.name, refs, ok, want, tc.ok)
 		}
+	}
+}
+
+type versionRow struct {
+	version string
+	num     int
+}
+
+func (r versionRow) Scan(dest ...any) error {
+	*dest[0].(*string), *dest[1].(*int) = r.version, r.num
+	return nil
+}
+
+type versionQuerier struct{ versionRow }
+
+func (q versionQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("unexpected query")
+}
+
+func (q versionQuerier) QueryRow(context.Context, string, ...any) pgx.Row { return q.versionRow }
+
+func TestIntrospectRefusesOldServer(t *testing.T) {
+	_, err := Introspect(context.Background(), versionQuerier{versionRow{"13.16", 130016}}, nil)
+	var unsupported *UnsupportedServerError
+	if !errors.As(err, &unsupported) || unsupported.Version != "13.16" {
+		t.Fatalf("err = %v, want *UnsupportedServerError for 13.16", err)
+	}
+	if !strings.Contains(err.Error(), "PostgreSQL 14 or later") {
+		t.Errorf("message %q does not name the minimum", err)
 	}
 }
