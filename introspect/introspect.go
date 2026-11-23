@@ -15,9 +15,25 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// MinServerVersionNum is the oldest PostgreSQL release supported, as
+// server_version_num: 14.0.
+const MinServerVersionNum = 140000
+
+// UnsupportedServerError reports a PostgreSQL server older than
+// [MinServerVersionNum].
+type UnsupportedServerError struct {
+	// Version is the server's server_version, e.g. "13.16".
+	Version string
+}
+
+func (e *UnsupportedServerError) Error() string {
+	return fmt.Sprintf("PostgreSQL %s is not supported: PostgreSQL 14 or later is required", e.Version)
+}
+
 // Introspect reads pg_catalog for the given schemas and builds a Catalog.
 // pg_catalog is used instead of information_schema because the latter loses
-// index, RLS, and array/domain detail.
+// index, RLS, and array/domain detail. A server older than PostgreSQL 14
+// fails with [*UnsupportedServerError].
 func Introspect(ctx context.Context, db Querier, schemas []string) (*Catalog, error) {
 	if len(schemas) == 0 {
 		schemas = []string{"public"}
@@ -27,6 +43,9 @@ func Introspect(ctx context.Context, db Querier, schemas []string) (*Catalog, er
 	if err := db.QueryRow(ctx, `SELECT current_setting('server_version'), current_setting('server_version_num')::int`).
 		Scan(&cat.ServerVersion, &cat.ServerVersionNum); err != nil {
 		return nil, fmt.Errorf("introspect: server version: %w", err)
+	}
+	if cat.ServerVersionNum < MinServerVersionNum {
+		return nil, &UnsupportedServerError{Version: cat.ServerVersion}
 	}
 	if err := readTables(ctx, db, schemas, cat); err != nil {
 		return nil, err
@@ -189,8 +208,8 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		       m.typcategory = 'A',
 		       `+notNullColumn(cat.ServerVersionNum)+`,
 		       a.atthasdef,
-		       a.attidentity <> '' OR a.attgenerated <> '',
-		       CASE WHEN a.attidentity <> '' THEN 'identity'
+		       CASE WHEN a.attidentity = 'a' THEN 'identity_always'
+		            WHEN a.attidentity = 'd' THEN 'identity_by_default'
 		            WHEN a.attgenerated = 's' THEN 'stored'
 		            WHEN a.attgenerated = 'v' THEN 'virtual'
 		            ELSE '' END,
@@ -218,7 +237,7 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		col := &Column{}
 		if err := rows.Scan(&schema, &table, &col.Name, &col.Position,
 			&col.TypeSchema, &col.PGType, &col.BaseTypeSchema, &col.IsArray,
-			&col.NotNull, &col.HasDefault, &col.Generated, &genKind, &col.Comment,
+			&col.NotNull, &col.HasDefault, &genKind, &col.Comment,
 			&col.Domain, &formatted, &builtin, &spatial); err != nil {
 			return err
 		}
@@ -407,12 +426,8 @@ func readExtensions(ctx context.Context, db Querier, cat *Catalog) error {
 }
 
 // readRanges reads every range type outside pg_catalog with its subtype
-// and, from PostgreSQL 14, its multirange type.
+// and its multirange type.
 func readRanges(ctx context.Context, db Querier, cat *Catalog) error {
-	multi := "NULL::oid"
-	if cat.ServerVersionNum >= 140000 {
-		multi = "r.rngmultitypid"
-	}
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, t.typname, st.typname, sn.nspname,
 		       COALESCE(mt.typname, ''), COALESCE(mn.nspname, '')
@@ -421,7 +436,7 @@ func readRanges(ctx context.Context, db Querier, cat *Catalog) error {
 		JOIN pg_namespace n ON n.oid = t.typnamespace
 		JOIN pg_type st ON st.oid = r.rngsubtype
 		JOIN pg_namespace sn ON sn.oid = st.typnamespace
-		LEFT JOIN pg_type mt ON mt.oid = `+multi+`
+		LEFT JOIN pg_type mt ON mt.oid = r.rngmultitypid
 		LEFT JOIN pg_namespace mn ON mn.oid = mt.typnamespace
 		WHERE n.nspname <> 'pg_catalog'
 		ORDER BY n.nspname, t.typname`)

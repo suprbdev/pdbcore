@@ -115,7 +115,6 @@ func TestDiff(t *testing.T) {
 			c.ServerVersionNum = 160001
 		}, "server version number changed: 160000 -> 160001"},
 		{"generation kind", func(c *Catalog) {
-			c.Tables[0].Columns[1].Generated = true
 			c.Tables[0].Columns[1].GeneratedKind = GeneratedVirtual
 		}, "table public.users: column email generation changed (none -> virtual)"},
 		{"temporal key", func(c *Catalog) {

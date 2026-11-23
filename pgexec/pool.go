@@ -8,9 +8,14 @@ package pgexec
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/suprbdev/pdbcore/introspect"
 )
 
 // PoolConfig is the subset of database settings the pool needs.
@@ -22,7 +27,9 @@ type PoolConfig struct {
 }
 
 // Connect opens a pool. StatementTimeout > 0 is applied as the connection's
-// statement_timeout runtime parameter (milliseconds).
+// statement_timeout runtime parameter (milliseconds). Every connection the
+// pool opens to a server older than PostgreSQL 14 fails with
+// [*introspect.UnsupportedServerError].
 func Connect(ctx context.Context, cfg PoolConfig) (*pgxpool.Pool, error) {
 	pcfg, err := pgxpool.ParseConfig(cfg.URL)
 	if err != nil {
@@ -38,9 +45,29 @@ func Connect(ctx context.Context, cfg PoolConfig) (*pgxpool.Pool, error) {
 		}
 		pcfg.ConnConfig.RuntimeParams["statement_timeout"] = fmt.Sprintf("%d", t.Milliseconds())
 	}
+	pcfg.AfterConnect = checkServerVersion
 	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
 	return pool, nil
+}
+
+func checkServerVersion(_ context.Context, conn *pgx.Conn) error {
+	v := conn.PgConn().ParameterStatus("server_version")
+	if m := serverMajor(v); m > 0 && m < introspect.MinServerVersionNum/10000 {
+		return &introspect.UnsupportedServerError{Version: v}
+	}
+	return nil
+}
+
+// serverMajor returns the major release of a server_version such as "18.1",
+// "19beta1" or "16.4 (Debian 16.4-1.pgdg120+2)", or 0 when it has none.
+func serverMajor(v string) int {
+	end := strings.IndexFunc(v, func(r rune) bool { return r < '0' || r > '9' })
+	if end < 0 {
+		end = len(v)
+	}
+	n, _ := strconv.Atoi(v[:end])
+	return n
 }
