@@ -248,7 +248,7 @@ var Ops = []Op{
 	},
 	{
 		Name: "bboxIntersects2D", Arg: TypeName, Index: true, Geography: true,
-		Description: "This column's 2D bounding box overlaps the given geometry's (&&). Index-usable.",
+		Description: "This column's 2D bounding box overlaps the given geometry's (&&).",
 		render:      binary("&&"),
 	},
 }
