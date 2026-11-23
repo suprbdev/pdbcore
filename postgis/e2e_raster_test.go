@@ -19,7 +19,9 @@ import (
 // rasterTx opens a rolled-back transaction with postgis_raster installed
 // and a table of three rasters: a 10x10 single-band 4326 raster of 5.5
 // over (0..10, 0..10), a 4x4 two-band 3857 raster over (100..104,
-// 100..104) and NULL.
+// 100..104) and NULL. The watch package's tests create and drop DDL event
+// triggers concurrently, so CREATE EXTENSION can fail with "cache lookup
+// failed" when a trigger's function disappears mid-statement; it is retried.
 func rasterTx(t *testing.T) (pgx.Tx, context.Context) {
 	t.Helper()
 	conn := testConn(t)
@@ -29,8 +31,24 @@ func rasterTx(t *testing.T) (pgx.Tx, context.Context) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	for attempt := 1; ; attempt++ {
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = sp.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS postgis_raster`)
+		if err == nil {
+			if err := sp.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		_ = sp.Rollback(ctx)
+		if attempt == 5 || !strings.Contains(err.Error(), "cache lookup failed") {
+			t.Fatalf("CREATE EXTENSION postgis_raster: %v", err)
+		}
+	}
 	for _, q := range []string{
-		`CREATE EXTENSION IF NOT EXISTS postgis_raster`,
 		`CREATE TEMP TABLE rasters (id int PRIMARY KEY, rast raster)`,
 		`INSERT INTO rasters VALUES
 			(1, ST_AddBand(ST_MakeEmptyRaster(10, 10, 0, 10, 1, -1, 0, 0, 4326), '32BF'::text, 5.5, NULL)),
