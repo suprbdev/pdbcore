@@ -5,6 +5,11 @@ import (
 	"testing"
 )
 
+const (
+	ctorSQL = "CASE WHEN left($1, 1) = '{' THEN ST_GeomFromGeoJSON($1) ELSE ST_GeomFromEWKT($1) END"
+	geogSQL = "(" + ctorSQL + ")::geography"
+)
+
 func TestFlavourOf(t *testing.T) {
 	tests := []struct {
 		pgType string
@@ -39,14 +44,14 @@ func TestParseGeoJSON(t *testing.T) {
 			name:    "point",
 			in:      map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}},
 			flavour: Geometry,
-			wantSQL: "ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)",
+			wantSQL: ctorSQL,
 			wantArg: `{"coordinates":[1,2],"type":"Point"}`,
 		},
 		{
 			name:    "geography casts",
 			in:      map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}},
 			flavour: Geography,
-			wantSQL: "(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326))::geography",
+			wantSQL: geogSQL,
 		},
 		{
 			name: "feature unwrapped to its geometry",
@@ -69,10 +74,39 @@ func TestParseGeoJSON(t *testing.T) {
 			wantArg: `{"geometries":[{"coordinates":[1,2],"type":"Point"}],"type":"GeometryCollection"}`,
 		},
 		{
-			name:    "explicit EPSG CRS is honoured",
+			name:    "explicit EPSG CRS is canonicalized into the parameter",
 			in:      map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}, "crs": map[string]any{"properties": map[string]any{"name": "EPSG:3857"}}},
 			flavour: Geometry,
-			wantSQL: "ST_SetSRID(ST_GeomFromGeoJSON($1), 3857)",
+			wantSQL: ctorSQL,
+			wantArg: `{"coordinates":[1,2],"crs":{"properties":{"name":"EPSG:3857"},"type":"name"},"type":"Point"}`,
+		},
+		{
+			name:    "urn CRS is canonicalized",
+			in:      map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}, "crs": map[string]any{"type": "name", "properties": map[string]any{"name": "urn:ogc:def:crs:EPSG::2193"}}},
+			flavour: Geometry,
+			wantArg: `{"coordinates":[1,2],"crs":{"properties":{"name":"EPSG:2193"},"type":"name"},"type":"Point"}`,
+		},
+		{
+			name:    "default CRS is dropped",
+			in:      map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}, "crs": map[string]any{"properties": map[string]any{"name": "EPSG:4326"}}},
+			flavour: Geometry,
+			wantArg: `{"coordinates":[1,2],"type":"Point"}`,
+		},
+		{
+			name:    "unreadable CRS is dropped",
+			in:      map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}, "crs": map[string]any{"type": "name", "properties": map[string]any{"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}},
+			flavour: Geometry,
+			wantArg: `{"coordinates":[1,2],"type":"Point"}`,
+		},
+		{
+			name: "feature CRS moves onto the geometry",
+			in: map[string]any{
+				"type":     "Feature",
+				"crs":      map[string]any{"properties": map[string]any{"name": "EPSG:3857"}},
+				"geometry": map[string]any{"type": "Point", "coordinates": []any{3.0, 4.0}},
+			},
+			flavour: Geometry,
+			wantArg: `{"coordinates":[3,4],"crs":{"properties":{"name":"EPSG:3857"},"type":"name"},"type":"Point"}`,
 		},
 		{
 			name:    "missing type",
@@ -128,26 +162,30 @@ func TestParseGeoJSON(t *testing.T) {
 
 func TestParseWKT(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      string
-		flavour Flavour
-		wantSQL string
-		wantErr bool
+		name     string
+		in       string
+		flavour  Flavour
+		wantArg  string
+		wantSRID int
+		wantErr  bool
 	}{
-		{name: "plain point", in: "POINT(1 2)", flavour: Geometry, wantSQL: "ST_GeomFromEWKT($1)"},
-		{name: "ewkt keeps its own srid", in: "SRID=4326;POINT(1 2)", flavour: Geometry, wantSQL: "ST_GeomFromEWKT($1)"},
-		{name: "lowercase accepted", in: "polygon((0 0,1 0,1 1,0 0))", flavour: Geometry, wantSQL: "ST_GeomFromEWKT($1)"},
-		{name: "3d point", in: "POINT Z (1 2 3)", flavour: Geometry, wantSQL: "ST_GeomFromEWKT($1)"},
-		{name: "empty geometry", in: "POINT EMPTY", flavour: Geometry, wantSQL: "ST_GeomFromEWKT($1)"},
+		{name: "plain point", in: "POINT(1 2)", flavour: Geometry, wantArg: "POINT(1 2)"},
+		{name: "ewkt keeps its own srid", in: "SRID=4326;POINT(1 2)", flavour: Geometry, wantArg: "SRID=4326;POINT(1 2)", wantSRID: 4326},
+		{name: "lowercase accepted", in: "polygon((0 0,1 0,1 1,0 0))", flavour: Geometry, wantArg: "polygon((0 0,1 0,1 1,0 0))"},
+		{name: "3d point", in: "POINT Z (1 2 3)", flavour: Geometry, wantArg: "POINT Z (1 2 3)"},
+		{name: "empty geometry", in: "POINT EMPTY", flavour: Geometry, wantArg: "POINT EMPTY"},
+		{name: "surrounding space trimmed", in: "  POINT(1 2) ", flavour: Geometry, wantArg: "POINT(1 2)"},
+		{name: "explicit srid 0 kept", in: "SRID=0;POINT(1 2)", flavour: Geometry, wantArg: "SRID=0;POINT(1 2)"},
 		{
-			// Bare WKT is SRID 0; geography needs a real CRS, so 4326 is forced.
 			name: "bare wkt on geography gets a srid", in: "POINT(1 2)", flavour: Geography,
-			wantSQL: "(ST_SetSRID(ST_GeomFromEWKT($1), 4326))::geography",
+			wantArg: "SRID=4326;POINT(1 2)", wantSRID: 4326,
 		},
 		{name: "empty string", in: "", flavour: Geometry, wantErr: true},
 		{name: "not wkt at all", in: "DROP TABLE users", flavour: Geometry, wantErr: true},
 		{name: "sql fragment", in: "1=1); DROP TABLE users --", flavour: Geometry, wantErr: true},
 		{name: "bare number", in: "42", flavour: Geometry, wantErr: true},
+		{name: "srid prefix on garbage", in: "SRID=4326;DROP TABLE users", flavour: Geometry, wantErr: true},
+		{name: "overflowing srid", in: "SRID=99999999999999999999;POINT(1 2)", flavour: Geometry, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,12 +199,18 @@ func TestParseWKT(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if sql := got.SQL("$1"); sql != tc.wantSQL {
-				t.Errorf("SQL = %q, want %q", sql, tc.wantSQL)
+			if got.Param != tc.wantArg {
+				t.Errorf("param = %q, want %q", got.Param, tc.wantArg)
 			}
-			// The value itself must never appear in the SQL text.
-			if strings.Contains(got.SQL("$1"), strings.TrimSpace(tc.in)) {
-				t.Errorf("SQL %q leaked the input value", got.SQL("$1"))
+			if got.SRID != tc.wantSRID {
+				t.Errorf("SRID = %d, want %d", got.SRID, tc.wantSRID)
+			}
+			want := ctorSQL
+			if tc.flavour == Geography {
+				want = geogSQL
+			}
+			if sql := got.SQL("$1"); sql != want {
+				t.Errorf("SQL = %q, want %q", sql, want)
 			}
 		})
 	}
@@ -176,6 +220,32 @@ func TestParseWKT(t *testing.T) {
 // FuzzFilter invariant: two different values of the same shape must produce
 // identical SQL text.
 func TestSQLTextIsValueIndependent(t *testing.T) {
+	inputs := []any{
+		"POINT(1 2)",
+		"SRID=3857;POINT(1 2)",
+		"SRID=0;POINT(1 2)",
+		map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}},
+		map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}, "crs": map[string]any{"properties": map[string]any{"name": "EPSG:3857"}}},
+		map[string]any{"type": "Feature", "geometry": map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}}},
+	}
+	for _, f := range []Flavour{Geometry, Geography} {
+		for _, srid := range []int{0, 4326, 3857} {
+			want := ""
+			for _, in := range inputs {
+				v, err := ParseFor(in, f, srid)
+				if err != nil {
+					t.Fatalf("%v %d %v: %v", f, srid, in, err)
+				}
+				got := v.SQL("$1")
+				if want == "" {
+					want = got
+				} else if got != want {
+					t.Errorf("%v srid %d: SQL for %v = %q, want %q", f, srid, in, got, want)
+				}
+			}
+		}
+	}
+
 	a, err := Parse(map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}}, Geometry)
 	if err != nil {
 		t.Fatal(err)
@@ -574,23 +644,34 @@ func TestDerivedAppliesTo(t *testing.T) {
 func TestParseFor(t *testing.T) {
 	gj := map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}}
 	crs := map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}, "crs": map[string]any{"properties": map[string]any{"name": "EPSG:3857"}}}
+	const gjArg = `{"coordinates":[1,2],"type":"Point"}`
+	const crsArg = `{"coordinates":[1,2],"crs":{"properties":{"name":"EPSG:3857"},"type":"name"},"type":"Point"}`
+	transform := func(srid string) string {
+		return "CASE WHEN left($1, 1) = '{' THEN ST_Transform(ST_GeomFromGeoJSON($1), " + srid + ") ELSE ST_GeomFromEWKT($1) END"
+	}
 	tests := []struct {
-		name    string
-		in      any
-		flavour Flavour
-		srid    int
-		wantSQL string
+		name     string
+		in       any
+		flavour  Flavour
+		srid     int
+		wantSQL  string
+		wantArg  string
+		wantSRID int
 	}{
-		{"bare wkt unconstrained", "POINT(1 2)", Geometry, 0, "ST_GeomFromEWKT($1)"},
-		{"bare wkt constrained", "POINT(1 2)", Geometry, 4326, "ST_SetSRID(ST_GeomFromEWKT($1), 4326)"},
-		{"bare wkt other srid", "POINT(1 2)", Geometry, 3857, "ST_SetSRID(ST_GeomFromEWKT($1), 3857)"},
-		{"ewkt keeps own", "SRID=3857;POINT(1 2)", Geometry, 4326, "ST_GeomFromEWKT($1)"},
-		{"geography bare wkt", "POINT(1 2)", Geography, 4326, "(ST_SetSRID(ST_GeomFromEWKT($1), 4326))::geography"},
-		{"geojson matching", gj, Geometry, 4326, "ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)"},
-		{"geojson unconstrained", gj, Geometry, 0, "ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)"},
-		{"geojson other srid", gj, Geometry, 3857, "ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326), 3857)"},
-		{"geojson crs matching", crs, Geometry, 3857, "ST_SetSRID(ST_GeomFromGeoJSON($1), 3857)"},
-		{"geojson geography", gj, Geography, 4326, "(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326))::geography"},
+		{"bare wkt unconstrained", "POINT(1 2)", Geometry, 0, ctorSQL, "POINT(1 2)", 0},
+		{"bare wkt constrained", "POINT(1 2)", Geometry, 4326, transform("4326"), "SRID=4326;POINT(1 2)", 4326},
+		{"bare wkt other srid", "POINT(1 2)", Geometry, 3857, transform("3857"), "SRID=3857;POINT(1 2)", 3857},
+		{"ewkt srid 0 kept", "SRID=0;POINT(1 2)", Geometry, 3857, transform("3857"), "SRID=0;POINT(1 2)", 0},
+		{"ewkt keeps own", "SRID=3857;POINT(1 2)", Geometry, 4326, transform("4326"), "SRID=3857;POINT(1 2)", 3857},
+		{"ewkt unconstrained", "SRID=3857;POINT(1 2)", Geometry, 0, ctorSQL, "SRID=3857;POINT(1 2)", 3857},
+		{"geography bare wkt", "POINT(1 2)", Geography, 4326, geogSQL, "SRID=4326;POINT(1 2)", 4326},
+		{"geography bare wkt unconstrained", "POINT(1 2)", Geography, 0, geogSQL, "SRID=4326;POINT(1 2)", 4326},
+		{"geography bare wkt ignores column srid", "POINT(1 2)", Geography, 4269, geogSQL, "SRID=4326;POINT(1 2)", 4326},
+		{"geojson matching", gj, Geometry, 4326, transform("4326"), gjArg, 4326},
+		{"geojson unconstrained", gj, Geometry, 0, ctorSQL, gjArg, 4326},
+		{"geojson other srid", gj, Geometry, 3857, transform("3857"), gjArg, 4326},
+		{"geojson crs matching", crs, Geometry, 3857, transform("3857"), crsArg, 3857},
+		{"geojson geography", gj, Geography, 4326, geogSQL, gjArg, 4326},
 	}
 	for _, tc := range tests {
 		v, err := ParseFor(tc.in, tc.flavour, tc.srid)
@@ -600,5 +681,22 @@ func TestParseFor(t *testing.T) {
 		if got := v.SQL("$1"); got != tc.wantSQL {
 			t.Errorf("%s: SQL = %q, want %q", tc.name, got, tc.wantSQL)
 		}
+		if v.Param != tc.wantArg {
+			t.Errorf("%s: param = %q, want %q", tc.name, v.Param, tc.wantArg)
+		}
+		if v.SRID != tc.wantSRID {
+			t.Errorf("%s: SRID = %d, want %d", tc.name, v.SRID, tc.wantSRID)
+		}
+	}
+}
+
+func TestParseDoesNotMutateInput(t *testing.T) {
+	crs := map[string]any{"properties": map[string]any{"name": "EPSG:3857"}}
+	in := map[string]any{"type": "Point", "coordinates": []any{1.0, 2.0}, "crs": crs}
+	if _, err := Parse(in, Geometry); err != nil {
+		t.Fatal(err)
+	}
+	if len(in) != 3 || len(crs) != 1 {
+		t.Errorf("input mutated: %v", in)
 	}
 }

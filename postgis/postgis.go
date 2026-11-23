@@ -17,22 +17,23 @@
 // PostGIS values are user data, so they must move through the parameter list
 // exactly like any other value (see the FuzzFilter invariant: compiled SQL text
 // is a pure function of the query *shape*). A geometry input is therefore always
-// reduced to ONE text parameter plus a constructor whose shape depends only on
-// the column type — never on the value:
+// reduced to ONE text parameter plus an expression whose text depends only on
+// the target flavour and column SRID — never on the value or its input form:
 //
-//	ST_GeomFromGeoJSON($1)   -- GeoJSON object input
-//	ST_GeomFromEWKT($1)      -- WKT / EWKT string input
+//	CASE WHEN left($1, 1) = '{' THEN ST_GeomFromGeoJSON($1) ELSE ST_GeomFromEWKT($1) END
 //
-// The choice between those two constructors is made from the Go type of the
-// input (object vs string), which is part of the query shape as far as the
-// fuzzer is concerned only if the same query text is reused — so callers pass
-// the constructor through Value.SQL, which folds the decision into the
-// expression and keeps the value itself in a parameter.
+// Parse normalizes every input so that the parameter alone carries its SRID:
+// bare WKT becomes EWKT with an explicit SRID= prefix, GeoJSON becomes a bare
+// geometry object whose crs member (if any) is in the form PostGIS reads.
+// The wrappers (ST_Transform of the GeoJSON branch to a constrained column's
+// SRID, the geography cast) are fixed by the column type, which callers take
+// from the catalog.
 package postgis
 
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -93,40 +94,45 @@ func FlavourOf(pgType string) Flavour {
 func IsSpatial(pgType string) bool { return FlavourOf(pgType).Spatial() }
 
 // Value is a spatial input value reduced to exactly one SQL parameter plus the
-// constructor that turns it back into a PostGIS value.
+// expression that turns it back into a PostGIS value.
 type Value struct {
-	// Param is the single value handed to the driver: GeoJSON text or a
-	// WKT/EWKT string.
-	Param   string
-	hasSRID bool
-	// ctor is the PostGIS constructor wrapping the placeholder.
-	ctor string
+	// Param is the single value handed to the driver: a GeoJSON geometry
+	// object as text, or a WKT/EWKT string. Any SRID the value carries is
+	// encoded here (EWKT "SRID=n;" prefix or GeoJSON crs member), never in
+	// the SQL text.
+	Param string
 	// Flavour is the target type the expression is cast to.
 	Flavour Flavour
-	// SRID, when non-zero, is applied with ST_SetSRID. GeoJSON is always
-	// WGS84 (4326) per RFC 7946 unless the value carries an explicit CRS;
-	// EWKT carries its own SRID so none is forced.
+	// SRID is the SRID Param carries once parsed: an EWKT value's own SRID,
+	// the column SRID (4326 on geography) for bare WKT, and 4326 or the
+	// explicit crs member for GeoJSON. 0 means unknown (bare WKT bound for
+	// an unconstrained geometry column). It is informational; SQL does not
+	// read it.
 	SRID int
-	// TransformSRID, when non-zero, reprojects the value with ST_Transform
-	// after SRID has been applied. ParseFor sets it for GeoJSON bound for a
-	// column in a different CRS.
+	// TransformSRID, when non-zero, reprojects GeoJSON input with
+	// ST_Transform (WKT/EWKT input is never reprojected). ParseFor sets it
+	// to the column SRID for every value bound for a constrained geometry
+	// column, whatever its form, so the SQL text does not depend on the
+	// value; ST_Transform returns its input unchanged when the SRIDs
+	// already match.
 	TransformSRID int
 }
 
 // SQL renders the value expression given the placeholder for Param (e.g. "$3").
-// The result is a well-typed geometry/geography expression.
+// The result is a well-typed geometry/geography expression that references the
+// placeholder three times.
 //
 // The placeholder is the ONLY value-derived part; the rest of the string is
-// fixed by the column's type, preserving the compiled-SQL-is-a-pure-function-
-// of-query-shape invariant.
+// fixed by Flavour and TransformSRID, preserving the compiled-SQL-is-a-pure-
+// function-of-query-shape invariant across input forms (GeoJSON, WKT, EWKT).
+// The CASE folds to a constant at plan time under custom plans and stays an
+// index-usable pseudo-constant under generic ones.
 func (v Value) SQL(placeholder string) string {
-	expr := v.ctor + "(" + placeholder + ")"
-	if v.SRID != 0 {
-		expr = fmt.Sprintf("ST_SetSRID(%s, %d)", expr, v.SRID)
-	}
+	geoJSON := "ST_GeomFromGeoJSON(" + placeholder + ")"
 	if v.TransformSRID != 0 {
-		expr = fmt.Sprintf("ST_Transform(%s, %d)", expr, v.TransformSRID)
+		geoJSON = fmt.Sprintf("ST_Transform(%s, %d)", geoJSON, v.TransformSRID)
 	}
+	expr := fmt.Sprintf("CASE WHEN left(%[1]s, 1) = '{' THEN %[2]s ELSE ST_GeomFromEWKT(%[1]s) END", placeholder, geoJSON)
 	if v.Flavour == Geography {
 		// ST_GeomFromGeoJSON/EWKT return geometry; geography columns need the
 		// cast so the operator resolves to the geography overload (metres).
@@ -135,7 +141,8 @@ func (v Value) SQL(placeholder string) string {
 	return expr
 }
 
-// defaultGeoJSONSRID is the CRS mandated by RFC 7946 for GeoJSON.
+// defaultGeoJSONSRID is the CRS mandated by RFC 7946 for GeoJSON, and the SRID
+// ST_GeomFromGeoJSON assigns when no crs member is present (PostGIS 3.0+).
 const defaultGeoJSONSRID = 4326
 
 // Parse converts an input value into a Value.
@@ -148,98 +155,100 @@ const defaultGeoJSONSRID = 4326
 //
 // The value is validated structurally so malformed input fails at compile time
 // with a user-facing error rather than as a Postgres error mid-statement.
+// Parse is ParseFor with no column SRID.
 func Parse(v any, f Flavour) (Value, error) {
 	return ParseFor(v, f, 0)
 }
 
 // ParseFor is Parse for a value bound to a column whose typmod SRID is srid
-// (introspect.SpatialType.SRID; 0 means unconstrained and behaves exactly like
-// Parse). The SRID comes from the catalog, never from user input, so it is
-// rendered as an integer literal without breaking the compiled-SQL-is-a-pure-
-// function-of-query-shape invariant.
+// (introspect.SpatialType.SRID; 0 means unconstrained). The SRID comes from
+// the catalog, never from user input, so it is rendered as an integer literal
+// without breaking the compiled-SQL-is-a-pure-function-of-query-shape
+// invariant. The SQL text depends only on f and srid.
 //
-//   - Bare WKT is tagged with srid.
+//   - Bare WKT is tagged with srid on geometry (it stays SRID 0 when srid
+//     is 0) and with 4326 on geography.
 //   - EWKT keeps its own SRID.
-//   - GeoJSON is WGS84 (or its explicit CRS member); when that differs from
-//     srid on a geometry column it is reprojected with ST_Transform.
+//   - GeoJSON is WGS84, or the SRID named by its crs member ("EPSG:n" or
+//     "urn:ogc:def:crs:EPSG::n"), which PostGIS resolves through
+//     spatial_ref_sys; on a geometry column with srid > 0 it is reprojected
+//     to srid with ST_Transform (a no-op when it is already in srid).
 //
-// Geography columns are always 4326, so no reprojection is applied to them.
+// Geography values are cast without reprojection.
 func ParseFor(v any, f Flavour, srid int) (Value, error) {
-	val, err := parse(v, f)
-	if err != nil || srid <= 0 {
-		return val, err
+	if !f.Spatial() {
+		return Value{}, fmt.Errorf("postgis: not a spatial type")
 	}
-	switch val.ctor {
-	case "ST_GeomFromEWKT":
-		if val.SRID == 0 && !val.hasSRID {
-			val.SRID = srid
-		}
-	case "ST_GeomFromGeoJSON":
-		if f == Geometry && val.SRID != srid {
-			val.TransformSRID = srid
-		}
+	srid = max(srid, 0)
+	var (
+		val Value
+		err error
+	)
+	switch in := v.(type) {
+	case string:
+		val, err = parseWKT(in, f, srid)
+	case map[string]any:
+		val, err = parseGeoJSON(in, f)
+	default:
+		return Value{}, fmt.Errorf("spatial value must be a GeoJSON object or a WKT string")
+	}
+	if err != nil {
+		return Value{}, err
+	}
+	if f == Geometry && srid > 0 {
+		val.TransformSRID = srid
 	}
 	return val, nil
 }
 
-func parse(v any, f Flavour) (Value, error) {
-	if !f.Spatial() {
-		return Value{}, fmt.Errorf("postgis: not a spatial type")
-	}
-	switch in := v.(type) {
-	case string:
-		return parseWKT(in, f)
-	case map[string]any:
-		return parseGeoJSON(in, f)
-	default:
-		return Value{}, fmt.Errorf("spatial value must be a GeoJSON object or a WKT string")
-	}
-}
-
 // parseWKT validates a WKT/EWKT string well enough to reject obvious garbage
-// and reports whether it already carries an SRID.
-func parseWKT(s string, f Flavour) (Value, error) {
+// and rewrites bare WKT as EWKT tagged with the SRID it should carry.
+func parseWKT(s string, f Flavour, srid int) (Value, error) {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
 		return Value{}, fmt.Errorf("spatial value must not be empty")
 	}
-	body := trimmed
-	hasSRID := false
-	if rest, ok := cutEWKTPrefix(trimmed); ok {
-		body = rest
-		hasSRID = true
-	}
+	body, own, hasSRID := cutEWKTPrefix(trimmed)
 	if !looksLikeWKT(body) {
 		return Value{}, fmt.Errorf("spatial value %q is not valid WKT", clip(s))
 	}
-	val := Value{Param: trimmed, ctor: "ST_GeomFromEWKT", Flavour: f, hasSRID: hasSRID}
-	if !hasSRID && f == Geography {
-		// Bare WKT has SRID 0; geography requires a real CRS.
-		val.SRID = defaultGeoJSONSRID
+	if hasSRID {
+		return Value{Param: trimmed, Flavour: f, SRID: own}, nil
 	}
-	return val, nil
+	if f == Geography {
+		// Bare WKT has SRID 0; geography requires a real CRS.
+		srid = defaultGeoJSONSRID
+	}
+	if srid == 0 {
+		return Value{Param: body, Flavour: f}, nil
+	}
+	return Value{Param: "SRID=" + strconv.Itoa(srid) + ";" + body, Flavour: f, SRID: srid}, nil
 }
 
-// cutEWKTPrefix strips a leading "SRID=<n>;" prefix, reporting whether one was
-// present and well-formed.
-func cutEWKTPrefix(s string) (string, bool) {
+// cutEWKTPrefix strips a leading "SRID=<n>;" prefix, reporting the SRID and
+// whether a well-formed prefix was present.
+func cutEWKTPrefix(s string) (string, int, bool) {
 	if len(s) < 5 || !strings.EqualFold(s[:5], "SRID=") {
-		return s, false
+		return s, 0, false
 	}
 	semi := strings.IndexByte(s, ';')
 	if semi < 0 {
-		return s, false
+		return s, 0, false
 	}
 	digits := s[5:semi]
 	if digits == "" {
-		return s, false
+		return s, 0, false
 	}
 	for _, r := range digits {
 		if r < '0' || r > '9' {
-			return s, false
+			return s, 0, false
 		}
 	}
-	return strings.TrimSpace(s[semi+1:]), true
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return s, 0, false
+	}
+	return strings.TrimSpace(s[semi+1:]), n, true
 }
 
 // wktTypes is the set of geometry keywords a WKT body may start with.
@@ -284,26 +293,36 @@ var geoJSONTypes = map[string]bool{
 // parameter fed to ST_GeomFromGeoJSON.
 //
 // Feature and FeatureCollection are unwrapped because clients routinely paste
-// them straight from a map library, and ST_GeomFromGeoJSON rejects both.
+// them straight from a map library, and ST_GeomFromGeoJSON rejects both. The
+// top-level crs member is moved onto the unwrapped geometry in the
+// {"type":"name"} form ST_GeomFromGeoJSON honours, and dropped when it names
+// the default 4326 (or cannot be read, in which case 4326 applies).
 func parseGeoJSON(m map[string]any, f Flavour) (Value, error) {
 	geom, err := unwrapGeoJSON(m, 0)
 	if err != nil {
 		return Value{}, err
 	}
-	b, err := json.Marshal(geom)
+	srid := defaultGeoJSONSRID
+	if n, ok := explicitSRID(m); ok {
+		srid = n
+	}
+	out := make(map[string]any, len(geom)+1)
+	for k, v := range geom {
+		if k != "crs" {
+			out[k] = v
+		}
+	}
+	if srid != defaultGeoJSONSRID {
+		out["crs"] = map[string]any{
+			"type":       "name",
+			"properties": map[string]any{"name": "EPSG:" + strconv.Itoa(srid)},
+		}
+	}
+	b, err := json.Marshal(out)
 	if err != nil {
 		return Value{}, fmt.Errorf("spatial value is not encodable as GeoJSON")
 	}
-	val := Value{
-		Param:   string(b),
-		ctor:    "ST_GeomFromGeoJSON",
-		Flavour: f,
-		SRID:    defaultGeoJSONSRID,
-	}
-	if srid, ok := explicitSRID(m); ok {
-		val.SRID = srid
-	}
-	return val, nil
+	return Value{Param: string(b), Flavour: f, SRID: srid}, nil
 }
 
 // maxUnwrapDepth bounds Feature/FeatureCollection nesting so a hostile document
