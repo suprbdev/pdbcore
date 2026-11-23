@@ -17,7 +17,11 @@ type ConnAcquirer interface {
 	Acquire(ctx context.Context) (*pgxpool.Conn, error)
 }
 
-// Stmt is one statement of a [QueryTx] transaction.
+// Stmt is one statement of a [QueryTx] transaction. SQL must be a single
+// statement without transaction control (BEGIN, START, COMMIT, END,
+// ROLLBACK, ABORT, SAVEPOINT, RELEASE): QueryTx rejects one that starts
+// with such a keyword, and anything that ended the transaction early would
+// run the remaining statements as the connection's login role.
 type Stmt struct {
 	SQL  string
 	Args []any
@@ -65,14 +69,19 @@ var ErrTxStillOpen = errors.New("pgexec: transaction still open after the batch"
 // opts.MaxRetries times, so Scan may run more than once per statement and
 // must reset any state it fills.
 //
-// Statements must not contain transaction control (BEGIN, COMMIT,
-// ROLLBACK, SAVEPOINT): ending the transaction early would run the
-// remaining statements as the connection's login role. If a transaction is
-// still open after the batch, QueryTx rolls it back and returns
+// Statements must not contain transaction control (see [Stmt]). A batch
+// with a statement starting with CALL or DO always gets an explicit BEGIN
+// … COMMIT, because a procedure or DO block that COMMITs would otherwise
+// end the implicit transaction and the identity with it; inside the
+// explicit block such a COMMIT fails instead. If a transaction is still
+// open after the batch, QueryTx rolls it back and returns
 // [ErrTxStillOpen].
 func QueryTx(ctx context.Context, db ConnAcquirer, opts TxOptions, id Identity, stmts ...Stmt) error {
 	p, err := newBatchPlan(opts, id)
 	if err != nil {
+		return err
+	}
+	if err := p.checkStmts(stmts); err != nil {
 		return err
 	}
 	log := opts.Log
@@ -113,7 +122,10 @@ func newBatchPlan(opts TxOptions, id Identity) (*batchPlan, error) {
 	if !opts.RLS {
 		return p, nil
 	}
-	names, values := claimSettings(id)
+	names, values, err := claimSettings(id)
+	if err != nil {
+		return nil, err
+	}
 	switch {
 	case id.Role != "":
 		if !ValidRole(id.Role) {
@@ -127,6 +139,22 @@ func newBatchPlan(opts TxOptions, id Identity) (*batchPlan, error) {
 		p.identity, p.identityArgs = claimsSQL, []any{names, values}
 	}
 	return p, nil
+}
+
+// checkStmts rejects transaction control and switches an implicit plan to
+// an explicit BEGIN ... COMMIT when a statement is a CALL or DO.
+func (p *batchPlan) checkStmts(stmts []Stmt) error {
+	for _, s := range stmts {
+		switch kw := firstKeyword(s.SQL); kw {
+		case "BEGIN", "START", "COMMIT", "END", "ROLLBACK", "ABORT", "SAVEPOINT", "RELEASE":
+			return fmt.Errorf("pgexec: QueryTx statement must not be transaction control (%s)", kw)
+		case "CALL", "DO":
+			if p.begin == "" {
+				p.begin, p.commitInBatch = "BEGIN", true
+			}
+		}
+	}
+	return nil
 }
 
 func beginSQL(iso pgx.TxIsoLevel) (string, error) {
@@ -221,6 +249,47 @@ func (p *batchPlan) read(br pgx.BatchResults, stmts []Stmt) (err error) {
 		}
 	}
 	return nil
+}
+
+// firstKeyword returns the first SQL word of sql in upper case, skipping
+// whitespace, -- comments and (nested) /* */ comments.
+func firstKeyword(sql string) string {
+	i := 0
+	for i < len(sql) {
+		switch {
+		case sql[i] == ' ' || sql[i] == '\t' || sql[i] == '\n' || sql[i] == '\r' || sql[i] == '\f' || sql[i] == '\v':
+			i++
+		case strings.HasPrefix(sql[i:], "--"):
+			if j := strings.IndexByte(sql[i:], '\n'); j >= 0 {
+				i += j + 1
+			} else {
+				return ""
+			}
+		case strings.HasPrefix(sql[i:], "/*"):
+			depth := 0
+			for i < len(sql) {
+				if strings.HasPrefix(sql[i:], "/*") {
+					depth++
+					i += 2
+				} else if strings.HasPrefix(sql[i:], "*/") {
+					depth--
+					i += 2
+					if depth == 0 {
+						break
+					}
+				} else {
+					i++
+				}
+			}
+		default:
+			j := i
+			for j < len(sql) && (sql[j] == '_' || (sql[j]|0x20 >= 'a' && sql[j]|0x20 <= 'z')) {
+				j++
+			}
+			return strings.ToUpper(sql[i:j])
+		}
+	}
+	return ""
 }
 
 // abandonTx ends a transaction QueryTx could not finish: ROLLBACK, or

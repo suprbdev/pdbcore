@@ -62,6 +62,12 @@ func (w *Watcher) Run(ctx context.Context) error {
 	if !validChannel(w.TriggerName) {
 		return fmt.Errorf("watch: invalid trigger name %q: only letters, digits and underscores are allowed", w.TriggerName)
 	}
+	if len(w.Channel) > maxIdentLen {
+		return fmt.Errorf("watch: channel name %q is longer than %d bytes", w.Channel, maxIdentLen)
+	}
+	if len(w.TriggerName)+len(longestSuffix) > maxIdentLen {
+		return fmt.Errorf("watch: trigger name %q is too long: with the %q suffix it must fit in %d bytes", w.TriggerName, longestSuffix, maxIdentLen)
+	}
 	if len(w.Schemas) == 0 {
 		w.Schemas = []string{"public"}
 	}
@@ -96,7 +102,7 @@ func (w *Watcher) installTrigger(ctx context.Context) error {
 	fnName := w.TriggerName + "_notify"
 	fn := fmt.Sprintf(`
 		CREATE OR REPLACE FUNCTION %s() RETURNS event_trigger
-		LANGUAGE plpgsql AS %s;`, quoteIdent(fnName), dollarQuote(notifyBody(w.Channel, w.Schemas)))
+		LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS %s;`, quoteIdent(fnName), dollarQuote(notifyBody(w.Channel, w.Schemas)))
 	if _, err := w.Pool.Exec(ctx, fn); err != nil {
 		return err
 	}
@@ -152,8 +158,8 @@ BEGIN
 		   OR c.schema_name = ANY (%[1]s)
 		   OR (c.command_tag LIKE 'ALTER %%'
 		       AND c.object_type IN ('table', 'view', 'materialized view', 'foreign table', 'type', 'domain', 'function', 'procedure')
-		       AND c.schema_name NOT LIKE 'pg\_temp%%'
-		       AND c.schema_name NOT LIKE 'pg\_toast%%')) THEN
+		       AND c.schema_name NOT LIKE E'pg\\_temp%%'
+		       AND c.schema_name NOT LIKE E'pg\\_toast%%')) THEN
 		RETURN;
 	END IF;
 	PERFORM pg_notify(%[2]s, tg_tag);
@@ -233,6 +239,13 @@ func (w *Watcher) reintrospect(ctx context.Context) {
 	w.Log.Info("watch: schema changed, rebuilding")
 	w.OnChange(cat)
 }
+
+// maxIdentLen is PostgreSQL's identifier limit (NAMEDATALEN - 1); longer
+// names are silently truncated, which could make two triggers collide.
+const maxIdentLen = 63
+
+// longestSuffix is the longest suffix installTrigger appends to TriggerName.
+const longestSuffix = "_notify"
 
 func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`

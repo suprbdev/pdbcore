@@ -56,6 +56,27 @@ func TestBatchPlanShapes(t *testing.T) {
 	}
 }
 
+func TestBatchPlanCallAndDoForceExplicit(t *testing.T) {
+	for _, sql := range []string{"CALL p()", "  /* x */ do $$ BEGIN END $$"} {
+		p, err := newBatchPlan(TxOptions{RLS: true}, Identity{Role: "anonymous"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stmts := []Stmt{{SQL: "SELECT 1"}, {SQL: sql}}
+		if err := p.checkStmts(stmts); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"BEGIN", identitySQL, "SELECT 1", sql, "COMMIT"}
+		if got := queued(p.batch(stmts)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%q: batch %q, want %q", sql, got, want)
+		}
+	}
+	p, _ := newBatchPlan(TxOptions{RLS: true, Isolation: pgx.Serializable}, Identity{Role: "anonymous"})
+	if err := p.checkStmts([]Stmt{{SQL: "CALL p()"}}); err != nil || p.begin != "BEGIN ISOLATION LEVEL SERIALIZABLE" {
+		t.Fatalf("explicit plan changed: begin=%q err=%v", p.begin, err)
+	}
+}
+
 func TestBatchPlanIdentityArgs(t *testing.T) {
 	p, err := newBatchPlan(TxOptions{RLS: true}, Identity{
 		Role:         "app_user",
@@ -100,8 +121,42 @@ func (n noAcquire) Acquire(context.Context) (*pgxpool.Conn, error) {
 }
 
 func TestQueryTxValidatesBeforeAcquiring(t *testing.T) {
-	err := QueryTx(context.Background(), noAcquire{t}, TxOptions{RLS: true}, Identity{Role: "app;user"}, Stmt{SQL: "SELECT 1"})
-	if err == nil || err.Error() != `invalid role "app;user"` {
-		t.Fatalf("err = %v", err)
+	cases := []struct {
+		id   Identity
+		sql  string
+		want string
+	}{
+		{Identity{Role: "app;user"}, "SELECT 1", `invalid role "app;user"`},
+		{Identity{Role: "none"}, "SELECT 1", `invalid role "none"`},
+		{Identity{Role: "pg_write_all_data"}, "SELECT 1", `invalid role "pg_write_all_data"`},
+		{Identity{Role: "anonymous", ClaimsPrefix: "pg_stat_statements"}, "SELECT 1", "invalid claims prefix"},
+		{Identity{Role: "anonymous"}, "COMMIT", "pgexec: QueryTx statement must not be transaction control (COMMIT)"},
+		{Identity{Role: "anonymous"}, " -- c\n/* a /* nested */ */ rollback", "pgexec: QueryTx statement must not be transaction control (ROLLBACK)"},
+		{Identity{Role: "anonymous"}, "start transaction", "pgexec: QueryTx statement must not be transaction control (START)"},
+	}
+	for _, tc := range cases {
+		err := QueryTx(context.Background(), noAcquire{t}, TxOptions{RLS: true}, tc.id, Stmt{SQL: "SELECT 1"}, Stmt{SQL: tc.sql})
+		if err == nil || !strings.HasPrefix(err.Error(), tc.want) {
+			t.Fatalf("%+v %q: err = %v, want %q", tc.id, tc.sql, err, tc.want)
+		}
+	}
+}
+
+func TestFirstKeyword(t *testing.T) {
+	cases := map[string]string{
+		"SELECT 1":                      "SELECT",
+		"  call p()":                    "CALL",
+		"\n\t-- x\nDo $$ BEGIN END $$":  "DO",
+		"/* a /* b */ c */ CALL p()":    "CALL",
+		"/* unterminated":               "",
+		"-- only a comment":             "",
+		"":                              "",
+		"WITH x AS (SELECT 1) SELECT 1": "WITH",
+		"(SELECT 1)":                    "",
+	}
+	for in, want := range cases {
+		if got := firstKeyword(in); got != want {
+			t.Errorf("firstKeyword(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

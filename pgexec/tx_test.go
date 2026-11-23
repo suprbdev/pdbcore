@@ -158,6 +158,26 @@ func TestRunTxInvalidRole(t *testing.T) {
 	}
 }
 
+func TestRunTxRejectsRoleNoneAndReservedPrefix(t *testing.T) {
+	for _, id := range []Identity{
+		{Role: "none"},
+		{Role: "pg_read_all_data"},
+		{Role: "app_user", Claims: map[string]any{"variable_conflict": "use_column"}, ClaimsPrefix: "plpgsql"},
+	} {
+		db := &fakeDB{}
+		err := RunTx(context.Background(), db, TxOptions{RLS: true}, id, func(Querier) error {
+			t.Fatalf("fn must not run for %+v", id)
+			return nil
+		})
+		if err == nil || !strings.HasPrefix(err.Error(), "invalid ") {
+			t.Fatalf("%+v: err = %v", id, err)
+		}
+		if len(db.txs[0].stmts) != 0 || !db.txs[0].rolled {
+			t.Fatalf("%+v: stmts=%q rolled=%v, want no statement and a rollback", id, db.txs[0].stmts, db.txs[0].rolled)
+		}
+	}
+}
+
 func TestRunTxRollsBackOnFnErrorUnwrapped(t *testing.T) {
 	db := &fakeDB{}
 	sentinel := errors.New("mine")

@@ -225,6 +225,13 @@ func TestInstallTriggerUpgradesOldInstall(t *testing.T) {
 	if !strings.Contains(src, "pg_event_trigger_ddl_commands") {
 		t.Fatalf("function body not replaced: %s", src)
 	}
+	var config []string
+	if err := pool.QueryRow(ctx, "SELECT proconfig FROM pg_proc WHERE proname = $1", name+"_notify").Scan(&config); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(config, ",") != "search_path=pg_catalog, pg_temp" {
+		t.Fatalf("proconfig = %q, want a pinned search_path", config)
+	}
 	rows, err := pool.Query(ctx, `SELECT evtname || ':' || evtevent FROM pg_event_trigger
 		WHERE evtfoid = $1::regproc ORDER BY evtname`, name+"_notify")
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -348,17 +349,21 @@ func TestQueryTxRetryProbe(t *testing.T) {
 }
 
 // TestQueryTxRejectsOpenTransaction checks a statement that opens a
-// transaction cannot carry the identity past the batch.
+// transaction cannot carry the identity past the batch: a leading BEGIN is
+// rejected before anything is sent, and one hidden behind another
+// statement (possible with the simple protocol) is rolled back.
 func TestQueryTxRejectsOpenTransaction(t *testing.T) {
 	for _, tm := range txModes {
 		t.Run(tm.name, func(t *testing.T) {
-			pool := onePool(t, "")
-			err := pgexec.QueryTx(context.Background(), pool, tm.opts, pgexec.Identity{Role: "anonymous"},
-				pgexec.Stmt{SQL: "BEGIN"})
-			if tm.opts.Isolation == "" && !tm.opts.ScanBeforeCommit {
-				if !errors.Is(err, pgexec.ErrTxStillOpen) {
-					t.Fatalf("err = %v, want ErrTxStillOpen", err)
-				}
+			pool := onePool(t, "simple_protocol")
+			ctx := context.Background()
+			err := pgexec.QueryTx(ctx, pool, tm.opts, pgexec.Identity{Role: "anonymous"}, pgexec.Stmt{SQL: "BEGIN"})
+			if err == nil || !strings.Contains(err.Error(), "must not be transaction control") {
+				t.Fatalf("leading BEGIN: err = %v", err)
+			}
+			err = pgexec.QueryTx(ctx, pool, tm.opts, pgexec.Identity{Role: "anonymous"}, pgexec.Stmt{SQL: "SELECT 1; BEGIN"})
+			if tm.opts.Isolation == "" && !tm.opts.ScanBeforeCommit && !errors.Is(err, pgexec.ErrTxStillOpen) {
+				t.Fatalf("hidden BEGIN: err = %v, want ErrTxStillOpen", err)
 			}
 			assertClean(t, pool)
 		})
@@ -384,4 +389,85 @@ func TestRunTxClaimsOneStatement(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertClean(t, pool)
+}
+
+// TestQueryTxCallAndDoStayAtomic shows a procedure or DO block that
+// COMMITs ends the implicit pipeline transaction (and with it the
+// identity), then checks QueryTx gives such batches an explicit block in
+// which the COMMIT fails instead.
+func TestQueryTxCallAndDoStayAtomic(t *testing.T) {
+	pool := onePool(t, "")
+	ctx := context.Background()
+	const schema = "pgexec_call_test"
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE") })
+	for _, s := range []string{
+		"DROP SCHEMA IF EXISTS " + schema + " CASCADE",
+		"CREATE SCHEMA " + schema,
+		"GRANT USAGE ON SCHEMA " + schema + " TO anonymous",
+		"CREATE PROCEDURE " + schema + ".commits() LANGUAGE plpgsql AS $$ BEGIN COMMIT; END $$",
+		"GRANT EXECUTE ON PROCEDURE " + schema + ".commits() TO anonymous",
+	} {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	nonAtomic := []string{
+		"CALL " + schema + ".commits()",
+		"DO $$ BEGIN COMMIT; END $$",
+	}
+	for _, sql := range nonAtomic {
+		c, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := &pgx.Batch{}
+		b.Queue("SELECT set_config('role', 'anonymous', true)")
+		b.Queue(sql)
+		var after string
+		b.Queue("SELECT current_user").QueryRow(func(r pgx.Row) error { return r.Scan(&after) })
+		err = c.Conn().SendBatch(ctx, b).Close()
+		c.Release()
+		switch {
+		case err != nil:
+			if cl := pgexec.Classify(err, pgexec.Prod); cl.SQLState != "2D000" {
+				t.Fatalf("raw pipeline %q: %v", sql, err)
+			}
+			t.Logf("this server keeps %q atomic in a pipeline", sql)
+		case after == "anonymous":
+			t.Fatalf("raw pipeline %q: COMMIT did not end the transaction", sql)
+		default:
+			t.Logf("raw pipeline %q: the next statement ran as %q", sql, after)
+		}
+
+		var user string
+		err = pgexec.QueryTx(ctx, pool, pgexec.TxOptions{RLS: true}, pgexec.Identity{Role: "anonymous"},
+			pgexec.Stmt{SQL: sql},
+			pgexec.Stmt{SQL: "SELECT current_user", Scan: func(r pgx.Row) error { return r.Scan(&user) }})
+		if c := pgexec.Classify(err, pgexec.Prod); c.SQLState != "2D000" {
+			t.Fatalf("%q in QueryTx: err = %v, want 2D000 invalid transaction termination", sql, err)
+		}
+		if user != "" {
+			t.Fatalf("%q: a statement after the COMMIT ran as %q", sql, user)
+		}
+		assertClean(t, pool)
+	}
+}
+
+func TestIdentityRejectsRoleNone(t *testing.T) {
+	pool := onePool(t, "")
+	ctx := context.Background()
+	for _, role := range []string{"none", "NONE", "pg_read_all_data"} {
+		id := pgexec.Identity{Role: role}
+		ran := false
+		err := pgexec.RunTx(ctx, pool, pgexec.TxOptions{RLS: true}, id, func(pgexec.Querier) error { ran = true; return nil })
+		if err == nil || ran {
+			t.Fatalf("RunTx role %q: err=%v ran=%v", role, err, ran)
+		}
+		err = pgexec.QueryTx(ctx, pool, pgexec.TxOptions{RLS: true}, id,
+			pgexec.Stmt{SQL: "SELECT current_user", Scan: func(pgx.Row) error { ran = true; return nil }})
+		if err == nil || ran {
+			t.Fatalf("QueryTx role %q: err=%v ran=%v", role, err, ran)
+		}
+		assertClean(t, pool)
+	}
 }

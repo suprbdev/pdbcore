@@ -29,3 +29,37 @@ func TestValidRoleAndClaimKey(t *testing.T) {
 		}
 	}
 }
+
+func TestValidRoleRejectsSpecialRoles(t *testing.T) {
+	for _, r := range []string{"none", "NONE", "None", "public", "PUBLIC", "pg_read_all_data", "pg_signal_backend", "PG_monitor", "pg_"} {
+		if ValidRole(r) {
+			t.Errorf("ValidRole(%q) = true, want false", r)
+		}
+		if !ValidClaimKey(r) {
+			t.Errorf("ValidClaimKey(%q) = false; claim keys are not roles", r)
+		}
+	}
+	for _, r := range []string{"nonesuch", "anonymous", "app_pg_user", "publicist"} {
+		if !ValidRole(r) {
+			t.Errorf("ValidRole(%q) = false, want true", r)
+		}
+	}
+}
+
+func TestValidateClaimsPrefix(t *testing.T) {
+	ok := []string{"", "pdbq.claims", "pdbr.claims", "request.jwt.claims", "claims", "_x.y1", "app"}
+	bad := []string{
+		".claims", "claims.", "a..b", "1abc.claims", "a.1b", "a-b.c", "a b", "pdbq.claims;", `a"b`,
+		"plpgsql", "PLPGSQL.x", "pg_stat_statements", "pg_trgm.x", "PG_x", "auto_explain", "postgis.x", "pgaudit", "cron.x", "anon",
+	}
+	for _, p := range ok {
+		if err := ValidateClaimsPrefix(p); err != nil {
+			t.Errorf("ValidateClaimsPrefix(%q) = %v, want nil", p, err)
+		}
+	}
+	for _, p := range bad {
+		if err := ValidateClaimsPrefix(p); err == nil {
+			t.Errorf("ValidateClaimsPrefix(%q) = nil, want an error", p)
+		}
+	}
+}

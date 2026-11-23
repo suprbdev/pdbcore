@@ -39,7 +39,8 @@ type Identity struct {
 	// String values are set verbatim; anything else is JSON-encoded. Keys
 	// failing ValidClaimKey are skipped.
 	Claims map[string]any
-	// ClaimsPrefix defaults to DefaultClaimsPrefix.
+	// ClaimsPrefix defaults to DefaultClaimsPrefix and must pass
+	// ValidateClaimsPrefix.
 	ClaimsPrefix string
 }
 
@@ -107,6 +108,10 @@ func runOnce(ctx context.Context, db TxBeginner, opts TxOptions, id Identity, fn
 // so pooled connections cannot leak request identity across requests once
 // the connection is reused.
 func ApplyIdentity(ctx context.Context, tx Querier, id Identity) error {
+	keys, vals, err := claimSettings(id)
+	if err != nil {
+		return err
+	}
 	if id.Role != "" {
 		if !ValidRole(id.Role) {
 			return fmt.Errorf("invalid role %q", id.Role)
@@ -115,7 +120,6 @@ func ApplyIdentity(ctx context.Context, tx Querier, id Identity) error {
 			return fmt.Errorf("set role: %w", err)
 		}
 	}
-	keys, vals := claimSettings(id)
 	if len(keys) == 0 {
 		return nil
 	}
@@ -140,10 +144,14 @@ const identitySQL = `SELECT set_config('role', $1, true), (SELECT count(set_conf
 // claimSettings returns the set_config names (ClaimsPrefix + "." + key) and
 // values for id.Claims, sorted by name. String values are used verbatim and
 // anything else is JSON-encoded; keys failing [ValidClaimKey] and values
-// that cannot be encoded are skipped.
-func claimSettings(id Identity) (names, values []string) {
+// that cannot be encoded are skipped. A prefix failing
+// [ValidateClaimsPrefix] is an error.
+func claimSettings(id Identity) (names, values []string, err error) {
+	if err := ValidateClaimsPrefix(id.ClaimsPrefix); err != nil {
+		return nil, nil, err
+	}
 	if len(id.Claims) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	prefix := id.ClaimsPrefix
 	if prefix == "" {
@@ -173,7 +181,7 @@ func claimSettings(id Identity) (names, values []string) {
 		names = append(names, prefix+"."+k)
 		values = append(values, val)
 	}
-	return names, values
+	return names, values, nil
 }
 
 // IsSerializationFailure reports whether err carries SQLSTATE 40001

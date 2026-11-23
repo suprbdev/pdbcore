@@ -286,6 +286,20 @@ func TestValidateRejects(t *testing.T) {
 		"trusted proxy": {func() []string {
 			return ValidateRLS(RLS{Auth: Auth{Mode: "none", TrustedProxies: []string{"10.0.0.0/8", "not-an-ip"}}})
 		}, `rls.auth.trusted_proxies: "not-an-ip" is not a valid IP or CIDR block`},
+		"anonymous role none": {func() []string {
+			return ValidateRLS(RLS{Enabled: true, AnonymousRole: "none", Auth: Auth{Mode: "none"}})
+		}, `rls.anonymous_role: "none" is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role`},
+		"default role pg_": {func() []string {
+			return ValidateRLS(RLS{AnonymousRole: "anon", DefaultRole: "pg_read_all_data", Auth: Auth{Mode: "none"}})
+		}, `rls.default_role: "pg_read_all_data" is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role`},
+		"allowed role none": {func() []string {
+			return ValidateRLS(RLS{AnonymousRole: "anon", AllowedRoles: []string{"app_user", "NONE"}, Auth: Auth{Mode: "none"}})
+		}, `rls.allowed_roles: "NONE" is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role`},
+		"claims prefix": {func() []string {
+			return ValidateRLS(RLS{AnonymousRole: "anon", ClaimsPrefix: "plpgsql", Auth: Auth{Mode: "none"}})
+		}, `rls.claims_prefix: invalid claims prefix "plpgsql": "plpgsql" is a server or extension settings namespace`},
+		"watch channel length": {func() []string { return ValidateWatch(Watch{Enabled: true, Channel: strings.Repeat("c", 64)}, "") },
+			`watch.channel: "` + strings.Repeat("c", 64) + `" is longer than 63 bytes`},
 		"isolation": {func() []string { return ValidateTX(TX{Isolation: "chaos"}) },
 			`transactions.isolation: "chaos" invalid`},
 		"max_retries": {func() []string { return ValidateTX(TX{Isolation: "serializable", MaxRetries: -1}) },

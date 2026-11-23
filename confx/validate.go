@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/suprbdev/pdbcore/auth"
+	"github.com/suprbdev/pdbcore/pgexec"
 )
 
 // InvalidConfig joins validation messages into pdbq's error shape, or nil
@@ -27,7 +28,9 @@ func ValidateErrors(e Errors) []string {
 }
 
 // ValidateRLS checks the rls section: auth mode, trusted proxies, JWT
-// secret/JWKS presence, jwt_type shape, and the anonymous role.
+// secret/JWKS presence, jwt_type shape, the anonymous role, the configured
+// role names (pgexec.ValidRole) and claims_prefix
+// (pgexec.ValidateClaimsPrefix).
 func ValidateRLS(c RLS) []string {
 	var errs []string
 	switch c.Auth.Mode {
@@ -51,6 +54,18 @@ func ValidateRLS(c RLS) []string {
 	}
 	if c.Enabled && c.AnonymousRole == "" {
 		errs = append(errs, "rls.anonymous_role is required when rls.enabled: an empty role would run unauthenticated requests as the privileged connection role, bypassing RLS")
+	}
+	roles := []struct{ key, role string }{{"rls.anonymous_role", c.AnonymousRole}, {"rls.default_role", c.DefaultRole}}
+	for _, r := range c.AllowedRoles {
+		roles = append(roles, struct{ key, role string }{"rls.allowed_roles", r})
+	}
+	for _, r := range roles {
+		if r.role != "" && !pgexec.ValidRole(r.role) {
+			errs = append(errs, fmt.Sprintf("%s: %q is not a role requests may assume: use letters, digits and underscores, not none, public or a pg_ role", r.key, r.role))
+		}
+	}
+	if err := pgexec.ValidateClaimsPrefix(c.ClaimsPrefix); err != nil {
+		errs = append(errs, "rls.claims_prefix: "+err.Error())
 	}
 	return errs
 }
@@ -78,6 +93,9 @@ func ValidateWatch(w Watch, cachePath string) []string {
 	}
 	if w.Enabled && !ValidChannelName(w.Channel) {
 		errs = append(errs, fmt.Sprintf("watch.channel: %q invalid: only letters, digits and underscores are allowed", w.Channel))
+	}
+	if w.Enabled && len(w.Channel) > 63 {
+		errs = append(errs, fmt.Sprintf("watch.channel: %q is longer than 63 bytes", w.Channel))
 	}
 	return errs
 }
