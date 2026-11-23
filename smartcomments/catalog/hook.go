@@ -67,10 +67,46 @@ func (h *Hook) TransformCatalog(_ context.Context, c *introspect.Catalog) error 
 		if _, everything := tags.Omits(); everything {
 			continue
 		}
-		functions = append(functions, f)
+		functions = append(functions, h.resolvePolymorphic(c, f))
 	}
 	c.Functions = functions
 	return nil
+}
+
+// resolvePolymorphic applies the @anyelement and @anycompatible tags of a
+// polymorphic function: each names the concrete type its family of
+// pseudo-types resolves to (see [introspect.Catalog.ResolvePolymorphic]).
+// The function's own comment is read, so overloads tag independently. An
+// unusable tag is logged and the function is left polymorphic, which the
+// products skip.
+func (h *Hook) resolvePolymorphic(c *introspect.Catalog, f *introspect.Function) *introspect.Function {
+	families := f.PolymorphicFamilies()
+	if len(families) == 0 {
+		return f
+	}
+	tags, _ := smarttags.Parse(f.Comment)
+	refs := map[introspect.PolyFamily]*introspect.TypeRef{}
+	for _, fam := range []introspect.PolyFamily{introspect.PolyAnyElement, introspect.PolyAnyCompatible} {
+		v := tags.First(string(fam))
+		if v == "" {
+			continue
+		}
+		ref, err := c.ParseTypeName(v, f.Schema)
+		if err != nil {
+			h.log.Warn("smart-comments: @"+string(fam)+" ignored", "function", f.Schema+"."+f.Name, "error", err)
+			return f
+		}
+		refs[fam] = &ref
+	}
+	if len(refs) == 0 {
+		return f
+	}
+	resolved, err := c.ResolvePolymorphic(f, refs[introspect.PolyAnyElement], refs[introspect.PolyAnyCompatible])
+	if err != nil {
+		h.log.Warn("smart-comments: cannot resolve polymorphic function", "function", f.Schema+"."+f.Name, "error", err)
+		return f
+	}
+	return resolved
 }
 
 // applyTableCatalogTags applies the catalog-level tags of one table: mutation

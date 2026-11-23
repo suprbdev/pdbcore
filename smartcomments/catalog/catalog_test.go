@@ -251,3 +251,43 @@ func TestIndexRebuiltPerTransform(t *testing.T) {
 		t.Fatal("index must be rebuilt on every TransformCatalog")
 	}
 }
+
+func TestPolymorphicTagsResolveFunctions(t *testing.T) {
+	cat, _ := run(t, func(c *introspect.Catalog) {
+		c.Functions = append(c.Functions,
+			&introspect.Function{Schema: "public", Name: "bad_tag", Comment: "@anyelement no_such_type",
+				Args:       []introspect.FuncArg{{Name: "v", PGType: "anyelement", TypeSchema: "pg_catalog"}},
+				ReturnType: "int4", ReturnTypeSchema: "pg_catalog"},
+			&introspect.Function{Schema: "public", Name: "wrong_family", Comment: "@anycompatible int",
+				Args:       []introspect.FuncArg{{Name: "v", PGType: "anyelement", TypeSchema: "pg_catalog"}},
+				ReturnType: "int4", ReturnTypeSchema: "pg_catalog"},
+		)
+	})
+	fns := map[string]*introspect.Function{}
+	for _, f := range cat.Functions {
+		fns[f.Name] = f
+	}
+	sig := func(name string) string {
+		f := fns[name]
+		s := ""
+		for _, a := range f.Args {
+			s += a.TypeSchema + "." + a.PGType + ","
+		}
+		return s + "->" + f.ReturnTypeSchema + "." + f.ReturnType
+	}
+	for name, want := range map[string]string{
+		"pick_first":   "pg_catalog.text,pg_catalog.text,->pg_catalog.text",
+		"larger_of":    "pg_catalog.numeric,pg_catalog.numeric,->pg_catalog.numeric",
+		"range_lower":  "pg_catalog.int4range,->pg_catalog.int4",
+		"array_first":  "pg_catalog.anyarray,->pg_catalog.anyelement",
+		"bad_tag":      "pg_catalog.anyelement,->pg_catalog.int4",
+		"wrong_family": "pg_catalog.anyelement,->pg_catalog.int4",
+	} {
+		if got := sig(name); got != want {
+			t.Errorf("%s: %s, want %s", name, got, want)
+		}
+	}
+	if fns["pick_first"].Comment != "@anyelement text" {
+		t.Error("the comment must survive resolution")
+	}
+}
