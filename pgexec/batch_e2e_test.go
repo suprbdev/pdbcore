@@ -471,3 +471,34 @@ func TestIdentityRejectsRoleNone(t *testing.T) {
 		assertClean(t, pool)
 	}
 }
+
+type errObserver struct{ errs []error }
+
+func (o *errObserver) ObserveQuery(_ context.Context, ev pgexec.QueryEvent) {
+	o.errs = append(o.errs, ev.Err)
+}
+
+func TestQueryTxRequestedRollbackIsNotAnError(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	id := pgexec.Identity{Role: "app_user", Claims: map[string]any{"user_id": "1"}}
+	email := fmt.Sprintf("qtx-rb-%d@example.com", time.Now().UnixNano())
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", email) })
+	opts := pgexec.TxOptions{RLS: true, ScanBeforeCommit: true}
+	obs := &errObserver{}
+	opts.Observer = obs
+	err := pgexec.QueryTx(ctx, pool, opts, id, pgexec.Stmt{
+		SQL: "INSERT INTO users (email) VALUES ($1) RETURNING id", Args: []any{email},
+		Scan: func(pgx.Row) error { return pgexec.ErrRollback },
+	})
+	if !errors.Is(err, pgexec.ErrRollback) {
+		t.Fatalf("err = %v, want ErrRollback", err)
+	}
+	if len(obs.errs) != 1 || obs.errs[0] != nil {
+		t.Fatalf("observed errors = %v, want one nil", obs.errs)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM users WHERE email = $1", email).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("rows = %d err=%v, want rolled back", n, err)
+	}
+}

@@ -3,6 +3,7 @@ package pgexec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -82,5 +83,18 @@ func TestObserve(t *testing.T) {
 	ev := obs.events[0]
 	if ev.Op != "query" || ev.Attempt != 0 || !errors.Is(ev.Err, want) || ev.Duration < time.Second {
 		t.Fatalf("event = %+v", ev)
+	}
+}
+
+func TestRunTxRequestedRollbackIsNotAnError(t *testing.T) {
+	obs := &recordingObserver{}
+	err := RunTx(context.Background(), &fakeDB{}, TxOptions{Observer: obs}, Identity{}, func(Querier) error {
+		return fmt.Errorf("dry run: %w", ErrRollback)
+	})
+	if !errors.Is(err, ErrRollback) {
+		t.Fatalf("err = %v, want ErrRollback", err)
+	}
+	if len(obs.events) != 1 || obs.events[0].Err != nil {
+		t.Fatalf("events = %+v, want one event with nil Err", obs.events)
 	}
 }

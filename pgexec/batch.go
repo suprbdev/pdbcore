@@ -40,6 +40,15 @@ type Stmt struct {
 // back.
 var ErrTxStillOpen = errors.New("pgexec: transaction still open after the batch")
 
+// ErrRollback is returned by a [Stmt.Scan] callback, or by the function
+// given to [RunTx], to roll the transaction back on purpose (a violated
+// precondition, a dry run). QueryTx and RunTx return it as-is, so callers
+// can detect it with errors.Is, and report the attempt to the [Observer]
+// with a nil error: a requested rollback is not a database failure. For
+// QueryTx the statements are only undone when [TxOptions.ScanBeforeCommit]
+// is set.
+var ErrRollback = errors.New("pgexec: rollback requested")
+
 // QueryTx runs stmts in one transaction under identity id (when opts.RLS
 // is set) and sends the whole transaction to the server as a single
 // pipelined batch, so it costs one network round trip where [RunTx] costs
