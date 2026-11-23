@@ -313,6 +313,25 @@ func TestCodecs(t *testing.T) {
 			t.Errorf("%s codec output = %s, want %s", tc.v.Name, got, tc.out)
 		}
 	}
+	jsonTests := []struct {
+		v    contrib.Vocabulary
+		want string
+	}{
+		{contrib.Hstore().Bind("ext"), `"ext".hstore_to_json(t.c)`},
+		{contrib.Citext().Bind("ext"), "t.c"},
+		{m(contrib.Range("int4range")), contrib.RangeOutputJSONSQL("t.c")},
+		{m(contrib.Multirange("int4multirange")), contrib.MultirangeOutputJSONSQL("t.c")},
+	}
+	for _, tc := range jsonTests {
+		if got := tc.v.Codec.OutputJSONSQL("t.c"); got != tc.want {
+			t.Errorf("%s codec JSON output = %s, want %s", tc.v.Name, got, tc.want)
+		}
+	}
+	for _, got := range []string{contrib.RangeOutputJSONSQL("t.c"), contrib.MultirangeOutputJSONSQL("t.c")} {
+		if strings.Contains(got, "jsonb") {
+			t.Errorf("JSON output mentions jsonb: %s", got)
+		}
+	}
 	if contrib.Trgm("text").Codec != nil || contrib.TextSearch("text").Codec != nil {
 		t.Error("text vocabularies must not own a codec")
 	}

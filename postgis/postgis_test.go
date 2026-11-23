@@ -700,3 +700,20 @@ func TestParseDoesNotMutateInput(t *testing.T) {
 		t.Errorf("input mutated: %v", in)
 	}
 }
+
+func TestOutputJSONSQL(t *testing.T) {
+	ref := `"t"."geom"`
+	if got, want := OutputJSONSQL(ref), `ST_AsGeoJSON("t"."geom")::json`; got != want {
+		t.Errorf("OutputJSONSQL = %s, want %s", got, want)
+	}
+	for _, d := range Deriveds {
+		got, jsonb := d.JSONSQL(ref, Geometry), d.SQL(ref, Geometry)
+		want := strings.ReplaceAll(jsonb, "::jsonb", "::json")
+		if got != want {
+			t.Errorf("%s JSONSQL = %s, want %s", d.Suffix, got, want)
+		}
+		if !d.GeoJSON && strings.Contains(got, "json") {
+			t.Errorf("%s is not geometry valued but JSONSQL mentions json: %s", d.Suffix, got)
+		}
+	}
+}

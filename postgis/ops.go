@@ -292,6 +292,15 @@ func OutputSQL(ref string) string {
 	return "ST_AsGeoJSON(" + ref + ")::jsonb"
 }
 
+// OutputJSONSQL is [OutputSQL] producing json instead of jsonb. It skips the
+// jsonb parse and re-serialisation, so it is the cheaper choice when the value
+// is only embedded in a response (json_build_object, json_agg) and never
+// compared, grouped or aggregated with jsonb functions. Like [OutputSQL] it
+// evaluates ref once and yields NULL for NULL.
+func OutputJSONSQL(ref string) string {
+	return "ST_AsGeoJSON(" + ref + ")::json"
+}
+
 // Derived is one computed spatial accessor exposed as a sibling field of a
 // spatial column (e.g. `location` -> `locationArea`).
 type Derived struct {
@@ -635,6 +644,16 @@ func (d Derived) SQL(ref string, f Flavour) string {
 	expr := d.sql(ref, f)
 	if d.GeoJSON {
 		return OutputSQL(expr)
+	}
+	return expr
+}
+
+// JSONSQL is [Derived.SQL] with geometry valued results rendered as json
+// rather than jsonb (see [OutputJSONSQL]); other accessors are unchanged.
+func (d Derived) JSONSQL(ref string, f Flavour) string {
+	expr := d.sql(ref, f)
+	if d.GeoJSON {
+		return OutputJSONSQL(expr)
 	}
 	return expr
 }

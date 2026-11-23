@@ -333,3 +333,34 @@ func TestParseForExecutes(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestJSONOutputMatchesJSONB checks the json variants decode to the same
+// value as the jsonb ones for every accessor over every sample.
+func TestJSONOutputMatchesJSONB(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	for _, f := range []postgis.Flavour{postgis.Geometry, postgis.Geography} {
+		for _, s := range samples {
+			if f == postgis.Geography && !s.geography {
+				continue
+			}
+			for _, d := range postgis.Deriveds {
+				from := " FROM (SELECT " + column(f) + " AS g) AS t"
+				var a, b any
+				if err := conn.QueryRow(ctx, "SELECT "+d.SQL("t.g", f)+from, s.wkt).Scan(&a); err != nil {
+					t.Fatalf("%s %s on %s: %v", f, d.Suffix, s.wkt, err)
+				}
+				if err := conn.QueryRow(ctx, "SELECT "+d.JSONSQL("t.g", f)+from, s.wkt).Scan(&b); err != nil {
+					t.Fatalf("%s %s json on %s: %v", f, d.Suffix, s.wkt, err)
+				}
+				if fmt.Sprint(a) != fmt.Sprint(b) {
+					t.Errorf("%s %s on %s: jsonb %v, json %v", f, d.Suffix, s.wkt, a, b)
+				}
+			}
+		}
+	}
+	var got any
+	if err := conn.QueryRow(ctx, "SELECT "+postgis.OutputJSONSQL("NULL::geometry")).Scan(&got); err != nil || got != nil {
+		t.Errorf("NULL geometry = %v, %v; want NULL", got, err)
+	}
+}

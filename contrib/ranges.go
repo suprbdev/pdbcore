@@ -412,9 +412,10 @@ func (rt rangeType) multiConstructor(a []string) string {
 		atom(a[0]) + "::" + elem + "[], " + atom(a[1]) + "::" + elem + "[], " + atom(a[2]) + "::text[]) AS __r(__l, __u, __b)))"
 }
 
-// rangeJSON renders a non-null range expression as the RangeValue object.
-func rangeJSON(r string) string {
-	return "jsonb_build_object('start', lower(" + r + "), 'end', upper(" + r + "), 'startInclusive', lower_inc(" + r +
+// rangeJSON renders a non-null range expression as the RangeValue object,
+// built with fn ("jsonb_build_object" or "json_build_object").
+func rangeJSON(fn, r string) string {
+	return fn + "('start', lower(" + r + "), 'end', upper(" + r + "), 'startInclusive', lower_inc(" + r +
 		"), 'endInclusive', upper_inc(" + r + "), 'isEmpty', isempty(" + r + "))"
 }
 
@@ -422,15 +423,27 @@ func rangeJSON(r string) string {
 // startInclusive, endInclusive, isEmpty}; start/end are null when
 // unbounded or empty. NULL stays NULL and ref is evaluated once.
 func RangeOutputSQL(ref string) string {
-	return "(SELECT " + rangeJSON("__r") + " FROM (SELECT " + ref + " AS __r) AS __v WHERE __r IS NOT NULL)"
+	return "(SELECT " + rangeJSON("jsonb_build_object", "__r") + " FROM (SELECT " + ref + " AS __r) AS __v WHERE __r IS NOT NULL)"
 }
 
 // MultirangeOutputSQL renders a multirange reference as a jsonb array of
 // range objects (see [RangeOutputSQL]) in range order; the empty multirange
 // is []. NULL stays NULL and ref is evaluated once.
 func MultirangeOutputSQL(ref string) string {
-	return "(SELECT CASE WHEN __m IS NULL THEN NULL ELSE COALESCE((SELECT jsonb_agg(" + rangeJSON("__e") +
+	return "(SELECT CASE WHEN __m IS NULL THEN NULL ELSE COALESCE((SELECT jsonb_agg(" + rangeJSON("jsonb_build_object", "__e") +
 		" ORDER BY __e) FROM unnest(__m) AS __u(__e)), '[]'::jsonb) END FROM (SELECT " + ref + " AS __m) AS __v)"
+}
+
+// RangeOutputJSONSQL is [RangeOutputSQL] producing json instead of jsonb.
+func RangeOutputJSONSQL(ref string) string {
+	return "(SELECT " + rangeJSON("json_build_object", "__r") + " FROM (SELECT " + ref + " AS __r) AS __v WHERE __r IS NOT NULL)"
+}
+
+// MultirangeOutputJSONSQL is [MultirangeOutputSQL] producing json instead of
+// jsonb.
+func MultirangeOutputJSONSQL(ref string) string {
+	return "(SELECT CASE WHEN __m IS NULL THEN NULL ELSE COALESCE((SELECT json_agg(" + rangeJSON("json_build_object", "__e") +
+		" ORDER BY __e) FROM unnest(__m) AS __u(__e)), '[]'::json) END FROM (SELECT " + ref + " AS __m) AS __v)"
 }
 
 func rangeAccessors(elem string) []Accessor {
@@ -503,10 +516,11 @@ func rangeVocab(rt rangeType) Vocabulary {
 		Ops:       rangeOps(rt, idx),
 		Accessors: rangeAccessors(rt.elem),
 		Codec: &Codec{
-			Arg:    ArgRange,
-			params: rt.parse,
-			sql:    func(_ qual, a []string) string { return rt.sql(a) },
-			output: func(_ qual, ref string) string { return RangeOutputSQL(ref) },
+			Arg:        ArgRange,
+			params:     rt.parse,
+			sql:        func(_ qual, a []string) string { return rt.sql(a) },
+			output:     func(_ qual, ref string) string { return RangeOutputSQL(ref) },
+			outputJSON: func(_ qual, ref string) string { return RangeOutputJSONSQL(ref) },
 		},
 	}
 }
@@ -541,10 +555,11 @@ func multirangeVocab(rt rangeType) Vocabulary {
 		Ops:       rangeOps(rt, idx),
 		Accessors: rangeAccessors(rt.elem),
 		Codec: &Codec{
-			Arg:    ArgMultirange,
-			params: rt.parseMulti,
-			sql:    func(_ qual, a []string) string { return rt.multiConstructor(a) },
-			output: func(_ qual, ref string) string { return MultirangeOutputSQL(ref) },
+			Arg:        ArgMultirange,
+			params:     rt.parseMulti,
+			sql:        func(_ qual, a []string) string { return rt.multiConstructor(a) },
+			output:     func(_ qual, ref string) string { return MultirangeOutputSQL(ref) },
+			outputJSON: func(_ qual, ref string) string { return MultirangeOutputJSONSQL(ref) },
 		},
 	}
 }

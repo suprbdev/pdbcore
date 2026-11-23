@@ -14,6 +14,13 @@ func HstoreOutputSQL(schema, ref string) string {
 	return qual{schema: schema}.fn("hstore_to_jsonb") + "(" + ref + ")"
 }
 
+// HstoreOutputJSONSQL is [HstoreOutputSQL] producing json (hstore_to_json,
+// strict, with the same string-or-null values). Cheaper when the value is only
+// embedded in a response.
+func HstoreOutputJSONSQL(schema, ref string) string {
+	return qual{schema: schema}.fn("hstore_to_json") + "(" + ref + ")"
+}
+
 // Hstore is the vocabulary of hstore columns. Values are JSON objects of
 // string keys to string or null values on the way in and out.
 func Hstore() Vocabulary {
@@ -58,9 +65,10 @@ func Hstore() Vocabulary {
 			},
 		},
 		Codec: &Codec{
-			Arg:    ArgHstore,
-			sql:    func(q qual, a []string) string { return HstoreSQL(q.schema, a[0]) },
-			output: func(q qual, ref string) string { return HstoreOutputSQL(q.schema, ref) },
+			Arg:        ArgHstore,
+			sql:        func(q qual, a []string) string { return HstoreSQL(q.schema, a[0]) },
+			output:     func(q qual, ref string) string { return HstoreOutputSQL(q.schema, ref) },
+			outputJSON: func(q qual, ref string) string { return HstoreOutputJSONSQL(q.schema, ref) },
 		},
 	}
 }
