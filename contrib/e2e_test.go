@@ -56,6 +56,8 @@ func openLive(t *testing.T) *liveDB {
 		d.exec(`CREATE EXTENSION IF NOT EXISTS ` + ext + ` SCHEMA ` + quote(extSchema))
 	}
 	d.exec(`SET LOCAL search_path TO ` + dataSchema)
+	d.exec(`CREATE TYPE floatrange AS RANGE (subtype = float8)`)
+	d.exec(`CREATE TYPE "Span Range" AS RANGE (subtype = int4, multirange_type_name = "Span Multi")`)
 	cat, err := introspect.Introspect(ctx, tx, []string{dataSchema})
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +155,10 @@ var sampleColumns = []struct {
 	{"tsm", "tsmultirange", []any{[]any{map[string]any{"start": "2024-01-01"}}, nil, "{}"}},
 	{"tstzm", "tstzmultirange", []any{"{[2024-01-01T00:00:00Z,)}", nil, "{}"}},
 	{"dm", "datemultirange", []any{"{[2024-01-01,2024-02-01)}", nil, "{}"}},
+	{"fr", "floatrange", []any{map[string]any{"start": 1.5, "end": 2}, nil, "empty"}},
+	{"frm", "floatmultirange", []any{"{[1,2.5), [3,)}", nil, "{}"}},
+	{"span", `"Span Range"`, []any{"[1,10)", nil, "empty"}},
+	{"spanm", `"Span Multi"`, []any{[]any{map[string]any{"start": 1, "end": 3}}, nil, "{}"}},
 	{"addr", "inet", []any{"10.1.2.3", nil, "::1"}},
 	{"net", "cidr", []any{"10.0.0.0/8", nil, "2001:db8::/32"}},
 }
@@ -243,6 +249,7 @@ func operand(v contrib.Vocabulary, op contrib.Op) any {
 		el := map[string]any{
 			"int4range": 5, "int8range": 5, "numrange": "2.5", "tsrange": "2024-06-01",
 			"tstzrange": "2024-06-01T00:00:00Z", "daterange": "2024-06-01",
+			"floatrange": 2.5, "Span Range": 5, "Span Multi": 5,
 		}[strings.Replace(v.Type, "multirange", "range", 1)]
 		if op.Arg == contrib.ArgElement {
 			return el
@@ -599,6 +606,11 @@ func TestCodecRoundTripLive(t *testing.T) {
 		{"int4multirange", []any{}, `[]`},
 		{"nummultirange", []any{"empty", map[string]any{"start": 1}}, ""},
 		{"tstzmultirange", "{}", `[]`},
+		{"floatrange", map[string]any{"start": 1.5, "end": 2.25, "endInclusive": true}, `{"end": 2.25, "start": 1.5, "isEmpty": false, "endInclusive": true, "startInclusive": true}`},
+		{"floatrange", "empty", `{"end": null, "start": null, "isEmpty": true, "endInclusive": false, "startInclusive": false}`},
+		{"floatmultirange", []any{"[3,4)", map[string]any{"start": 1}}, `[{"end": null, "start": 1, "isEmpty": false, "endInclusive": false, "startInclusive": true}]`},
+		{dataSchema + `."Span Range"`, "[1,5]", `{"end": 5, "start": 1, "isEmpty": false, "endInclusive": true, "startInclusive": true}`},
+		{`"Span Multi"`, "{[1,3), [2,5)}", `[{"end": 5, "start": 1, "isEmpty": false, "endInclusive": false, "startInclusive": true}]`},
 	}
 	for _, tc := range tests {
 		v := contrib.ForType(d.cat, tc.typ, false)[0]
@@ -828,5 +840,39 @@ func TestOperandErrorsClassifyLive(t *testing.T) {
 		if c := pgexec.Classify(err, pgexec.Prod); err == nil || c.Class != pgexec.UserInput || c.Message == "invalid operation" {
 			t.Errorf("%s %s(%v): %v -> %v %q", tc.typ, tc.op, tc.operand, err, c.Class, c.Message)
 		}
+	}
+}
+
+// TestExtensionTypeSchemaLive checks that a user type sharing an extension
+// type's or a core type's name, in another schema, gets no vocabulary,
+// while a domain over the real extension type in that schema does.
+func TestExtensionTypeSchemaLive(t *testing.T) {
+	d := openLive(t)
+	hs := quote(d.schemaOf(contrib.ExtHstore))
+	d.exec(`CREATE TYPE hstore AS (k text)`)
+	d.exec(`CREATE TYPE ltree AS ENUM ('a')`)
+	d.exec(`CREATE TYPE ` + dataSchema + `.tsvector AS (k text)`)
+	d.exec(`CREATE DOMAIN real_attrs AS ` + hs + `.hstore`)
+	d.exec(`CREATE TABLE fakes (h hstore, l ltree, v ` + dataSchema + `.tsvector, w tsvector, r real_attrs, x ` + hs + `.hstore)`)
+	cat, err := introspect.Introspect(d.ctx, d.tx, []string{dataSchema})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := cat.Table(dataSchema, "fakes")
+	for col, want := range map[string]string{"h": "", "l": "", "v": "", "w": contrib.VocabFullText, "r": contrib.VocabHstore, "x": contrib.VocabHstore} {
+		vs := contrib.ForColumn(cat, tbl.Column(col))
+		got := ""
+		if len(vs) > 0 {
+			got = vs[0].Name
+		}
+		if got != want || len(vs) > 1 {
+			t.Errorf("%s: vocabularies %v, want %q", col, vs, want)
+		}
+	}
+	if vs := contrib.ForType(cat, dataSchema+".hstore", false); len(vs) != 0 {
+		t.Errorf("ForType(%s.hstore) = %v", dataSchema, vs)
+	}
+	if vs := contrib.ForType(cat, hs+".hstore", false); len(vs) != 1 || vs[0].Name != contrib.VocabHstore {
+		t.Errorf("ForType(%s.hstore) = %v", hs, vs)
 	}
 }

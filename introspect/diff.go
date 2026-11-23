@@ -23,6 +23,7 @@ func Diff(cached, live *Catalog) []string {
 	out = append(out, diffNamed("composite type", compositeMap(cached.Composites), compositeMap(live.Composites))...)
 	out = append(out, diffFunctions(cached.Functions, live.Functions)...)
 	out = append(out, diffExtensions(cached.Extensions, live.Extensions)...)
+	out = append(out, diffNamed("range type", rangeMap(cached.Ranges), rangeMap(live.Ranges))...)
 	return out
 }
 
@@ -218,6 +219,14 @@ func enumMap(enums []*Enum) map[string]any {
 	out := map[string]any{}
 	for _, e := range enums {
 		out[e.Schema+"."+e.Name] = e
+	}
+	return out
+}
+
+func rangeMap(ranges []*RangeType) map[string]any {
+	out := map[string]any{}
+	for _, r := range ranges {
+		out[r.Schema+"."+r.Name] = r
 	}
 	return out
 }

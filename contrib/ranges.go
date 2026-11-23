@@ -4,15 +4,60 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/suprbdev/pdbcore/introspect"
 )
 
-// rangeType describes a built-in range type.
+// rangeType describes a range type: built in (schemas empty, rendered bare)
+// or recorded in introspect.Catalog.Ranges.
 type rangeType struct {
-	name, elem, multi string
-	integral          bool
+	name, elem, multi               string
+	schema, elemSchema, multiSchema string
+	integral                        bool
 	// sentinel is an element value: [sentinel, sentinel) is how an empty
-	// range travels through the constructor.
+	// range travels through the constructor. "" means none is known for
+	// the element type, so empty ranges are rejected.
 	sentinel string
+}
+
+// qualified renders a type or function name, schema-qualified unless it is
+// built in.
+func qualified(schema, name string) string {
+	if schema == "" || schema == "pg_catalog" {
+		return name
+	}
+	return quoteIdent(schema) + "." + quoteIdent(name)
+}
+
+func (rt rangeType) nameSQL() string  { return qualified(rt.schema, rt.name) }
+func (rt rangeType) elemSQL() string  { return qualified(rt.elemSchema, rt.elem) }
+func (rt rangeType) multiSQL() string { return qualified(rt.multiSchema, rt.multi) }
+
+// elementSentinels are the sentinels for the pg_catalog element types a
+// custom range type may be declared over.
+var elementSentinels = map[string]string{
+	"int2": "0", "int4": "0", "int8": "0", "numeric": "0", "float4": "0", "float8": "0", "oid": "0",
+	"date": "2000-01-01", "timestamp": "2000-01-01 00:00:00", "timestamptz": "2000-01-01 00:00:00+00",
+	"time": "00:00:00", "timetz": "00:00:00+00", "interval": "0",
+	"text": "a", "varchar": "a", "bpchar": "a", "name": "a",
+	"inet": "0.0.0.0", "cidr": "0.0.0.0/32",
+}
+
+// customRange describes a range type from the catalog.
+func customRange(r *introspect.RangeType) rangeType {
+	rt := rangeType{
+		name: r.Name, schema: r.Schema,
+		elem: r.Subtype, elemSchema: r.SubtypeSchema,
+		multi: r.Multirange, multiSchema: r.MultirangeSchema,
+	}
+	if r.SubtypeSchema == "pg_catalog" {
+		rt.sentinel = elementSentinels[r.Subtype]
+		switch r.Subtype {
+		case "int2", "int4", "int8":
+			rt.integral = true
+		}
+	}
+	return rt
 }
 
 var rangeTypes = map[string]rangeType{
@@ -271,11 +316,14 @@ func rangeLiteralEnd(s string) int {
 }
 
 // params returns the constructor's three parameters for r.
-func (rt rangeType) params(r RangeValue) []any {
+func (rt rangeType) params(r RangeValue) ([]any, error) {
 	if r.Empty {
-		return []any{rt.sentinel, rt.sentinel, "[)"}
+		if rt.sentinel == "" {
+			return nil, fmt.Errorf("empty ranges are not supported for range type %s", rt.name)
+		}
+		return []any{rt.sentinel, rt.sentinel, "[)"}, nil
 	}
-	return []any{strOrNil(r.Start), strOrNil(r.End), r.Bounds()}
+	return []any{strOrNil(r.Start), strOrNil(r.End), r.Bounds()}, nil
 }
 
 func strOrNil(s *string) any {
@@ -290,7 +338,7 @@ func (rt rangeType) parse(v any) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return rt.params(r), nil
+	return rt.params(r)
 }
 
 func (rt rangeType) parseElement(v any) ([]any, error) {
@@ -335,7 +383,10 @@ func (rt rangeType) parseMulti(v any) ([]any, error) {
 	}
 	lo, hi, bounds := make([]*string, len(rs)), make([]*string, len(rs)), make([]string, len(rs))
 	for i, r := range rs {
-		p := rt.params(r)
+		p, err := rt.params(r)
+		if err != nil {
+			return nil, err
+		}
 		if s, ok := p[0].(string); ok {
 			lo[i] = &s
 		}
@@ -349,13 +400,16 @@ func (rt rangeType) parseMulti(v any) ([]any, error) {
 
 // sql renders the range constructor over three placeholders.
 func (rt rangeType) sql(a []string) string {
-	return rt.name + "(" + atom(a[0]) + "::" + rt.elem + ", " + atom(a[1]) + "::" + rt.elem + ", " + atom(a[2]) + "::text)"
+	elem := rt.elemSQL()
+	return rt.nameSQL() + "(" + atom(a[0]) + "::" + elem + ", " + atom(a[1]) + "::" + elem + ", " + atom(a[2]) + "::text)"
 }
 
-// multiSQL renders the multirange constructor over three array placeholders.
-func (rt rangeType) multiSQL(a []string) string {
-	return rt.multi + "(VARIADIC ARRAY(SELECT " + rt.name + "(__l, __u, __b) FROM unnest(" +
-		atom(a[0]) + "::" + rt.elem + "[], " + atom(a[1]) + "::" + rt.elem + "[], " + atom(a[2]) + "::text[]) AS __r(__l, __u, __b)))"
+// multiConstructor renders the multirange constructor over three array
+// placeholders.
+func (rt rangeType) multiConstructor(a []string) string {
+	elem := rt.elemSQL()
+	return rt.multiSQL() + "(VARIADIC ARRAY(SELECT " + rt.nameSQL() + "(__l, __u, __b) FROM unnest(" +
+		atom(a[0]) + "::" + elem + "[], " + atom(a[1]) + "::" + elem + "[], " + atom(a[2]) + "::text[]) AS __r(__l, __u, __b)))"
 }
 
 // rangeJSON renders a non-null range expression as the RangeValue object.
@@ -410,7 +464,7 @@ func rangeOps(rt rangeType, idx []IndexHint) []Op {
 			Name: "containsElement", Arg: ArgElement, Index: idx, params: rt.parseElement,
 			Description: "Contains the given value (@> element).",
 			render: func(_ qual, col string, a []string) string {
-				return paren(col) + " @> " + atom(a[0]) + "::" + rt.elem
+				return paren(col) + " @> " + atom(a[0]) + "::" + rt.elemSQL()
 			},
 		},
 		rangeOp("containedBy", "<@", "Is contained by the given range (<@)."),
@@ -431,6 +485,18 @@ func Range(typeName string) (Vocabulary, bool) {
 	if !ok {
 		return Vocabulary{}, false
 	}
+	return rangeVocab(rt), true
+}
+
+// RangeOf returns the range vocabulary for a range type recorded in
+// [introspect.Catalog.Ranges] (CREATE TYPE ... AS RANGE). The constructor
+// and element casts are schema-qualified, e.g.
+// "s"."floatrange"($1::float8, $2::float8, $3::text); bounds of an int2,
+// int4 or int8 subtype must be integers, and an empty range is accepted only
+// for the common pg_catalog subtypes (numbers, dates and times, text, inet).
+func RangeOf(r *introspect.RangeType) Vocabulary { return rangeVocab(customRange(r)) }
+
+func rangeVocab(rt rangeType) Vocabulary {
 	idx := []IndexHint{{Method: "gist"}, {Method: "spgist"}}
 	return Vocabulary{
 		Name: VocabRange, Type: rt.name,
@@ -442,7 +508,7 @@ func Range(typeName string) (Vocabulary, bool) {
 			sql:    func(_ qual, a []string) string { return rt.sql(a) },
 			output: func(_ qual, ref string) string { return RangeOutputSQL(ref) },
 		},
-	}, true
+	}
 }
 
 // Multirange returns the vocabulary of a built-in multirange column type
@@ -454,6 +520,21 @@ func Multirange(typeName string) (Vocabulary, bool) {
 	if !ok {
 		return Vocabulary{}, false
 	}
+	return multirangeVocab(rt), true
+}
+
+// MultirangeOf returns the multirange vocabulary for the multirange type of
+// a range type recorded in [introspect.Catalog.Ranges], as [RangeOf] does
+// for the range itself; false when the range has no multirange (servers
+// before PostgreSQL 14).
+func MultirangeOf(r *introspect.RangeType) (Vocabulary, bool) {
+	if r.Multirange == "" {
+		return Vocabulary{}, false
+	}
+	return multirangeVocab(customRange(r)), true
+}
+
+func multirangeVocab(rt rangeType) Vocabulary {
 	idx := []IndexHint{{Method: "gist"}}
 	return Vocabulary{
 		Name: VocabMultirange, Type: rt.multi,
@@ -462,8 +543,8 @@ func Multirange(typeName string) (Vocabulary, bool) {
 		Codec: &Codec{
 			Arg:    ArgMultirange,
 			params: rt.parseMulti,
-			sql:    func(_ qual, a []string) string { return rt.multiSQL(a) },
+			sql:    func(_ qual, a []string) string { return rt.multiConstructor(a) },
 			output: func(_ qual, ref string) string { return MultirangeOutputSQL(ref) },
 		},
-	}, true
+	}
 }

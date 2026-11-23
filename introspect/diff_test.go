@@ -107,6 +107,12 @@ func TestDiff(t *testing.T) {
 		{"extension moved", func(c *Catalog) {
 			c.Extensions[0].Schema = "extensions"
 		}, "extension plpgsql schema changed: pg_catalog -> extensions"},
+		{"range type added", func(c *Catalog) {
+			c.Ranges = append(c.Ranges, &RangeType{Schema: "public", Name: "floatrange", Subtype: "float8", SubtypeSchema: "pg_catalog"})
+		}, "range type public.floatrange added"},
+		{"base type schema changed", func(c *Catalog) {
+			c.Tables[0].Columns[1].BaseTypeSchema = "extensions"
+		}, "table public.users: column email changed"},
 		{"spatial column added", func(c *Catalog) {
 			c.Tables[0].Columns = append(c.Tables[0].Columns, &Column{
 				Name: "home", PGType: "geometry", Spatial: &SpatialType{Subtype: SpatialPoint, SRID: 4326},

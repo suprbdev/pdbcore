@@ -51,6 +51,9 @@ func Introspect(ctx context.Context, db Querier, schemas []string) (*Catalog, er
 	if err := readExtensions(ctx, db, cat); err != nil {
 		return nil, err
 	}
+	if err := readRanges(ctx, db, cat); err != nil {
+		return nil, err
+	}
 	if err := convertEnumTables(ctx, db, cat); err != nil {
 		return nil, err
 	}
@@ -148,6 +151,7 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		SELECT n.nspname, c.relname, a.attname, a.attnum,
 		       tn.nspname,
 		       m.typname,
+		       bn.nspname,
 		       m.typcategory = 'A',
 		       a.attnotnull,
 		       a.atthasdef,
@@ -164,6 +168,7 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		JOIN pg_type t ON t.oid = a.atttypid
 		JOIN pg_namespace tn ON tn.oid = t.typnamespace
 		`+resolvedType("t")+`
+		JOIN pg_namespace bn ON bn.oid = m.typnamespace
 		WHERE n.nspname = ANY($1)
 		  AND c.relkind IN ('r', 'p', 'v', 'm')
 		  AND a.attnum > 0 AND NOT a.attisdropped
@@ -177,7 +182,7 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		var builtin, spatial bool
 		col := &Column{}
 		if err := rows.Scan(&schema, &table, &col.Name, &col.Position,
-			&col.TypeSchema, &col.PGType, &col.IsArray,
+			&col.TypeSchema, &col.PGType, &col.BaseTypeSchema, &col.IsArray,
 			&col.NotNull, &col.HasDefault, &col.Generated, &genKind, &col.Comment,
 			&formatted, &builtin, &spatial); err != nil {
 			return err
@@ -312,6 +317,39 @@ func readExtensions(ctx context.Context, db Querier, cat *Catalog) error {
 	return rows.Err()
 }
 
+// readRanges reads every range type outside pg_catalog with its subtype
+// and, from PostgreSQL 14, its multirange type.
+func readRanges(ctx context.Context, db Querier, cat *Catalog) error {
+	multi := "NULL::oid"
+	if cat.ServerVersionNum >= 140000 {
+		multi = "r.rngmultitypid"
+	}
+	rows, err := db.Query(ctx, `
+		SELECT n.nspname, t.typname, st.typname, sn.nspname,
+		       COALESCE(mt.typname, ''), COALESCE(mn.nspname, '')
+		FROM pg_range r
+		JOIN pg_type t ON t.oid = r.rngtypid
+		JOIN pg_namespace n ON n.oid = t.typnamespace
+		JOIN pg_type st ON st.oid = r.rngsubtype
+		JOIN pg_namespace sn ON sn.oid = st.typnamespace
+		LEFT JOIN pg_type mt ON mt.oid = `+multi+`
+		LEFT JOIN pg_namespace mn ON mn.oid = mt.typnamespace
+		WHERE n.nspname <> 'pg_catalog'
+		ORDER BY n.nspname, t.typname`)
+	if err != nil {
+		return fmt.Errorf("introspect: ranges: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		r := &RangeType{}
+		if err := rows.Scan(&r.Schema, &r.Name, &r.Subtype, &r.SubtypeSchema, &r.Multirange, &r.MultirangeSchema); err != nil {
+			return err
+		}
+		cat.Ranges = append(cat.Ranges, r)
+	}
+	return rows.Err()
+}
+
 func readEnums(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, t.typname,
@@ -343,6 +381,7 @@ func readComposites(ctx context.Context, db Querier, schemas []string, cat *Cata
 		SELECT n.nspname, t.typname, a.attname, a.attnum,
 		       atn.nspname,
 		       m.typname,
+		       bn.nspname,
 		       m.typcategory = 'A',
 		       COALESCE(col_description(c.oid, a.attnum), ''),
 		       `+typmodColumns+`
@@ -353,6 +392,7 @@ func readComposites(ctx context.Context, db Querier, schemas []string, cat *Cata
 		JOIN pg_type at ON at.oid = a.atttypid
 		JOIN pg_namespace atn ON atn.oid = at.typnamespace
 		`+resolvedType("at")+`
+		JOIN pg_namespace bn ON bn.oid = m.typnamespace
 		WHERE n.nspname = ANY($1) AND t.typtype = 'c'
 		ORDER BY n.nspname, t.typname, a.attnum`, schemas)
 	if err != nil {
@@ -365,7 +405,7 @@ func readComposites(ctx context.Context, db Querier, schemas []string, cat *Cata
 		var builtin, spatial bool
 		f := &Column{}
 		if err := rows.Scan(&schema, &name, &f.Name, &f.Position,
-			&f.TypeSchema, &f.PGType, &f.IsArray, &f.Comment,
+			&f.TypeSchema, &f.PGType, &f.BaseTypeSchema, &f.IsArray, &f.Comment,
 			&formatted, &builtin, &spatial); err != nil {
 			return err
 		}
