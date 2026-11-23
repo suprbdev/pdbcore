@@ -955,3 +955,26 @@ func TestTrgmVersionGating(t *testing.T) {
 		t.Errorf("ForVersion mutated or miscounted: %d", got)
 	}
 }
+
+func TestIndexHintServes(t *testing.T) {
+	inet := contrib.IndexHint{Method: "gist", OpClass: "inet_ops"}
+	gin := contrib.IndexHint{Method: "gin"}
+	cases := []struct {
+		hint            contrib.IndexHint
+		method, opClass string
+		want            bool
+	}{
+		{inet, "gist", "inet_ops", true},
+		{inet, "gist", "gist_inet_ops", false},
+		{inet, "spgist", "inet_ops", false},
+		{inet, "gist", "", true},
+		{gin, "gin", "tsvector_ops", true},
+		{gin, "gin", "", true},
+		{gin, "gist", "tsvector_ops", false},
+	}
+	for _, c := range cases {
+		if got := c.hint.Serves(c.method, c.opClass); got != c.want {
+			t.Errorf("%+v.Serves(%q, %q) = %v, want %v", c.hint, c.method, c.opClass, got, c.want)
+		}
+	}
+}

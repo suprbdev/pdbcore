@@ -82,6 +82,7 @@ func (ix *Index) clone() *Index {
 	cp := *ix
 	cp.Columns = slices.Clone(ix.Columns)
 	cp.ExpressionColumns = slices.Clone(ix.ExpressionColumns)
+	cp.OpClasses = slices.Clone(ix.OpClasses)
 	return &cp
 }
 

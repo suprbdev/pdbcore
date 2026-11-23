@@ -187,7 +187,7 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		       m.typname,
 		       bn.nspname,
 		       m.typcategory = 'A',
-		       a.attnotnull,
+		       `+notNullColumn(cat.ServerVersionNum)+`,
 		       a.atthasdef,
 		       a.attidentity <> '' OR a.attgenerated <> '',
 		       CASE WHEN a.attidentity <> '' THEN 'identity'
@@ -231,6 +231,19 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 	return rows.Err()
 }
 
+// notNullColumn selects whether pg_attribute a holds no NULL. From
+// PostgreSQL 18 a NOT NULL constraint added NOT VALID sets attnotnull while
+// rows predating it may still hold NULL, so attnotnull counts only when the
+// column's NOT NULL constraint (contype 'n') is validated.
+func notNullColumn(serverVersionNum int) string {
+	if serverVersionNum >= 180000 {
+		return `a.attnotnull AND NOT EXISTS (SELECT 1 FROM pg_constraint nn
+		               WHERE nn.conrelid = a.attrelid AND nn.contype = 'n'
+		                 AND nn.conkey[1] = a.attnum AND NOT nn.convalidated)`
+	}
+	return `a.attnotnull`
+}
+
 // pg18ConstraintColumns selects (conperiod, conenforced), which exist only
 // from PostgreSQL 18; older servers get the values every constraint had there.
 func pg18ConstraintColumns(serverVersionNum int) string {
@@ -264,6 +277,7 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 		             JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum
 		             ORDER BY k.ord), '{}'),
 		       COALESCE(obj_description(con.oid, 'pg_constraint'), ''),
+		       con.convalidated,
 		       `+pg18ConstraintColumns(cat.ServerVersionNum)+`
 		FROM pg_constraint con
 		JOIN pg_class c ON c.oid = con.conrelid
@@ -283,9 +297,9 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 		var ctype rune
 		var cols, refCols []string
 		var refSchema, refTable string
-		var period, enforced bool
+		var validated, period, enforced bool
 		if err := rows.Scan(&schema, &table, &name, &ctype, &cols, &refSchema, &refTable, &refCols, &comment,
-			&period, &enforced); err != nil {
+			&validated, &period, &enforced); err != nil {
 			return err
 		}
 		t := cat.Table(schema, table)
@@ -302,6 +316,7 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 				Name: name, Columns: cols,
 				RefSchema: refSchema, RefTable: refTable, RefColumns: refCols,
 				Comment: comment, Period: period, NotEnforced: !enforced,
+				NotValid: enforced && !validated,
 			})
 		case 'c':
 			t.Checks = append(t.Checks, &Constraint{Name: name, Columns: cols, Comment: comment})
@@ -317,6 +332,11 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 // literal.
 const varAttnoPattern = `\{VAR :varno \d+ :varattno (\d+) `
 
+// indexKeys is the FROM item over every column of pg_index i, one row
+// k(attnum, opclass, ord) per column: attnum 0 for an expression, opclass
+// NULL for an INCLUDE column (indclass covers the key columns only).
+const indexKeys = `unnest(i.indkey::int2[], i.indclass::oid[]) WITH ORDINALITY AS k(attnum, opclass, ord)`
+
 // readIndexes reads valid indexes, skipping partition indexes attached to a
 // partitioned index (relispartition): the parent's partitioned index stands
 // for them. The columns of key expressions and of the predicate are pulled
@@ -325,13 +345,16 @@ const varAttnoPattern = `\{VAR :varno \d+ :varattno (\d+) `
 func readIndexes(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, c.relname, ic.relname, i.indisunique, am.amname,
-		       ARRAY(SELECT a.attname FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+		       ARRAY(SELECT a.attname FROM `+indexKeys+`
 		             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
 		             WHERE k.attnum > 0 ORDER BY k.ord),
 		       ARRAY(SELECT a.attname FROM pg_attribute a
 		             WHERE a.attrelid = i.indrelid AND a.attnum > 0 AND NOT a.attisdropped
 		               AND (a.attnum = ANY(refs.attnums) OR 0 = ANY(refs.attnums))
-		             ORDER BY a.attnum)
+		             ORDER BY a.attnum),
+		       ARRAY(SELECT COALESCE(oc.opcname, '') FROM `+indexKeys+`
+		             LEFT JOIN pg_opclass oc ON oc.oid = k.opclass
+		             WHERE k.attnum > 0 ORDER BY k.ord)
 		FROM pg_index i
 		JOIN pg_class c ON c.oid = i.indrelid
 		JOIN pg_class ic ON ic.oid = i.indexrelid
@@ -350,7 +373,7 @@ func readIndexes(ctx context.Context, db Querier, schemas []string, cat *Catalog
 	for rows.Next() {
 		var schema, table string
 		ix := &Index{}
-		if err := rows.Scan(&schema, &table, &ix.Name, &ix.Unique, &ix.Method, &ix.Columns, &ix.ExpressionColumns); err != nil {
+		if err := rows.Scan(&schema, &table, &ix.Name, &ix.Unique, &ix.Method, &ix.Columns, &ix.ExpressionColumns, &ix.OpClasses); err != nil {
 			return err
 		}
 		if len(ix.ExpressionColumns) == 0 {

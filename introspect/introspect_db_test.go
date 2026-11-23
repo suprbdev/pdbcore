@@ -983,3 +983,115 @@ func TestIntrospectConstraintColumnsLive(t *testing.T) {
 		t.Errorf("parted_1 checks = %v", got)
 	}
 }
+
+// TestIntrospectNotValidLive checks that NOT VALID constraints leave rows
+// that may break them visible: a NOT NULL ... NOT VALID column (PostgreSQL
+// 18+) is nullable, and a NOT VALID foreign key is NotValid until validated.
+func TestIntrospectNotValidLive(t *testing.T) {
+	tx := liveTx(t,
+		`CREATE SCHEMA pdbcore_notvalid_test`,
+		`CREATE TABLE pdbcore_notvalid_test.owners (id int PRIMARY KEY)`,
+		`CREATE TABLE pdbcore_notvalid_test.items (
+			id       int PRIMARY KEY,
+			name     text NOT NULL,
+			label    text,
+			owner_id int NOT NULL,
+			buyer_id int
+		)`,
+		`INSERT INTO pdbcore_notvalid_test.owners VALUES (1)`,
+		`INSERT INTO pdbcore_notvalid_test.items VALUES (1, 'a', NULL, 2, 1)`,
+		`ALTER TABLE pdbcore_notvalid_test.items ADD CONSTRAINT items_owner_fkey
+			FOREIGN KEY (owner_id) REFERENCES pdbcore_notvalid_test.owners NOT VALID`,
+		`ALTER TABLE pdbcore_notvalid_test.items ADD CONSTRAINT items_buyer_fkey
+			FOREIGN KEY (buyer_id) REFERENCES pdbcore_notvalid_test.owners NOT VALID`,
+		`ALTER TABLE pdbcore_notvalid_test.items VALIDATE CONSTRAINT items_buyer_fkey`,
+	)
+	ctx := context.Background()
+	var num int
+	if err := tx.QueryRow(ctx, `SELECT current_setting('server_version_num')::int`).Scan(&num); err != nil {
+		t.Fatal(err)
+	}
+	if num >= 180000 {
+		if _, err := tx.Exec(ctx, `ALTER TABLE pdbcore_notvalid_test.items
+			ADD CONSTRAINT items_label_not_null NOT NULL label NOT VALID`); err != nil {
+			t.Fatal(err)
+		}
+		var attnotnull bool
+		if err := tx.QueryRow(ctx, `SELECT attnotnull FROM pg_attribute
+			WHERE attrelid = 'pdbcore_notvalid_test.items'::regclass AND attname = 'label'`).Scan(&attnotnull); err != nil {
+			t.Fatal(err)
+		}
+		if !attnotnull {
+			t.Fatal("NOT NULL ... NOT VALID no longer sets attnotnull; revisit notNullColumn")
+		}
+	}
+	cat, err := Introspect(ctx, tx, []string{"pdbcore_notvalid_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := cat.Table("pdbcore_notvalid_test", "items")
+	for col, want := range map[string]bool{"id": true, "name": true, "label": false, "owner_id": true, "buyer_id": false} {
+		if got := items.Column(col).NotNull; got != want {
+			t.Errorf("column %s NotNull = %v, want %v", col, got, want)
+		}
+	}
+	for _, fk := range items.ForeignKeys {
+		want := fk.Name == "items_owner_fkey"
+		if fk.NotValid != want || fk.MayDangle() != want || fk.NotEnforced {
+			t.Errorf("%s: NotValid %v MayDangle %v NotEnforced %v, want NotValid %v", fk.Name, fk.NotValid, fk.MayDangle(), fk.NotEnforced, want)
+		}
+	}
+	if len(items.ForeignKeys) != 2 {
+		t.Fatalf("foreign keys = %+v", items.ForeignKeys)
+	}
+	if num < 180000 {
+		return
+	}
+	if _, err := tx.Exec(ctx, `UPDATE pdbcore_notvalid_test.items SET label = 'x', owner_id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `ALTER TABLE pdbcore_notvalid_test.items VALIDATE CONSTRAINT items_label_not_null`); err != nil {
+		t.Fatal(err)
+	}
+	cat, err = Introspect(ctx, tx, []string{"pdbcore_notvalid_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cat.Table("pdbcore_notvalid_test", "items").Column("label").NotNull {
+		t.Error("label is not NotNull after VALIDATE CONSTRAINT")
+	}
+}
+
+// TestIntrospectIndexOpClassesLive checks Index.OpClasses: one entry per
+// Columns entry, explicit and default operator classes by name, "" for an
+// INCLUDE column, and no entry for an expression column.
+func TestIntrospectIndexOpClassesLive(t *testing.T) {
+	tx := liveTx(t,
+		`CREATE SCHEMA pdbcore_opclass_test`,
+		`CREATE TABLE pdbcore_opclass_test.hosts (addr inet, name text, tags text[], n int)`,
+		`CREATE INDEX hosts_addr_idx ON pdbcore_opclass_test.hosts USING gist (addr inet_ops)`,
+		`CREATE INDEX hosts_name_idx ON pdbcore_opclass_test.hosts (name text_pattern_ops) INCLUDE (n)`,
+		`CREATE INDEX hosts_tags_idx ON pdbcore_opclass_test.hosts USING gin (tags)`,
+		`CREATE INDEX hosts_expr_idx ON pdbcore_opclass_test.hosts (lower(name), n)`,
+	)
+	cat, err := Introspect(context.Background(), tx, []string{"pdbcore_opclass_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2][]string{
+		"hosts_addr_idx": {{"addr"}, {"inet_ops"}},
+		"hosts_name_idx": {{"name", "n"}, {"text_pattern_ops", ""}},
+		"hosts_tags_idx": {{"tags"}, {"array_ops"}},
+		"hosts_expr_idx": {{"n"}, {"int4_ops"}},
+	}
+	hosts := cat.Table("pdbcore_opclass_test", "hosts")
+	if len(hosts.Indexes) != len(want) {
+		t.Fatalf("indexes = %+v", hosts.Indexes)
+	}
+	for _, ix := range hosts.Indexes {
+		w, ok := want[ix.Name]
+		if !ok || !reflect.DeepEqual(ix.Columns, w[0]) || !reflect.DeepEqual(ix.OpClasses, w[1]) {
+			t.Errorf("%s: columns %v opclasses %v, want %v", ix.Name, ix.Columns, ix.OpClasses, w)
+		}
+	}
+}

@@ -234,8 +234,9 @@ func (k ArgKind) arity() (int, int) {
 	return 1, 1
 }
 
-// IndexHint names an index access method (and operator class, when it is
-// not the default for the type) that can serve an operator or expression.
+// IndexHint names an index access method (and operator class, when other
+// operator classes of that method cannot) that can serve an operator or
+// expression.
 type IndexHint struct {
 	// Method is the access method: "gin", "gist", "spgist", "btree", or
 	// pgvector's "hnsw" and "ivfflat".
@@ -248,6 +249,15 @@ type IndexHint struct {
 	// Ordering marks an index that serves ORDER BY expr (KNN) rather than a
 	// WHERE predicate.
 	Ordering bool
+}
+
+// Serves reports whether an index column built with access method method
+// and operator class opClass (introspect.Index.OpClass) can serve h. An
+// empty OpClass on either side matches any operator class: h names none
+// when every operator class of its method serves it, and hand-built
+// catalogs record none.
+func (h IndexHint) Serves(method, opClass string) bool {
+	return h.Method == method && (h.OpClass == "" || opClass == "" || h.OpClass == opClass)
 }
 
 // qual renders names belonging to an extension schema.
