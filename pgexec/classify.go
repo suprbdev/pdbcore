@@ -96,7 +96,7 @@ func Classify(err error, detail Detail) Classified {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		c := Classified{Class: classOf(pgErr.Code), SQLState: pgErr.Code, PG: pgErr}
-		if isPostGISInputError(pgErr) || isContribInputError(pgErr) {
+		if isPostGISInputError(pgErr) || isContribInputError(pgErr) || isRasterSRIDError(pgErr) {
 			c.Class = UserInput
 		}
 		if detail == Dev {
@@ -136,6 +136,15 @@ func isPostGISInputError(pgErr *pgconn.PgError) bool {
 		}
 	}
 	return false
+}
+
+// rasterSRIDError is the message PostGIS raises when a raster function is
+// given a geometry in another SRID: XX000 from C functions (ST_Value),
+// P0001 from the PL/pgSQL ones (ST_Intersects).
+const rasterSRIDError = "Raster and geometry do not have the same SRID"
+
+func isRasterSRIDError(pgErr *pgconn.PgError) bool {
+	return (pgErr.Code == "XX000" || pgErr.Code == "P0001") && pgErr.Message == rasterSRIDError
 }
 
 // contribSyntaxErrors are the 42601 messages raised while parsing values of
@@ -204,7 +213,7 @@ func SanitizeMessage(pgErr *pgconn.PgError, strict bool) string {
 		}
 		return "invalid geometry"
 	}
-	if isContribInputError(pgErr) {
+	if isContribInputError(pgErr) || isRasterSRIDError(pgErr) {
 		if strict {
 			return "invalid input value"
 		}

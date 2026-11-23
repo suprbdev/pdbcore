@@ -53,6 +53,18 @@ func coerce(k ArgKind, v any) ([]any, error) {
 		return []any{s, d}, nil
 	case ArgSubpath:
 		return SubpathParams(v)
+	case ArgCube:
+		c, err := CubeParam(v)
+		if err != nil {
+			return nil, err
+		}
+		return []any{c}, nil
+	case ArgCubeDistance:
+		return CubeDistanceParams(v)
+	case ArgLatLon:
+		return LatLonParams(v)
+	case ArgLatLonDistance:
+		return LatLonDistanceParams(v)
 	case ArgRange, ArgMultirange, ArgElement:
 		return nil, fmt.Errorf("%s operand needs a range type", k)
 	}

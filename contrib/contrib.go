@@ -3,8 +3,9 @@
 // full-text search (tsvector, and to_tsvector over text, json and jsonb) with
 // ts_rank relevance and ts_headline snippets, pg_trgm, unaccent,
 // fuzzystrmatch, hstore, ltree, citext, intarray, range and multirange types,
-// inet/cidr and pgvector's vector, halfvec and sparsevec types and bit
-// distances — as a small,
+// inet/cidr, pgvector's vector, halfvec and sparsevec types and bit
+// distances, cube, and earthdistance's earth type and point distances — as
+// a small,
 // catalog-driven layer shared by pdbq and pdbr, in the same style as the
 // postgis package.
 //
@@ -16,8 +17,9 @@
 //     their relevance ([Op.RankSQL]) and highlighted snippets of a document
 //     ([Op.HeadlineSQL], with [HeadlineOptions]) from the same placeholders;
 //   - which operand-taking value expressions ([Expr]) exist for ordering or
-//     selection (trigram similarity and distance, vector and bit distances,
-//     Levenshtein distance; [Expr.Score] marks the ones offered as
+//     selection (trigram similarity and distance, vector, bit and cube
+//     distances, earth distances, Levenshtein distance; [Expr.Score] marks
+//     the ones offered as
 //     selectable values, [Expr.Derived] the ones whose operand comes with
 //     each use: hstore value by key, ltree lca and subpath);
 //   - which derived accessors ([Accessor]) exist (ltree nlevel and parent,
@@ -25,7 +27,8 @@
 //   - how an input value for the column becomes bind parameters and back
 //     ([Codec]), where the text form is not good enough (hstore as a JSON
 //     object, ranges as {start, end, startInclusive, endInclusive}, vectors
-//     as lists of numbers).
+//     as lists of numbers, cubes as lists of coordinates, earth locations
+//     as {lat, lon} objects).
 //
 // [ForColumn] and [ForType] resolve a column (by its resolved base type, so
 // domains over these types work) to the vocabularies that apply to it.
@@ -85,6 +88,10 @@ const (
 	ExtFuzzy = "fuzzystrmatch"
 	// ExtIntarray is the intarray extension.
 	ExtIntarray = "intarray"
+	// ExtCube is the cube extension.
+	ExtCube = "cube"
+	// ExtEarthdistance is the earthdistance extension, which needs cube.
+	ExtEarthdistance = "earthdistance"
 )
 
 // Vocabulary names.
@@ -100,11 +107,14 @@ const (
 	VocabRange      = "range"
 	VocabMultirange = "multirange"
 	VocabInet       = "inet"
-	VocabUnaccent   = "unaccent" // unaccent over text-like columns
-	VocabVector     = "vector"   // pgvector vector, halfvec and sparsevec columns
-	VocabBit        = "bit"      // pgvector distances over bit and varbit columns
-	VocabFuzzy      = "fuzzy"    // fuzzystrmatch over text-like columns
-	VocabIntarray   = "intarray" // intarray over int4[] columns
+	VocabUnaccent   = "unaccent"   // unaccent over text-like columns
+	VocabVector     = "vector"     // pgvector vector, halfvec and sparsevec columns
+	VocabBit        = "bit"        // pgvector distances over bit and varbit columns
+	VocabFuzzy      = "fuzzy"      // fuzzystrmatch over text-like columns
+	VocabIntarray   = "intarray"   // intarray over int4[] columns
+	VocabCube       = "cube"       // cube columns
+	VocabEarth      = "earth"      // earthdistance's earth domain over cube
+	VocabEarthPoint = "earthpoint" // earthdistance's <@> over point columns
 )
 
 // ArgKind classifies an operand (or a column value fed to a [Codec]) so
@@ -153,6 +163,23 @@ const (
 	// absent or null for the rest of the path. Two parameters (int4), the
 	// second NULL without a length, so the SQL text does not depend on it.
 	ArgSubpath
+	// ArgCube is a cube value: a list of numbers (a point), a list of two
+	// such lists of equal length (a box by two opposite corners), or the
+	// cube text form as a string; one text parameter.
+	ArgCube
+	// ArgCubeDistance is a distance threshold against a reference cube: an
+	// object {cube, distance} whose cube is as for ArgCube and whose
+	// distance is a finite number. Two parameters: the cube text and the
+	// threshold (float8).
+	ArgCubeDistance
+	// ArgLatLon is a location on the Earth's surface: an object {lat, lon}
+	// in degrees. Two parameters (float8): latitude and longitude.
+	ArgLatLon
+	// ArgLatLonDistance is a radius around a location: an object {lat, lon,
+	// distance}. Three parameters (float8): latitude, longitude and the
+	// distance, in the unit of the operator (metres for earth columns,
+	// statute miles for point columns).
+	ArgLatLonDistance
 )
 
 func (k ArgKind) String() string {
@@ -179,6 +206,14 @@ func (k ArgKind) String() string {
 		return "text distance"
 	case ArgSubpath:
 		return "subpath"
+	case ArgCube:
+		return "cube"
+	case ArgCubeDistance:
+		return "cube distance"
+	case ArgLatLon:
+		return "location"
+	case ArgLatLonDistance:
+		return "location distance"
 	}
 	return ""
 }
@@ -191,8 +226,10 @@ func (k ArgKind) arity() (int, int) {
 		return 1, 2
 	case ArgRange, ArgMultirange:
 		return 3, 3
-	case ArgVectorDistance, ArgTextDistance, ArgSubpath:
+	case ArgVectorDistance, ArgTextDistance, ArgSubpath, ArgCubeDistance, ArgLatLon:
 		return 2, 2
+	case ArgLatLonDistance:
+		return 3, 3
 	}
 	return 1, 1
 }
@@ -354,6 +391,9 @@ type Expr struct {
 
 	q      qual
 	render func(q qual, col string, a []string) string
+	// order is the nearest-first ordering form of render; nil when render
+	// is it.
+	order  func(q qual, col string, a []string) string
 	params func(v any) ([]any, error)
 	since  string
 }
@@ -372,6 +412,23 @@ func (e Expr) Render(col string, args ...string) string {
 	lo, hi := e.Arg.arity()
 	if e.render == nil || len(args) < lo || len(args) > hi {
 		return ""
+	}
+	return e.render(e.q, col, args)
+}
+
+// OrderSQL renders the expression an ORDER BY on e sorts by, from the same
+// placeholders as [Expr.Render]. It orders rows exactly like Render's value
+// but may be a different quantity that an index serves (earth distances
+// order by cube's <-> distance, a KNN scan, while Render is the
+// great-circle distance), so a keyset cursor over the ordering must hold
+// OrderSQL's value, not Render's. For every other expression it is Render.
+func (e Expr) OrderSQL(col string, args ...string) string {
+	lo, hi := e.Arg.arity()
+	if e.render == nil || len(args) < lo || len(args) > hi {
+		return ""
+	}
+	if e.order != nil {
+		return e.order(e.q, col, args)
 	}
 	return e.render(e.q, col, args)
 }
@@ -626,15 +683,46 @@ func FindOp(vs []Vocabulary, name string) (Op, bool) {
 // [introspect.Catalog.Ranges] get the range vocabulary ([RangeOf]), so a
 // user type that merely shares a name (an "hstore" in another schema) gets
 // none. A column without BaseTypeSchema is matched by name alone.
+//
+// A column declared as earthdistance's earth domain (or a domain over it)
+// gets the [Earth] vocabulary instead of its base type's [Cube] one.
 func ForColumn(cat *introspect.Catalog, col *introspect.Column) []Vocabulary {
 	if col == nil || col.Spatial != nil || col.EnumRef != "" {
 		return nil
+	}
+	if v, ok := earthColumn(cat, col); ok {
+		return []Vocabulary{v}
 	}
 	schema, name, arr := splitType(col.PGType)
 	if col.BaseTypeSchema != "" {
 		schema = col.BaseTypeSchema
 	}
 	return forType(cat, schema, name, arr || col.IsArray)
+}
+
+// earthColumn returns the earth vocabulary of a column declared as the earth
+// domain of the installed earthdistance extension, or as a domain whose
+// chain leads to it.
+func earthColumn(cat *introspect.Catalog, col *introspect.Column) (Vocabulary, bool) {
+	if cat == nil || col.Domain == "" || col.IsArray {
+		return Vocabulary{}, false
+	}
+	ed, cube := cat.Extension(ExtEarthdistance), cat.Extension(ExtCube)
+	if ed == nil || cube == nil {
+		return Vocabulary{}, false
+	}
+	ref := col.Domain
+	for range 16 {
+		if IsEarth(ref, ed.Schema) {
+			return Earth(cube.Schema).Bind(ed.Schema), true
+		}
+		d := cat.DomainByRef(ref)
+		if d == nil || d.Parent == "" {
+			break
+		}
+		ref = d.Parent
+	}
+	return Vocabulary{}, false
 }
 
 // ForType returns the vocabularies for a pg type name as Column.PGType
@@ -700,6 +788,14 @@ func forType(cat *introspect.Catalog, schema, name string, arr bool) []Vocabular
 		}
 		return []Vocabulary{RangeOf(r)}
 	}
+	if core && base == "point" {
+		if cat != nil {
+			if e := cat.Extension(ExtEarthdistance); e != nil {
+				return []Vocabulary{EarthPoint().Bind(e.Schema)}
+			}
+		}
+		return nil
+	}
 	if core && (base == "bit" || base == "varbit") {
 		if cat != nil {
 			if e := cat.Extension(ExtVector); e != nil {
@@ -714,6 +810,11 @@ func forType(cat *introspect.Catalog, schema, name string, arr bool) []Vocabular
 		if e, ok := ext(ExtVector); ok {
 			v, _ := Vector(base)
 			return []Vocabulary{v.Bind(e).ForVersion(cat.Extension(ExtVector).Version)}
+		}
+		return nil
+	case "cube":
+		if s, ok := ext(ExtCube); ok {
+			return []Vocabulary{Cube().Bind(s)}
 		}
 		return nil
 	case "hstore":
