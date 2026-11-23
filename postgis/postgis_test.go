@@ -1,6 +1,7 @@
 package postgis
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -727,5 +728,57 @@ func TestDistanceRenders(t *testing.T) {
 	}
 	if got, want := SpheroidDistanceSQL("t.g", "$1"), "ST_Distance((t.g)::geography, ($1)::geography)"; got != want {
 		t.Errorf("SpheroidDistanceSQL = %s, want %s", got, want)
+	}
+}
+
+func TestPrecisionAndBuffer(t *testing.T) {
+	const ref = `"t"."g"`
+	if got, want := OutputPrecisionSQL(ref, "$2"), `ST_AsGeoJSON("t"."g", $2::int4)::jsonb`; got != want {
+		t.Errorf("OutputPrecisionSQL = %s, want %s", got, want)
+	}
+	if got, want := OutputJSONPrecisionSQL(ref, "$2"), `ST_AsGeoJSON("t"."g", $2::int4)::json`; got != want {
+		t.Errorf("OutputJSONPrecisionSQL = %s, want %s", got, want)
+	}
+	if got, want := OutputJSONPrecisionSQL(ref, "coalesce($2, 9)"), `ST_AsGeoJSON("t"."g", (coalesce($2, 9))::int4)::json`; got != want {
+		t.Errorf("OutputJSONPrecisionSQL = %s, want %s", got, want)
+	}
+	if got, want := BufferSQL(ref, "$1"), `ST_Buffer("t"."g", $1::float8)`; got != want {
+		t.Errorf("BufferSQL = %s, want %s", got, want)
+	}
+	for _, d := range Deriveds {
+		plain, prec := d.JSONSQL(ref, Geography), d.JSONPrecisionSQL(ref, Geography, "$1")
+		jsonbPrec := d.PrecisionSQL(ref, Geography, "$1")
+		if !d.GeoJSON {
+			if prec != plain || jsonbPrec != d.SQL(ref, Geography) {
+				t.Errorf("%s is not geometry valued but precision changed it: %s", d.Suffix, prec)
+			}
+			continue
+		}
+		if want := strings.TrimSuffix(plain, ")::json") + ", $1::int4)::json"; prec != want {
+			t.Errorf("%s JSONPrecisionSQL = %s (plain %s)", d.Suffix, prec, plain)
+		}
+		if !strings.HasSuffix(jsonbPrec, ", $1::int4)::jsonb") {
+			t.Errorf("%s PrecisionSQL = %s", d.Suffix, jsonbPrec)
+		}
+	}
+	for _, n := range []int64{0, 6, MaxPrecision} {
+		if err := CheckPrecision(n); err != nil {
+			t.Errorf("CheckPrecision(%d) = %v", n, err)
+		}
+	}
+	for _, n := range []int64{-1, MaxPrecision + 1, 1 << 40} {
+		if CheckPrecision(n) == nil {
+			t.Errorf("CheckPrecision(%d) accepted", n)
+		}
+	}
+	for _, f := range []float64{0, -10, 1e6} {
+		if err := CheckBuffer(f); err != nil {
+			t.Errorf("CheckBuffer(%v) = %v", f, err)
+		}
+	}
+	for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if CheckBuffer(f) == nil {
+			t.Errorf("CheckBuffer(%v) accepted", f)
+		}
 	}
 }

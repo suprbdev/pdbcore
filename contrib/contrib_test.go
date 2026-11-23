@@ -46,6 +46,8 @@ func TestOpRenders(t *testing.T) {
 		{contrib.FullText(), "matchesWebsearch", 2, "(t.c) @@ websearch_to_tsquery($2::regconfig, $1::text)"},
 		{contrib.TextSearch("text"), "matches", 1, "to_tsvector(t.c) @@ to_tsquery($1::text)"},
 		{contrib.TextSearch("text"), "matchesWebsearch", 2, "to_tsvector($2::regconfig, t.c) @@ websearch_to_tsquery($2::regconfig, $1::text)"},
+		{contrib.JSONSearch("jsonb"), "matches", 1, "to_tsvector(t.c) @@ to_tsquery($1::text)"},
+		{contrib.JSONSearch("json"), "matchesPhrase", 2, "to_tsvector($2::regconfig, t.c) @@ phraseto_tsquery($2::regconfig, $1::text)"},
 		{contrib.Trgm("text"), "similarTo", 1, "(t.c) % $1::text"},
 		{contrib.Trgm("text").Bind("ext"), "similarTo", 1, `(t.c) OPERATOR("ext".%) $1::text`},
 		{contrib.Trgm("text").Bind("ext"), "wordSimilarTo", 1, `(t.c) OPERATOR("ext".%>) $1::text`},
@@ -796,7 +798,11 @@ func TestForType(t *testing.T) {
 		{all, "public._int4", true, ""},
 		{nil, "_int4", true, ""},
 		{all, "_int8", true, ""},
-		{all, "jsonb", false, ""},
+		{all, "jsonb", false, "jsonsearch"},
+		{nil, "json", false, "jsonsearch"},
+		{all, "pg_catalog.jsonb", false, "jsonsearch"},
+		{all, "public.jsonb", false, ""},
+		{all, "_jsonb", true, ""},
 	}
 	for _, tc := range tests {
 		if got := names(contrib.ForType(tc.cat, tc.typ, tc.isArray)); got != tc.want {

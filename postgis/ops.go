@@ -2,6 +2,7 @@ package postgis
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -304,6 +305,68 @@ func OutputSQL(ref string) string {
 // evaluates ref once and yields NULL for NULL.
 func OutputJSONSQL(ref string) string {
 	return "ST_AsGeoJSON(" + ref + ")::json"
+}
+
+// MaxPrecision is the largest GeoJSON precision consumers accept: 15
+// decimal places already resolve far below a micrometre on lon/lat data, and
+// a request without a precision keeps PostGIS's default of 9.
+const MaxPrecision = 15
+
+// CheckPrecision validates a GeoJSON precision argument (the number of
+// decimal digits of each coordinate). The error is user-facing.
+func CheckPrecision(digits int64) error {
+	if digits < 0 || digits > MaxPrecision {
+		return fmt.Errorf("precision must be an integer between 0 and %d", MaxPrecision)
+	}
+	return nil
+}
+
+// OutputPrecisionSQL is [OutputSQL] with the coordinates rounded to digits
+// decimal places (ST_AsGeoJSON's maxdecimaldigits; PostGIS defaults to 9,
+// 6 is about 10 cm on lon/lat data and shrinks payloads substantially).
+// digits is the placeholder of an integer parameter validated with
+// [CheckPrecision], so the SQL text does not depend on its value.
+func OutputPrecisionSQL(ref, digits string) string {
+	return "ST_AsGeoJSON(" + ref + ", " + cast(digits, "int4") + ")::jsonb"
+}
+
+// OutputJSONPrecisionSQL is [OutputPrecisionSQL] producing json instead of
+// jsonb (see [OutputJSONSQL]).
+func OutputJSONPrecisionSQL(ref, digits string) string {
+	return "ST_AsGeoJSON(" + ref + ", " + cast(digits, "int4") + ")::json"
+}
+
+// BufferCost is the cost, in column reads per returned row, a consumer's cost
+// estimate charges for a buffer projection argument ([BufferSQL]):
+// ST_Buffer builds a new polygon around every vertex of the value.
+const BufferCost = 5
+
+// CheckBuffer validates a buffer distance: any finite number, negative
+// distances shrinking polygons (and erasing points and lines). The error is
+// user-facing.
+func CheckBuffer(distance float64) error {
+	if math.IsNaN(distance) || math.IsInf(distance, 0) {
+		return fmt.Errorf("buffer must be a finite number")
+	}
+	return nil
+}
+
+// BufferSQL renders the per-field `buffer` projection argument: the area
+// within distance of the value (ST_Buffer), in metres for geography and in
+// the SRID's units for geometry. The result keeps the flavour of ref, so a
+// geography value stays geography. distance is the placeholder of a float8
+// parameter validated with [CheckBuffer].
+func BufferSQL(ref, distance string) string {
+	return "ST_Buffer(" + ref + ", " + cast(distance, "float8") + ")"
+}
+
+// cast renders placeholder::type, parenthesizing anything but a bare $n
+// placeholder so the cast applies to the whole expression.
+func cast(ph, typ string) string {
+	if len(ph) > 1 && ph[0] == '$' && strings.Trim(ph[1:], "0123456789") == "" {
+		return ph + "::" + typ
+	}
+	return "(" + ph + ")::" + typ
 }
 
 // Derived is one computed spatial accessor exposed as a sibling field of a
@@ -654,6 +717,27 @@ func (d Derived) JSONSQL(ref string, f Flavour) string {
 	expr := d.sql(ref, f)
 	if d.GeoJSON {
 		return OutputJSONSQL(expr)
+	}
+	return expr
+}
+
+// PrecisionSQL is [Derived.SQL] with a geometry valued result rendered by
+// [OutputPrecisionSQL]; accessors that return no geometry ignore digits.
+func (d Derived) PrecisionSQL(ref string, f Flavour, digits string) string {
+	expr := d.sql(ref, f)
+	if d.GeoJSON {
+		return OutputPrecisionSQL(expr, digits)
+	}
+	return expr
+}
+
+// JSONPrecisionSQL is [Derived.JSONSQL] with a geometry valued result
+// rendered by [OutputJSONPrecisionSQL]; accessors that return no geometry
+// ignore digits.
+func (d Derived) JSONPrecisionSQL(ref string, f Flavour, digits string) string {
+	expr := d.sql(ref, f)
+	if d.GeoJSON {
+		return OutputJSONPrecisionSQL(expr, digits)
 	}
 	return expr
 }
