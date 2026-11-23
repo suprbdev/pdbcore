@@ -641,6 +641,13 @@ func TestCodecRoundTripLive(t *testing.T) {
 		var b args
 		lhs := v.Codec.OutputSQL("(" + v.Codec.SQL(b.add(ps...)...) + ")")
 		rhs := v.Codec.OutputSQL("(" + v.Codec.SQL(b.add(ps2...)...) + ")")
+		var jsonOut any
+		if err := d.query("SELECT "+v.Codec.OutputJSONSQL("("+in+")"), a.vals, &jsonOut); err != nil {
+			t.Fatalf("%s %v json: %v", tc.typ, tc.val, err)
+		}
+		if !reflect.DeepEqual(out, jsonOut) {
+			t.Errorf("%s %v json output = %s, jsonb output = %s", tc.typ, tc.val, show(jsonOut), show(out))
+		}
 		var same bool
 		if err := d.query("SELECT "+lhs+" = "+rhs, b.vals, &same); err != nil {
 			t.Fatalf("%s: %v", tc.typ, err)
@@ -653,6 +660,9 @@ func TestCodecRoundTripLive(t *testing.T) {
 		contrib.RangeOutputSQL("NULL::int4range"),
 		contrib.MultirangeOutputSQL("NULL::int4multirange"),
 		contrib.HstoreOutputSQL(d.schemaOf(contrib.ExtHstore), "NULL::"+quote(d.schemaOf(contrib.ExtHstore))+".hstore"),
+		contrib.RangeOutputJSONSQL("NULL::int4range"),
+		contrib.MultirangeOutputJSONSQL("NULL::int4multirange"),
+		contrib.HstoreOutputJSONSQL(d.schemaOf(contrib.ExtHstore), "NULL::"+quote(d.schemaOf(contrib.ExtHstore))+".hstore"),
 	} {
 		if got := d.scalar(t, expr); got != nil {
 			t.Errorf("%s = %v, want NULL", expr, got)

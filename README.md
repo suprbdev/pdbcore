@@ -95,6 +95,8 @@ non-atomic column expression groups the same bound or unbound.
 | `multirange` | the six built-in multiranges (PG 14+) | same, with a range operand | same | list of ranges or a literal (`"{[1,3), [5,7)}"`) ↔ `int4multirange(VARIADIC ARRAY(… unnest($1, $2, $3) …))` / jsonb array | GiST |
 | `inet` | `inet`, `cidr` | `containedBy` (`<<`), `containedByOrEquals` (`<<=`), `contains` (`>>`), `containsOrEquals` (`>>=`), `containsOrContainedBy` (`&&`) | `family`, `masklen`, `host`, `network` | text ↔ `$1::inet` / `$1::cidr` | GiST `inet_ops`, SP-GiST |
 
+Output SQL comes in two flavours. `OutputSQL` (`postgis.OutputSQL`, `Derived.SQL`, `Codec.OutputSQL`, `RangeOutputSQL`, `MultirangeOutputSQL`, `HstoreOutputSQL`) yields `jsonb`; the `OutputJSONSQL`/`JSONSQL` counterparts yield `json`, which skips jsonb construction and is markedly cheaper. Use json when the value is only embedded in a `json_build_object`/`json_agg` response; keep jsonb when it is compared, grouped, deduplicated or aggregated with jsonb functions.
+
 Each `Op` also carries `Arg` (operand kind), `Description`, `Index`
 (`IndexHint{Method, OpClass, Note, Ordering}`) and `Extension`; accessor and
 expression types are pg type names (`int4`, `float4`, the range's element

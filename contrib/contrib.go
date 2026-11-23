@@ -330,7 +330,9 @@ type Codec struct {
 	q      qual
 	sql    func(q qual, a []string) string
 	output func(q qual, ref string) string
-	params func(v any) ([]any, error)
+	// outputJSON is output producing json instead of jsonb; nil with output.
+	outputJSON func(q qual, ref string) string
+	params     func(v any) ([]any, error)
 }
 
 // Params coerces an input value into the bind parameters SQL expects.
@@ -360,6 +362,17 @@ func (c *Codec) OutputSQL(ref string) string {
 		return ref
 	}
 	return c.output(c.q, ref)
+}
+
+// OutputJSONSQL is [Codec.OutputSQL] producing json instead of jsonb for
+// hstore and range types. json skips jsonb's parse and normalisation, so it is
+// cheaper for values only embedded in a response, but it cannot be compared,
+// grouped or aggregated with jsonb functions; use OutputSQL for those.
+func (c *Codec) OutputJSONSQL(ref string) string {
+	if c.outputJSON == nil {
+		return ref
+	}
+	return c.outputJSON(c.q, ref)
 }
 
 // Vocabulary is the operator, expression and accessor set for one column
