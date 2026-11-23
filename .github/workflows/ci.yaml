@@ -8,6 +8,10 @@ on:
 env:
   GO_VERSION: "1.26"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint-test:
     runs-on: ubuntu-latest
@@ -34,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [14, 15, 16, 17, 18, 19]
+        pg: ${{ fromJSON(github.event_name == 'pull_request' && '[14, 19]' || '[14, 15, 16, 17, 18, 19]') }}
     services:
       postgres:
         # PostGIS-enabled: the fixture schema creates the extension.
