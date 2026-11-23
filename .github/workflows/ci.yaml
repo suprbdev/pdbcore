@@ -70,3 +70,36 @@ jobs:
         env:
           PDBCORE_TEST_DATABASE_URL: postgres://pdbcore:pdbcore@localhost:5434/pdbcore_test
         run: go test -race -count=1 ./testutil/ ./pgexec/ ./watch/ ./introspect/ ./postgis/ ./contrib/ ./metrics/
+
+  downstream:
+    name: downstream (${{ matrix.repo }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: [pdbq, pdbr]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pdbcore
+      - uses: actions/checkout@v4
+        with:
+          repository: suprbdev/${{ matrix.repo }}
+          path: ${{ matrix.repo }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            pdbcore/go.sum
+            ${{ matrix.repo }}/go.sum
+      - name: Point ${{ matrix.repo }} at this checkout of pdbcore
+        working-directory: ${{ matrix.repo }}
+        run: |
+          go mod edit -replace github.com/suprbdev/pdbcore=../pdbcore
+          go mod tidy
+      - name: Vet
+        working-directory: ${{ matrix.repo }}
+        run: go vet ./...
+      - name: Unit and golden tests (race)
+        working-directory: ${{ matrix.repo }}
+        run: go test -race ./...
