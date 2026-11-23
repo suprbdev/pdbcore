@@ -130,6 +130,7 @@ func allVocabularies(t *testing.T) []contrib.Vocabulary {
 		vs = append(vs, m(contrib.Multirange(mr)))
 	}
 	vs = append(vs, contrib.RangeOf(customRange), m(contrib.MultirangeOf(customRange)))
+	vs = append(vs, contrib.Cube(), contrib.Earth(`my "ext"`), contrib.EarthPoint())
 	for i := range vs {
 		vs[i] = vs[i].Bind(`my "ext"`)
 	}
@@ -209,8 +210,10 @@ func arity(k contrib.ArgKind) (int, int) {
 		return 1, 2
 	case contrib.ArgRange, contrib.ArgMultirange:
 		return 3, 3
-	case contrib.ArgVectorDistance, contrib.ArgTextDistance, contrib.ArgSubpath:
+	case contrib.ArgVectorDistance, contrib.ArgTextDistance, contrib.ArgSubpath, contrib.ArgCubeDistance, contrib.ArgLatLon:
 		return 2, 2
+	case contrib.ArgLatLonDistance:
+		return 3, 3
 	}
 	return 1, 1
 }

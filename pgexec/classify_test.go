@@ -154,6 +154,21 @@ func TestClassifyPostGISInputErrors(t *testing.T) {
 	}
 }
 
+func TestClassifyRasterSRIDErrors(t *testing.T) {
+	for _, code := range []string{"XX000", "P0001"} {
+		e := pgErr(code, "Raster and geometry do not have the same SRID")
+		if got := Classify(e, Prod); got.Class != UserInput || got.Message != e.Message {
+			t.Errorf("%s prod = %v %q", code, got.Class, got.Message)
+		}
+		if got := Classify(e, Strict); got.Class != UserInput || got.Message != "invalid input value" {
+			t.Errorf("%s strict = %v %q", code, got.Class, got.Message)
+		}
+	}
+	if got := Classify(pgErr("P0001", "Raster and geometry do not have the same SRID!"), Prod); got.Class != Internal {
+		t.Errorf("other raise = %v", got.Class)
+	}
+}
+
 func TestClassifyContribInputErrors(t *testing.T) {
 	user := []*pgconn.PgError{
 		pgErr("42704", `text search configuration "klingon" does not exist`),

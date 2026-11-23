@@ -28,6 +28,16 @@
 // The wrappers (ST_Transform of the GeoJSON branch to a constrained column's
 // SRID, the geography cast) are fixed by the column type, which callers take
 // from the catalog.
+//
+// # Rasters
+//
+// postgis_raster columns ([IsRaster]) are not spatial in the sense above:
+// their values are pixel grids, often megabytes each, so callers should not
+// return them. Their surface is read through functions: header-only
+// metadata ([RasterAccessors]), the pixel value at a point
+// ([RasterValueSQL]), per-band statistics ([RasterSummaryStatsSQL]) and an
+// intersects filter ([RasterIntersectsSQL]), weighted for cost estimators by
+// the Raster*Cost constants.
 package postgis
 
 import (
