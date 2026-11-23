@@ -56,6 +56,8 @@ type catalogIndexes struct {
 	extensions atomic.Pointer[sliceIndex[string, Extension]]
 	ranges     atomic.Pointer[sliceIndex[nameKey, RangeType]]
 	multis     atomic.Pointer[sliceIndex[nameKey, RangeType]]
+	domains    atomic.Pointer[sliceIndex[nameKey, Domain]]
+	domainRefs atomic.Pointer[sliceIndex[string, Domain]]
 }
 
 // Reindex discards the by-name lookup maps behind [Catalog.Table],
@@ -72,4 +74,6 @@ func (c *Catalog) Reindex() {
 	c.idx.extensions.Store(nil)
 	c.idx.ranges.Store(nil)
 	c.idx.multis.Store(nil)
+	c.idx.domains.Store(nil)
+	c.idx.domainRefs.Store(nil)
 }

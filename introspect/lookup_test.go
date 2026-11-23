@@ -16,6 +16,7 @@ func genCatalog(n int) *Catalog {
 		c.Composites = append(c.Composites, &Composite{Schema: "public", Name: fmt.Sprintf("c%d", i)})
 		c.Ranges = append(c.Ranges, &RangeType{Schema: "public", Name: fmt.Sprintf("r%d", i), Multirange: fmt.Sprintf("m%d", i), MultirangeSchema: "public"})
 		c.Extensions = append(c.Extensions, &Extension{Name: fmt.Sprintf("x%d", i)})
+		c.Domains = append(c.Domains, &Domain{Schema: "public", Name: fmt.Sprintf("d%d", i)})
 	}
 	return c
 }
@@ -30,6 +31,9 @@ func TestLookupsFollowMutation(t *testing.T) {
 	}
 	if c.Composite("public", "c1") == nil || c.Range("public", "r4") == nil || c.RangeOfMultirange("public", "m4") == nil || !c.HasExtension("x0") {
 		t.Fatal("other lookups wrong")
+	}
+	if c.Domain("public", "d3") != c.Domains[3] || c.DomainByRef("public.d2") != c.Domains[2] || c.DomainByRef("") != nil || c.DomainByRef("public.nope") != nil {
+		t.Fatal("domain lookups wrong")
 	}
 
 	added := &Table{Schema: "app", Name: "new"}
@@ -119,3 +123,30 @@ func benchLookup(b *testing.B, n int) {
 
 func BenchmarkCatalogTable1000(b *testing.B) { benchLookup(b, 1000) }
 func BenchmarkCatalogTable3000(b *testing.B) { benchLookup(b, 3000) }
+
+func TestDomainChain(t *testing.T) {
+	c := &Catalog{Domains: []*Domain{
+		{Schema: "s", Name: "a", Parent: "s.b"},
+		{Schema: "s", Name: "b", Parent: "t.c"},
+		{Schema: "t", Name: "c"},
+		{Schema: "s", Name: "loop", Parent: "s.loop"},
+		{Schema: "s", Name: "dangling", Parent: "s.gone"},
+	}}
+	names := func(ds []*Domain) []string {
+		var out []string
+		for _, d := range ds {
+			out = append(out, d.Ref())
+		}
+		return out
+	}
+	for start, want := range map[string]string{
+		"s.a": "s.a s.b t.c", "t.c": "t.c", "s.loop": "s.loop", "s.dangling": "s.dangling",
+	} {
+		if got := strings.Join(names(c.DomainChain(c.DomainByRef(start))), " "); got != want {
+			t.Errorf("DomainChain(%s) = %q, want %q", start, got, want)
+		}
+	}
+	if c.DomainChain(nil) != nil {
+		t.Error("DomainChain(nil) not empty")
+	}
+}

@@ -25,6 +25,8 @@ type Index struct {
 	ColumnsBy   map[string]smarttags.Tags // "table.column"
 	Enums       map[string]smarttags.Tags // "schema.enum"
 	EnumsBy     map[string]smarttags.Tags // "enum"
+	Domains     map[string]smarttags.Tags // "schema.domain"
+	DomainsBy   map[string]smarttags.Tags // "domain"
 	Functions   map[string]smarttags.Tags // "schema.function"
 	FunctionsBy map[string]smarttags.Tags // "function"
 	Constraints map[string]smarttags.Tags // "schema.constraint"
@@ -39,6 +41,8 @@ func BuildIndex(c *introspect.Catalog) *Index {
 		ColumnsBy:   map[string]smarttags.Tags{},
 		Enums:       map[string]smarttags.Tags{},
 		EnumsBy:     map[string]smarttags.Tags{},
+		Domains:     map[string]smarttags.Tags{},
+		DomainsBy:   map[string]smarttags.Tags{},
 		Functions:   map[string]smarttags.Tags{},
 		FunctionsBy: map[string]smarttags.Tags{},
 		Constraints: map[string]smarttags.Tags{},
@@ -75,6 +79,9 @@ func BuildIndex(c *introspect.Catalog) *Index {
 	for _, e := range c.Enums {
 		index(ix.Enums, ix.EnumsBy, e.Schema+"."+e.Name, e.Name, e.Comment)
 	}
+	for _, d := range c.Domains {
+		index(ix.Domains, ix.DomainsBy, d.Schema+"."+d.Name, d.Name, d.Comment)
+	}
 	for _, f := range c.Functions {
 		index(ix.Functions, ix.FunctionsBy, f.Schema+"."+f.Name, f.Name, f.Comment)
 	}
@@ -105,6 +112,11 @@ func (ix *Index) Column(schema, table, column string) smarttags.Tags {
 // Enum resolves an enum type's tags (schema-less fallback as Table).
 func (ix *Index) Enum(schema, name string) smarttags.Tags {
 	return lookup(ix.Enums, ix.EnumsBy, schema, name)
+}
+
+// Domain resolves a domain's tags (schema-less fallback as Table).
+func (ix *Index) Domain(schema, name string) smarttags.Tags {
+	return lookup(ix.Domains, ix.DomainsBy, schema, name)
 }
 
 // Function resolves a function's tags (schema-less fallback as Table).

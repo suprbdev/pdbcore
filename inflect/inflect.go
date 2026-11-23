@@ -23,6 +23,7 @@ type Input struct {
 	Constraint string   // pg constraint name backing the name (relation kinds)
 	Function   string   // pg function name (when applicable)
 	Enum       string   // pg enum type name
+	Domain     string   // pg domain name
 	Value      string   // enum value
 	IsList     bool
 }
