@@ -36,6 +36,8 @@ type Catalog struct {
 	// schemas were introspected, so a column whose range type lives
 	// elsewhere still resolves. The built-in range types are not listed.
 	Ranges []*RangeType `json:"ranges,omitempty"`
+
+	idx catalogIndexes
 }
 
 // RangeType is a range type as recorded in pg_range.
@@ -424,24 +426,16 @@ func (f *Function) Variadic() *FuncArg {
 	return nil
 }
 
-// Table returns the table with the given schema+name, or nil.
+// Table returns the table with the given schema+name, or nil. Lookups use a
+// lazily built map that is rebuilt when Tables changes shape; see
+// [Catalog.Reindex]. Safe for concurrent readers.
 func (c *Catalog) Table(schema, name string) *Table {
-	for _, t := range c.Tables {
-		if t.Schema == schema && t.Name == name {
-			return t
-		}
-	}
-	return nil
+	return lookup(&c.idx.tables, c.Tables, nameKey{schema, name}, func(t *Table) nameKey { return nameKey{t.Schema, t.Name} })
 }
 
 // Enum returns the enum with the given schema+name, or nil.
 func (c *Catalog) Enum(schema, name string) *Enum {
-	for _, e := range c.Enums {
-		if e.Schema == schema && e.Name == name {
-			return e
-		}
-	}
-	return nil
+	return lookup(&c.idx.enums, c.Enums, nameKey{schema, name}, func(e *Enum) nameKey { return nameKey{e.Schema, e.Name} })
 }
 
 // EnumByRef returns the table-backed enum a Column.EnumRef points at, or nil.
@@ -449,22 +443,17 @@ func (c *Catalog) EnumByRef(ref string) *Enum {
 	if ref == "" {
 		return nil
 	}
-	for _, e := range c.Enums {
-		if e.TableBacked && e.Schema+"."+e.Name == ref {
-			return e
+	return lookup(&c.idx.enumRefs, c.Enums, ref, func(e *Enum) string {
+		if !e.TableBacked {
+			return ""
 		}
-	}
-	return nil
+		return e.Schema + "." + e.Name
+	})
 }
 
 // Extension returns the installed extension with the given name, or nil.
 func (c *Catalog) Extension(name string) *Extension {
-	for _, e := range c.Extensions {
-		if e.Name == name {
-			return e
-		}
-	}
-	return nil
+	return lookup(&c.idx.extensions, c.Extensions, name, func(e *Extension) string { return e.Name })
 }
 
 // HasExtension reports whether the named extension is installed.
@@ -473,33 +462,21 @@ func (c *Catalog) HasExtension(name string) bool { return c.Extension(name) != n
 // Range returns the range type with the given schema+name from
 // [Catalog.Ranges], or nil.
 func (c *Catalog) Range(schema, name string) *RangeType {
-	for _, r := range c.Ranges {
-		if r.Schema == schema && r.Name == name {
-			return r
-		}
-	}
-	return nil
+	return lookup(&c.idx.ranges, c.Ranges, nameKey{schema, name}, func(r *RangeType) nameKey { return nameKey{r.Schema, r.Name} })
 }
 
 // RangeOfMultirange returns the range type whose multirange type has the
 // given schema+name, or nil.
 func (c *Catalog) RangeOfMultirange(schema, name string) *RangeType {
-	for _, r := range c.Ranges {
-		if r.Multirange != "" && r.MultirangeSchema == schema && r.Multirange == name {
-			return r
-		}
+	if name == "" {
+		return nil
 	}
-	return nil
+	return lookup(&c.idx.multis, c.Ranges, nameKey{schema, name}, func(r *RangeType) nameKey { return nameKey{r.MultirangeSchema, r.Multirange} })
 }
 
 // Composite returns the composite type with the given schema+name, or nil.
 func (c *Catalog) Composite(schema, name string) *Composite {
-	for _, ct := range c.Composites {
-		if ct.Schema == schema && ct.Name == name {
-			return ct
-		}
-	}
-	return nil
+	return lookup(&c.idx.composites, c.Composites, nameKey{schema, name}, func(ct *Composite) nameKey { return nameKey{ct.Schema, ct.Name} })
 }
 
 // Hash returns a stable content hash of the catalog, used by the schema

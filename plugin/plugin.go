@@ -85,6 +85,7 @@ func (r *Registry) TransformCatalog(ctx context.Context, disabled map[string]boo
 			if err := h.TransformCatalog(ctx, c); err != nil {
 				return err
 			}
+			c.Reindex()
 		}
 	}
 	return nil
