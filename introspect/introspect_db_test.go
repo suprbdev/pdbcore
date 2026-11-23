@@ -674,3 +674,25 @@ func TestIntrospectBaseTypesAndRangesLive(t *testing.T) {
 		}
 	}
 }
+
+func TestIntrospectSkipsTypeOwnedFunctionsLive(t *testing.T) {
+	tx := liveTx(t,
+		`CREATE SCHEMA pdbcore_typefn_test`,
+		`CREATE TYPE pdbcore_typefn_test.floatrange AS RANGE (subtype = float8)`,
+		`CREATE FUNCTION pdbcore_typefn_test.keep_me(a int) RETURNS int LANGUAGE sql AS 'SELECT a'`,
+	)
+	cat, err := Introspect(context.Background(), tx, []string{"pdbcore_typefn_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range cat.Functions {
+		got = append(got, f.Name)
+	}
+	if !reflect.DeepEqual(got, []string{"keep_me"}) {
+		t.Fatalf("functions = %v, want only keep_me", got)
+	}
+	if cat.Range("pdbcore_typefn_test", "floatrange") == nil {
+		t.Fatal("range type itself must still be listed")
+	}
+}

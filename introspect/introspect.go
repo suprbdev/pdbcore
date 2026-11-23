@@ -452,6 +452,11 @@ func readFunctions(ctx context.Context, db Querier, schemas []string, cat *Catal
 		  AND NOT EXISTS (SELECT 1 FROM pg_depend d
 		                  WHERE d.objid = p.oid AND d.classid = 'pg_proc'::regclass
 		                    AND d.deptype = 'e')
+		  -- constructors CREATE TYPE ... AS RANGE generates (int4range(),
+		  -- int4multirange(), ...) are owned by their type
+		  AND NOT EXISTS (SELECT 1 FROM pg_depend d
+		                  WHERE d.objid = p.oid AND d.classid = 'pg_proc'::regclass
+		                    AND d.refclassid = 'pg_type'::regclass AND d.deptype = 'i')
 		ORDER BY n.nspname, p.proname`, schemas)
 	if err != nil {
 		return fmt.Errorf("introspect: functions: %w", err)
