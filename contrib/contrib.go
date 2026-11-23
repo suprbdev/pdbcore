@@ -1,6 +1,7 @@
 // Package contrib models the operator vocabularies and value coercion for
 // PostgreSQL's non-scalar built-in types and the common contrib extensions —
-// full-text search (tsvector, and to_tsvector over text), pg_trgm, unaccent,
+// full-text search (tsvector, and to_tsvector over text, json and jsonb) with
+// ts_rank relevance and ts_headline snippets, pg_trgm, unaccent,
 // fuzzystrmatch, hstore, ltree, citext, intarray, range and multirange types,
 // inet/cidr and pgvector's vector, halfvec and sparsevec types and bit
 // distances — as a small,
@@ -11,7 +12,9 @@
 // column type:
 //
 //   - which filter operators ([Op]) apply, what operand each takes, how it
-//     renders and which index can serve it;
+//     renders and which index can serve it; full-text matches also render
+//     their relevance ([Op.RankSQL]) and highlighted snippets of a document
+//     ([Op.HeadlineSQL], with [HeadlineOptions]) from the same placeholders;
 //   - which operand-taking value expressions ([Expr]) exist for ordering or
 //     selection (trigram similarity and distance, vector and bit distances,
 //     Levenshtein distance; [Expr.Score] marks the ones offered as
@@ -88,6 +91,7 @@ const (
 const (
 	VocabFullText   = "fulltext"   // tsvector columns
 	VocabTextSearch = "textsearch" // to_tsvector over text-like columns
+	VocabJSONSearch = "jsonsearch" // to_tsvector over json and jsonb columns
 	VocabTrgm       = "trgm"       // pg_trgm over text-like columns
 	VocabCitext     = "citext"
 	VocabHstore     = "hstore"
@@ -273,7 +277,9 @@ type Op struct {
 	q      qual
 	render func(q qual, col string, a []string) string
 	rank   func(q qual, fn, col string, a []string) string
-	params func(v any) ([]any, error)
+	// headline renders ts_headline over a document for full-text matches.
+	headline func(q qual, doc, options string, a []string) string
+	params   func(v any) ([]any, error)
 	// since is the first extension version providing the operator.
 	since string
 }
@@ -677,6 +683,8 @@ func forType(cat *introspect.Catalog, schema, name string, arr bool) []Vocabular
 		case "inet", "cidr":
 			v, _ := Inet(base)
 			return []Vocabulary{v}
+		case "json", "jsonb":
+			return []Vocabulary{JSONSearch(base)}
 		}
 		if v, ok := Range(base); ok {
 			return []Vocabulary{v}

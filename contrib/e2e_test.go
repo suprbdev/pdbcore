@@ -162,6 +162,8 @@ var sampleColumns = []struct {
 	{"addr", "inet", []any{"10.1.2.3", nil, "::1"}},
 	{"net", "cidr", []any{"10.0.0.0/8", nil, "2001:db8::/32"}},
 	{"ids", "int4[]", []any{"{1,2,3}", nil, "{}"}},
+	{"meta", "jsonb", []any{`{"title": "The quick brown fox", "tags": ["cat", 1]}`, nil, "{}"}},
+	{"meta_j", "json", []any{`{"title": "hello world"}`, nil, "[]"}},
 }
 
 // textCast renders a value for a column without a codec from its text form.
@@ -230,7 +232,7 @@ func codecFor(t *testing.T, d *liveDB, col *introspect.Column) *contrib.Codec {
 // operand returns a sample operand for an operator of a vocabulary.
 func operand(v contrib.Vocabulary, op contrib.Op) any {
 	switch v.Name {
-	case contrib.VocabFullText, contrib.VocabTextSearch:
+	case contrib.VocabFullText, contrib.VocabTextSearch, contrib.VocabJSONSearch:
 		return map[string]any{"query": "cat & dog", "config": "english"}
 	case contrib.VocabLtree, contrib.VocabLtreeArray:
 		switch op.Name {
@@ -329,6 +331,15 @@ func TestEveryOpExecutes(t *testing.T) {
 					if err := d.query(q, a.vals, &r); err != nil {
 						t.Errorf("%s %s rank: %v\n%s", c.name, op.Name, err, q)
 					}
+					doc := "t.body"
+					if contrib.IsDocument(col.PGType) {
+						doc = ref
+					}
+					opts := a.add(`MaxWords=5, MinWords=2, StartSel="<em class=hit>", FragmentDelimiter=" , "`)
+					q = "SELECT array_agg((" + op.HeadlineSQL(doc, opts[0], phs...) + ")::text ORDER BY id) FROM samples AS t"
+					if err := d.query(q, a.vals, &r); err != nil {
+						t.Errorf("%s %s headline: %v\n%s", c.name, op.Name, err, q)
+					}
 				}
 			}
 			for _, e := range v.Exprs {
@@ -367,7 +378,7 @@ func TestEveryOpExecutes(t *testing.T) {
 			t.Error("an unbound operator resolved although the extension schema is not on the search_path")
 		}
 	}
-	for _, n := range []string{contrib.VocabFullText, contrib.VocabTextSearch, contrib.VocabTrgm, contrib.VocabCitext,
+	for _, n := range []string{contrib.VocabFullText, contrib.VocabTextSearch, contrib.VocabJSONSearch, contrib.VocabTrgm, contrib.VocabCitext,
 		contrib.VocabHstore, contrib.VocabLtree, contrib.VocabLtreeArray, contrib.VocabRange, contrib.VocabMultirange, contrib.VocabInet,
 		contrib.VocabUnaccent, contrib.VocabFuzzy, contrib.VocabIntarray} {
 		if !seen[n] {
@@ -436,6 +447,12 @@ func TestOpValuesLive(t *testing.T) {
 		{"text", "The quick brown fox", "matchesPhrase", simple("brown fox"), true},
 		{"text", "The quick brown fox", "matchesPhrase", simple("fox brown"), false},
 		{"varchar", "The quick brown fox", "matchesPlain", simple("quick"), true},
+		{"jsonb", `{"title": "The quick brown fox", "n": 7}`, "matchesWebsearch", en("quick foxes"), true},
+		{"jsonb", `{"title": "The quick brown fox"}`, "matches", simple("title"), false},
+		{"jsonb", `{"tags": ["cat dog"]}`, "matchesPhrase", simple("cat dog"), true},
+		{"jsonb", `{"tags": ["cat", "dog"]}`, "matchesPhrase", simple("cat dog"), false},
+		{"json", `{"title": "The quick brown fox"}`, "matchesPlain", en("brown"), true},
+		{"json", `{"n": 42}`, "matches", simple("42"), false},
 		{"text", "hello world", "similarTo", "hello world!", true},
 		{"text", "hello world", "similarTo", "xyz", false},
 		{"text", "hello world", "wordSimilarTo", "worl", true},
@@ -1013,5 +1030,67 @@ func TestExtensionTypeSchemaLive(t *testing.T) {
 	}
 	if vs := contrib.ForType(cat, hs+".hstore", false); len(vs) != 1 || vs[0].Name != contrib.VocabHstore {
 		t.Errorf("ForType(%s.hstore) = %v", hs, vs)
+	}
+}
+
+// TestHeadlineLive checks ts_headline snippets against the query of a
+// full-text match over a tsvector column with a separate source text, a text
+// column and a jsonb document, with options bound as one text parameter.
+func TestHeadlineLive(t *testing.T) {
+	d := openLive(t)
+	body := "PostgreSQL full text search finds documents. A headline shows where the query matched in the document."
+	opts := func(in map[string]any) string {
+		h, err := contrib.ParseHeadlineOptions(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h.String()
+	}
+	tests := []struct {
+		vocab   contrib.Vocabulary
+		op      string
+		doc     string
+		operand any
+		options string
+		want    string
+	}{
+		{contrib.FullText(), "matches", "$1::text", map[string]any{"query": "headline", "config": "english"}, "",
+			"full text search finds documents. A <b>headline</b> shows where the query matched in the document."},
+		{contrib.FullText(), "matchesWebsearch", "$1::text", "headline", opts(map[string]any{
+			"maxWords": 4, "minWords": 2, "startSel": "[", "stopSel": "]",
+		}), "[headline] shows"},
+		{contrib.TextSearch("text"), "matchesPlain", "$1::text", map[string]any{"query": "documents query", "config": "english"},
+			opts(map[string]any{"maxFragments": 2, "maxWords": 5, "minWords": 1, "fragmentDelimiter": " , ", "startSel": "<em class=hit>", "stopSel": "</em>"}),
+			"search finds <em class=hit>documents</em>. A headline , <em class=hit>query</em> matched in the <em class=hit>document</em>"},
+		{contrib.TextSearch("text"), "matches", "$1::text", "matched", opts(map[string]any{"highlightAll": true}),
+			"PostgreSQL full text search finds documents. A headline shows where the query <b>matched</b> in the document."},
+		{contrib.JSONSearch("jsonb"), "matchesPhrase", `jsonb_build_object('title', $1::text, 'n', 1)`,
+			map[string]any{"query": "full text", "config": "english"}, opts(map[string]any{"startSel": "*", "stopSel": "*"}),
+			`{"n": 1, "title": "*full* *text* search finds documents. A headline shows where the query matched in the document"}`},
+	}
+	for _, tc := range tests {
+		op, ok := tc.vocab.Op(tc.op)
+		if !ok {
+			t.Fatalf("no op %s", tc.op)
+		}
+		a := args{vals: []any{body}}
+		ps, err := op.Params(tc.operand)
+		if err != nil {
+			t.Fatal(err)
+		}
+		phs := a.add(ps...)
+		optPh := ""
+		if tc.options != "" {
+			optPh = a.add(tc.options)[0]
+		}
+		q := "SELECT (" + op.HeadlineSQL(tc.doc, optPh, phs...) + ")::text"
+		var got string
+		if err := d.query(q, a.vals, &got); err != nil {
+			t.Errorf("%s %s: %v\n%s", tc.vocab.Name, tc.op, err, q)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s %s:\n got %s\nwant %s", tc.vocab.Name, tc.op, got, tc.want)
+		}
 	}
 }

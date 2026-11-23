@@ -163,6 +163,7 @@ func FullText() Vocabulary {
 				q, c := ftsArgs(a)
 				return RankSQL(Rank(fn), col, TSQuerySQL(vt.v, q, c))
 			},
+			headline: headlineFunc(vt.v),
 		}
 	}
 	return Vocabulary{
@@ -179,6 +180,23 @@ func FullText() Vocabulary {
 // configuration as the query, as PostgREST does for fts on text columns.
 // See [TSVectorSQL] for which indexes can serve it.
 func TextSearch(textType string) Vocabulary {
+	return Vocabulary{Name: VocabTextSearch, Type: textType, Ops: documentSearchOps(
+		"The column is parsed with to_tsvector in the same config as the query (optional; default_text_search_config otherwise).")}
+}
+
+// JSONSearch is the full-text vocabulary of a json or jsonb column
+// (jsonType is its pg type): to_tsvector over the column indexes the string
+// values of the document (not its keys, numbers or booleans), in the same
+// configuration as the query, as PostgREST does for fts on json columns.
+// See [TSVectorSQL] for which indexes can serve it.
+func JSONSearch(jsonType string) Vocabulary {
+	return Vocabulary{Name: VocabJSONSearch, Type: jsonType, Ops: documentSearchOps(
+		"The string values of the document are parsed with to_tsvector in the same config as the query (optional; default_text_search_config otherwise); keys, numbers and booleans are not searched.")}
+}
+
+// documentSearchOps are the matches* operators over a document column (text
+// or json) converted with to_tsvector, described with note.
+func documentSearchOps(note string) []Op {
 	idx := []IndexHint{{
 		Method: "gin",
 		Note:   "expression index on to_tsvector('<config>', column); used only when the query passes that config",
@@ -187,7 +205,7 @@ func TextSearch(textType string) Vocabulary {
 	for i, vt := range variants {
 		ops[i] = Op{
 			Name: vt.name, Arg: ArgFullText, Index: idx,
-			Description: vt.desc + " The column is parsed with to_tsvector in the same config as the query (optional; default_text_search_config otherwise).",
+			Description: vt.desc + " " + note,
 			render: func(_ qual, col string, a []string) string {
 				q, c := ftsArgs(a)
 				return TSVectorSQL(col, c) + " @@ " + TSQuerySQL(vt.v, q, c)
@@ -196,7 +214,8 @@ func TextSearch(textType string) Vocabulary {
 				q, c := ftsArgs(a)
 				return RankSQL(Rank(fn), TSVectorSQL(col, c), TSQuerySQL(vt.v, q, c))
 			},
+			headline: headlineFunc(vt.v),
 		}
 	}
-	return Vocabulary{Name: VocabTextSearch, Type: textType, Ops: ops}
+	return ops
 }

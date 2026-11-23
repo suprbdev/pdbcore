@@ -424,3 +424,60 @@ func TestDistanceUnits(t *testing.T) {
 		}
 	}
 }
+
+// TestPrecisionAndBufferLive rounds GeoJSON coordinates with a bound digits
+// parameter and buffers geometry in SRID units and geography in metres.
+func TestPrecisionAndBufferLive(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	const pt = "POINT(-0.128123456789 51.508123456789)"
+	for _, f := range []postgis.Flavour{postgis.Geometry, postgis.Geography} {
+		for _, tc := range []struct {
+			digits int64
+			want   string
+		}{
+			{0, "[0,52]"},
+			{3, "[-0.128,51.508]"},
+			{6, "[-0.128123,51.508123]"},
+		} {
+			var got string
+			q := "SELECT (" + postgis.OutputJSONPrecisionSQL(column(f), "$2") + "->'coordinates')::text"
+			if err := conn.QueryRow(ctx, q, pt, tc.digits).Scan(&got); err != nil {
+				t.Fatalf("%s precision %d: %v\n%s", f, tc.digits, err, q)
+			}
+			if strings.ReplaceAll(got, " ", "") != tc.want {
+				t.Errorf("%s precision %d = %s, want %s", f, tc.digits, got, tc.want)
+			}
+			var jb string
+			q = "SELECT (" + postgis.OutputPrecisionSQL(column(f), "$2") + "->'coordinates')::text"
+			if err := conn.QueryRow(ctx, q, pt, tc.digits).Scan(&jb); err != nil {
+				t.Fatalf("%s jsonb precision %d: %v", f, tc.digits, err)
+			}
+		}
+	}
+	var area float64
+	q := "SELECT ST_Area(" + postgis.BufferSQL(column(postgis.Geography), "$2") + ")"
+	if err := conn.QueryRow(ctx, q, "POINT(0 0)", 1000.0).Scan(&area); err != nil {
+		t.Fatalf("geography buffer: %v\n%s", err, q)
+	}
+	if want := 3.14159 * 1000 * 1000; area < want*0.97 || area > want*1.01 {
+		t.Errorf("geography buffer of 1000 m has area %v m², want about %v", area, want)
+	}
+	q = "SELECT ST_Area(" + postgis.BufferSQL(column(postgis.Geometry), "$2") + ")"
+	if err := conn.QueryRow(ctx, q, "POINT(0 0)", 1.0).Scan(&area); err != nil {
+		t.Fatalf("geometry buffer: %v\n%s", err, q)
+	}
+	if area < 3.1 || area > 3.15 {
+		t.Errorf("geometry buffer of 1 unit has area %v, want about pi", area)
+	}
+	var empty bool
+	q = "SELECT ST_IsEmpty(" + postgis.BufferSQL(column(postgis.Geometry), "$2") + ")"
+	if err := conn.QueryRow(ctx, q, "POLYGON((0 0,1 0,1 1,0 1,0 0))", -1.0).Scan(&empty); err != nil || !empty {
+		t.Errorf("negative buffer erasing a polygon = %v, %v; want empty", empty, err)
+	}
+	var typ string
+	q = "SELECT pg_typeof(" + postgis.BufferSQL(column(postgis.Geography), "$2") + ")::text"
+	if err := conn.QueryRow(ctx, q, "POINT(0 0)", 10.0).Scan(&typ); err != nil || typ != "geography" {
+		t.Errorf("geography buffer type = %q, %v", typ, err)
+	}
+}
