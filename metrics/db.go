@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/suprbdev/pdbcore/pgexec"
 )
 
 // DBObserver returns the [pgexec.Observer] that records database operation
-// durations, errors by SQLSTATE class and retries. Set it as
+// durations, errors by SQLSTATE class and retries. pgx.ErrNoRows is not
+// counted as an error, so a QueryRow that found nothing can be reported
+// as-is. Set it as
 // pgexec.TxOptions.Observer and pass it to pgexec.Observe for statements
 // run outside the transaction helpers. On a nil Metrics it returns nil, so
 // observation is skipped entirely.
@@ -32,7 +35,7 @@ func (o dbObserver) ObserveQuery(_ context.Context, ev pgexec.QueryEvent) {
 	if ev.Attempt > 0 {
 		o.m.dbRetries.WithLabelValues(op).Inc()
 	}
-	if ev.Err != nil {
+	if ev.Err != nil && !errors.Is(ev.Err, pgx.ErrNoRows) {
 		o.m.dbErrors.WithLabelValues(op, SQLStateClass(ev.Err)).Inc()
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -253,11 +254,15 @@ func TestDBObserver(t *testing.T) {
 	o.ObserveQuery(ctx, pgexec.QueryEvent{Op: pgexec.OpQueryTx, Attempt: 1, Duration: time.Millisecond,
 		Err: fmt.Errorf("set identity: %w", &pgconn.PgError{Code: "42501"})})
 	pgexec.Observe(ctx, o, "query", time.Now(), context.DeadlineExceeded)
+	pgexec.Observe(ctx, o, "query", time.Now(), fmt.Errorf("scan: %w", pgx.ErrNoRows))
 	o.ObserveQuery(ctx, pgexec.QueryEvent{})
 
 	got := scrape(t, m.Handler())
 	want(t, got, `test_db_duration_seconds_count{op="query_tx"}`, 3)
-	want(t, got, `test_db_duration_seconds_count{op="query"}`, 1)
+	want(t, got, `test_db_duration_seconds_count{op="query"}`, 2)
+	if _, ok := got[`test_db_errors_total{op="query",sqlstate_class="other"}`]; ok {
+		t.Error("pgx.ErrNoRows counted as an error")
+	}
 	want(t, got, `test_db_duration_seconds_count{op="unknown"}`, 1)
 	want(t, got, `test_db_errors_total{op="query_tx",sqlstate_class="40"}`, 1)
 	want(t, got, `test_db_errors_total{op="query_tx",sqlstate_class="42"}`, 1)
