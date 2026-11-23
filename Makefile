@@ -17,6 +17,7 @@ test: ## Unit tests (hermetic, no database needed)
 # without PDBCORE_TEST_DATABASE_URL, so this target is what actually runs them.
 test-e2e: ## DB-backed tests against a disposable PostGIS Postgres
 	docker compose -p pdbcore-test -f compose.test.yaml up -d --wait
+	docker compose -p pdbcore-test -f compose.test.yaml exec -T db sh -c 'apt-get update -qq && apt-get install -y -qq postgresql-$$PG_MAJOR-pgvector' >/dev/null 2>&1 || echo "pgvector unavailable: its tests will skip"
 	PDBCORE_TEST_DATABASE_URL="$(TEST_DB)" $(GO) test -race -count=1 ./testutil/ ./pgexec/ ./watch/ ./introspect/ ./postgis/ ./contrib/ ./metrics/; \
 	status=$$?; docker compose -p pdbcore-test -f compose.test.yaml down -v; exit $$status
 

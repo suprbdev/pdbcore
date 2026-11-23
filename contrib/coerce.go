@@ -37,6 +37,12 @@ func coerce(k ArgKind, v any) ([]any, error) {
 			return nil, err
 		}
 		return []any{h}, nil
+	case ArgVector:
+		s, err := VectorParam(v)
+		if err != nil {
+			return nil, err
+		}
+		return []any{s}, nil
 	case ArgRange, ArgMultirange, ArgElement:
 		return nil, fmt.Errorf("%s operand needs a range type", k)
 	}

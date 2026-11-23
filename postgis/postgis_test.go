@@ -306,6 +306,7 @@ func TestOpsRender(t *testing.T) {
 		{"orderingEquals", `ST_OrderingEquals("t"."geom", $1)`},
 		{"intersects3D", `ST_3DIntersects("t"."geom", $1)`},
 		{"bboxIntersectsND", `"t"."geom" &&& $1`},
+		{"bboxIntersects2D", `"t"."geom" && $1`},
 	}
 	covered := map[string]bool{"dwithin": true, "beyond": true, "isNull": true}
 	for _, tc := range tests {
@@ -336,7 +337,7 @@ func TestOpOrderIsAppendOnly(t *testing.T) {
 		"bboxLeftOf", "bboxRightOf", "bboxBelow", "bboxAbove",
 		"bboxOverlapsOrLeftOf", "bboxOverlapsOrRightOf", "bboxOverlapsOrBelow",
 		"bboxOverlapsOrAbove", "bboxEquals", "exactlyEquals", "orderingEquals",
-		"intersects3D", "bboxIntersectsND",
+		"intersects3D", "bboxIntersectsND", "bboxIntersects2D",
 	}
 	if got := OpNames(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("OpNames() = %v\nwant %v", got, want)
@@ -371,6 +372,7 @@ func TestOpFlags(t *testing.T) {
 		{"orderingEquals", false, true},
 		{"intersects3D", false, true},
 		{"bboxIntersectsND", false, true},
+		{"bboxIntersects2D", true, true},
 	}
 	for _, tc := range tests {
 		op, ok := OpByName(tc.op)
@@ -418,6 +420,7 @@ func TestOpKinds(t *testing.T) {
 		"intersects3D":     ArgGeometry,
 		"exactlyEquals":    ArgGeometry,
 		"bboxIntersectsND": ArgGeometry,
+		"bboxIntersects2D": ArgGeometry,
 	}
 	for name, want := range tests {
 		op, ok := OpByName(name)
@@ -460,7 +463,7 @@ func TestOutputSQLEvaluatesRefOnce(t *testing.T) {
 func TestDerivedGeographyCasts(t *testing.T) {
 	// Accessors without a geography overload must cast to geometry so they do
 	// not fail at execution time.
-	for _, suffix := range []string{"Centroid", "Envelope", "GeometryType", "IsValid", "Perimeter"} {
+	for _, suffix := range []string{"Centroid", "Envelope", "GeometryType", "IsValid"} {
 		d, ok := DerivedBySuffix(suffix)
 		if !ok {
 			t.Fatalf("derived %q not found", suffix)
@@ -469,9 +472,9 @@ func TestDerivedGeographyCasts(t *testing.T) {
 			t.Errorf("%s on geography is not cast: %s", suffix, got)
 		}
 	}
-	// Area and Length do have geography overloads (and mean metres there), so
-	// they must NOT be cast away.
-	for _, suffix := range []string{"Area", "Length"} {
+	// Area, Length and Perimeter do have geography overloads (and mean metres
+	// there), so they must NOT be cast away.
+	for _, suffix := range []string{"Area", "Length", "Perimeter"} {
 		d, _ := DerivedBySuffix(suffix)
 		if got := d.SQL(`"t"."g"`, Geography); strings.Contains(got, "::geometry") {
 			t.Errorf("%s on geography should keep spheroidal units: %s", suffix, got)
@@ -524,8 +527,8 @@ func TestDerivedSQL(t *testing.T) {
 		{"Ymax", `ST_YMax("t"."g")`, `ST_YMax("t"."g"::geometry)`},
 		{"Area", `ST_Area("t"."g")`, `ST_Area("t"."g")`},
 		{"Length", `ST_Length("t"."g")`, `ST_Length("t"."g")`},
-		{"Perimeter", `ST_Perimeter("t"."g")`, `ST_Perimeter("t"."g"::geometry)`},
-		{"Centroid", `ST_AsGeoJSON(ST_Centroid("t"."g"))::jsonb`, `ST_AsGeoJSON(ST_Centroid("t"."g"::geometry))::jsonb`},
+		{"Perimeter", `ST_Perimeter("t"."g")`, `ST_Perimeter("t"."g")`},
+		{"Centroid", `ST_AsGeoJSON(ST_Centroid("t"."g"))::jsonb`, `ST_AsGeoJSON(CASE WHEN ST_GeometryType("t"."g"::geometry) = 'ST_GeometryCollection' THEN ST_Centroid("t"."g"::geometry) ELSE ST_Centroid("t"."g")::geometry END)::jsonb`},
 		{"Envelope", `ST_AsGeoJSON(ST_Envelope("t"."g"))::jsonb`, `ST_AsGeoJSON(ST_Envelope("t"."g"::geometry))::jsonb`},
 		{"Srid", `ST_SRID("t"."g")`, `ST_SRID("t"."g")`},
 		{"GeometryType", `ST_GeometryType("t"."g")`, `ST_GeometryType("t"."g"::geometry)`},
