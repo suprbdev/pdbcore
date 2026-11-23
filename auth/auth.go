@@ -7,6 +7,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -17,7 +18,8 @@ import (
 
 // ErrInvalidToken marks a present-but-unusable credential: malformed
 // Authorization header, bad signature, expired, wrong issuer/audience, JWKS
-// miss, or claim headers from an untrusted peer. Products map it to 401.
+// miss or outage, claim headers from an untrusted peer, or malformed,
+// repeated, conflicting or unlisted claim headers. Products map it to 401.
 var ErrInvalidToken = errors.New("invalid token")
 
 // ErrRoleNotAllowed marks a valid credential whose role claim is outside the
@@ -62,8 +64,23 @@ type Config struct {
 	JWTIssuer   string
 	JWTAudience string
 	// HeaderPrefix is the claim-header prefix in headers mode
-	// (pdbq: X-Pdbq-Claim-, pdbr: X-Pdbr-Claim-).
+	// (pdbq: X-Pdbq-Claim-, pdbr: X-Pdbr-Claim-), matched
+	// case-insensitively. The rest of the header name must be
+	// alphanumeric words joined by single hyphens; the claim key is that
+	// suffix lower-cased with hyphens turned into underscores
+	// (X-Pdbq-Claim-User-Id is user_id), so every claim has exactly one
+	// header spelling. A request is rejected with ErrInvalidToken when a
+	// prefixed header has any other shape (for example an underscore), is
+	// repeated, or maps to the same claim as another header.
+	//
+	// The gateway in front must remove every client-supplied header that
+	// starts with the prefix, in any letter case, before adding its own.
 	HeaderPrefix string
+	// HeaderClaims, when non-empty, lists the claim keys (user_id, not
+	// User-Id) that claim headers may carry; RoleClaim is always allowed.
+	// A request with any other claim header is rejected with
+	// ErrInvalidToken.
+	HeaderClaims []string
 	// TrustedProxies gates claim headers by peer address; nil trusts every
 	// peer, an empty non-nil slice trusts none.
 	TrustedProxies []netip.Prefix
@@ -73,6 +90,9 @@ type Config struct {
 	AnonymousRole string
 	// AllowedRoles restricts claim-supplied roles; empty allows any.
 	AllowedRoles []string
+	// Logger receives JWKS fetch failures, with the endpoint URL and cause
+	// that clients never see; nil uses slog.Default().
+	Logger *slog.Logger
 }
 
 // Authenticator turns an HTTP request into (claims, role) per the configured
@@ -81,6 +101,9 @@ type Authenticator struct {
 	cfg Config
 	// jwks verifies asymmetric tokens when JWKSURL is set.
 	jwks *jwksCache
+	// headerClaims is the HeaderClaims allowlist plus RoleClaim; nil
+	// allows every claim.
+	headerClaims map[string]bool
 }
 
 // New builds an Authenticator. Invalid TrustedProxies entries cannot occur
@@ -88,7 +111,20 @@ type Authenticator struct {
 func New(cfg Config) *Authenticator {
 	a := &Authenticator{cfg: cfg}
 	if cfg.JWKSURL != "" {
-		a.jwks = newJWKSCache(cfg.JWKSURL, cfg.JWKSCacheTTL)
+		log := cfg.Logger
+		if log == nil {
+			log = slog.Default()
+		}
+		a.jwks = newJWKSCache(cfg.JWKSURL, cfg.JWKSCacheTTL, log)
+	}
+	if len(cfg.HeaderClaims) > 0 {
+		a.headerClaims = make(map[string]bool, len(cfg.HeaderClaims)+1)
+		for _, c := range cfg.HeaderClaims {
+			a.headerClaims[c] = true
+		}
+		if cfg.RoleClaim != "" {
+			a.headerClaims[cfg.RoleClaim] = true
+		}
 	}
 	return a
 }
@@ -132,7 +168,7 @@ func (a *Authenticator) fromJWT(r *http.Request) (map[string]any, string, error)
 		methods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
 		keyfunc = func(t *jwt.Token) (any, error) {
 			kid, _ := t.Header["kid"].(string)
-			return a.jwks.key(kid)
+			return a.jwks.key(r.Context(), kid)
 		}
 	}
 	parserOpts := []jwt.ParserOption{
@@ -147,27 +183,95 @@ func (a *Authenticator) fromJWT(r *http.Request) (map[string]any, string, error)
 	}
 	_, err := jwt.ParseWithClaims(tokenStr, claims, keyfunc, parserOpts...)
 	if err != nil {
+		if errors.Is(err, errJWKS) {
+			return nil, "", invalidToken("invalid token", err)
+		}
 		return nil, "", invalidToken("invalid token: "+err.Error(), err)
 	}
 	return a.resolve(map[string]any(claims))
 }
 
 func (a *Authenticator) fromHeaders(r *http.Request) (map[string]any, string, error) {
-	claims := map[string]any{}
-	prefix := http.CanonicalHeaderKey(a.cfg.HeaderPrefix)
-	for name, vals := range r.Header {
-		if strings.HasPrefix(name, prefix) && len(vals) > 0 {
-			key := strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(name, prefix), "-", "_"))
-			claims[key] = vals[0]
+	prefix := a.cfg.HeaderPrefix
+	present := false
+	for name := range r.Header {
+		if hasPrefixFold(name, prefix) {
+			present = true
+			break
 		}
 	}
-	if len(claims) == 0 {
+	if !present {
 		return map[string]any{}, a.cfg.AnonymousRole, nil
 	}
 	if !a.peerTrusted(r.RemoteAddr) {
 		return nil, "", invalidToken("claim headers from untrusted peer", nil)
 	}
+	claims := map[string]any{}
+	for name, vals := range r.Header {
+		if !hasPrefixFold(name, prefix) {
+			continue
+		}
+		key, ok := headerClaimKey(name[len(prefix):])
+		if !ok {
+			return nil, "", invalidToken("malformed claim header", nil)
+		}
+		if len(vals) != 1 {
+			return nil, "", invalidToken("repeated claim header", nil)
+		}
+		if _, dup := claims[key]; dup {
+			return nil, "", invalidToken("conflicting claim headers", nil)
+		}
+		if a.headerClaims != nil && !a.headerClaims[key] {
+			return nil, "", invalidToken("claim header not allowed", nil)
+		}
+		claims[key] = vals[0]
+	}
 	return a.resolve(claims)
+}
+
+func hasPrefixFold(s, prefix string) bool {
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+// headerClaimKey maps a claim-header suffix to its claim key. The suffix
+// must be one or more ASCII alphanumeric words joined by single hyphens;
+// the key is the suffix lower-cased with hyphens replaced by underscores.
+// Restricting the suffix this way makes the mapping injective up to letter
+// case, which HTTP header names do not carry.
+func headerClaimKey(suffix string) (string, bool) {
+	if suffix == "" {
+		return "", false
+	}
+	b := make([]byte, len(suffix))
+	for i := 0; i < len(suffix); i++ {
+		c := suffix[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			b[i] = c
+		case c >= 'A' && c <= 'Z':
+			b[i] = c + ('a' - 'A')
+		case c == '-' && i > 0 && i < len(suffix)-1 && suffix[i-1] != '-':
+			b[i] = '_'
+		default:
+			return "", false
+		}
+	}
+	return string(b), true
+}
+
+// ValidHeaderClaim reports whether claim can be carried by a claim header:
+// lower-case ASCII alphanumeric words joined by single underscores, the
+// exact image of the header-name mapping described on Config.HeaderPrefix.
+func ValidHeaderClaim(claim string) bool {
+	k, ok := headerClaimKey(strings.ReplaceAll(claim, "_", "-"))
+	return ok && k == claim
+}
+
+// HeaderClaimName returns the header that carries claim in headers mode,
+// e.g. ("X-Pdbq-Claim-", "user_id") is X-Pdbq-Claim-User-Id. The result is
+// only meaningful when ValidHeaderClaim(claim) holds.
+func HeaderClaimName(prefix, claim string) string {
+	return http.CanonicalHeaderKey(prefix + strings.ReplaceAll(claim, "_", "-"))
 }
 
 // peerTrusted reports whether the direct peer may supply claim headers. With

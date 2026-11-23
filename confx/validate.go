@@ -29,9 +29,9 @@ func ValidateErrors(e Errors) []string {
 }
 
 // ValidateRLS checks the rls section: auth mode, trusted proxies, JWT
-// secret/JWKS presence, jwt_type shape, the anonymous role, the configured
-// role names (pgexec.ValidRole) and claims_prefix
-// (pgexec.ValidateClaimsPrefix).
+// secret/JWKS presence, jwt_type shape, the headers-mode prefix and claim
+// names (auth.ValidHeaderClaim), the anonymous role, the configured role
+// names (pgexec.ValidRole) and claims_prefix (pgexec.ValidateClaimsPrefix).
 func ValidateRLS(c RLS) []string {
 	var errs []string
 	switch c.Auth.Mode {
@@ -43,6 +43,9 @@ func ValidateRLS(c RLS) []string {
 		if _, err := ParseTrustedProxy(p); err != nil {
 			errs = append(errs, fmt.Sprintf("rls.auth.trusted_proxies: %q is not a valid IP or CIDR block", p))
 		}
+	}
+	if c.Auth.Mode == "headers" {
+		errs = append(errs, validateHeadersMode(c)...)
 	}
 	if c.Enabled && c.Auth.Mode == "jwt" && c.Auth.JWTSecret == "" && c.Auth.JWKSURL == "" {
 		errs = append(errs, "rls.auth.jwt_secret or rls.auth.jwks_url is required when rls.enabled and auth mode is jwt")
@@ -140,6 +143,35 @@ func ValidateLog(l Log) []string {
 	return []string{fmt.Sprintf("log.level: %q invalid", l.Level)}
 }
 
+func validateHeadersMode(c RLS) []string {
+	var errs []string
+	if p := c.Auth.HeaderPrefix; !validHeaderPrefix(p) {
+		errs = append(errs, fmt.Sprintf("rls.auth.header_prefix: %q must be letters, digits and hyphens ending in a hyphen, e.g. X-Pdbq-Claim-", p))
+	}
+	if c.RoleClaim != "" && !auth.ValidHeaderClaim(c.RoleClaim) {
+		errs = append(errs, fmt.Sprintf("rls.role_claim: %q cannot be sent as a claim header: use lower-case letters and digits joined by single underscores", c.RoleClaim))
+	}
+	for _, claim := range c.Auth.HeaderClaims {
+		if !auth.ValidHeaderClaim(claim) {
+			errs = append(errs, fmt.Sprintf("rls.auth.header_claims: %q cannot be sent as a claim header: use lower-case letters and digits joined by single underscores", claim))
+		}
+	}
+	return errs
+}
+
+func validHeaderPrefix(p string) bool {
+	if len(p) < 2 || p[0] == '-' || p[len(p)-1] != '-' {
+		return false
+	}
+	for _, r := range p {
+		ok := r == '-' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // ValidChannelName restricts the watch NOTIFY channel to [a-zA-Z0-9_]; the
 // value is interpolated into trigger DDL (see package watch) where broader
 // characters cannot be safely escaped.
@@ -167,6 +199,7 @@ func AuthConfig(c RLS) auth.Config {
 		JWTIssuer:     c.Auth.JWTIssuer,
 		JWTAudience:   c.Auth.JWTAudience,
 		HeaderPrefix:  c.Auth.HeaderPrefix,
+		HeaderClaims:  c.Auth.HeaderClaims,
 		RoleClaim:     c.RoleClaim,
 		DefaultRole:   c.DefaultRole,
 		AnonymousRole: c.AnonymousRole,
