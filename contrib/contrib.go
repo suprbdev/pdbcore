@@ -1,8 +1,9 @@
 // Package contrib models the operator vocabularies and value coercion for
 // PostgreSQL's non-scalar built-in types and the common contrib extensions —
 // full-text search (tsvector, and to_tsvector over text), pg_trgm, unaccent,
-// hstore, ltree, citext, range and multirange types, inet/cidr and pgvector's
-// vector, halfvec and sparsevec types and bit distances — as a small,
+// fuzzystrmatch, hstore, ltree, citext, intarray, range and multirange types,
+// inet/cidr and pgvector's vector, halfvec and sparsevec types and bit
+// distances — as a small,
 // catalog-driven layer shared by pdbq and pdbr, in the same style as the
 // postgis package.
 //
@@ -12,10 +13,12 @@
 //   - which filter operators ([Op]) apply, what operand each takes, how it
 //     renders and which index can serve it;
 //   - which operand-taking value expressions ([Expr]) exist for ordering or
-//     selection (trigram similarity and distance, vector and bit distances;
-//     [Expr.Score] marks the ones offered as selectable values);
-//   - which derived accessors ([Accessor]) exist (ltree nlevel, inet family,
-//     range bounds, vector dims);
+//     selection (trigram similarity and distance, vector and bit distances,
+//     Levenshtein distance; [Expr.Score] marks the ones offered as
+//     selectable values, [Expr.Derived] the ones whose operand comes with
+//     each use: hstore value by key, ltree lca and subpath);
+//   - which derived accessors ([Accessor]) exist (ltree nlevel and parent,
+//     ltree[] lca, inet family, range bounds, vector dims, intarray icount);
 //   - how an input value for the column becomes bind parameters and back
 //     ([Codec]), where the text form is not good enough (hstore as a JSON
 //     object, ranges as {start, end, startInclusive, endInclusive}, vectors
@@ -75,6 +78,10 @@ const (
 	ExtUnaccent = "unaccent"
 	// ExtVector is pgvector, whose extension name is "vector".
 	ExtVector = "vector"
+	// ExtFuzzy is the fuzzystrmatch extension.
+	ExtFuzzy = "fuzzystrmatch"
+	// ExtIntarray is the intarray extension.
+	ExtIntarray = "intarray"
 )
 
 // Vocabulary names.
@@ -92,6 +99,8 @@ const (
 	VocabUnaccent   = "unaccent" // unaccent over text-like columns
 	VocabVector     = "vector"   // pgvector vector, halfvec and sparsevec columns
 	VocabBit        = "bit"      // pgvector distances over bit and varbit columns
+	VocabFuzzy      = "fuzzy"    // fuzzystrmatch over text-like columns
+	VocabIntarray   = "intarray" // intarray over int4[] columns
 )
 
 // ArgKind classifies an operand (or a column value fed to a [Codec]) so
@@ -130,6 +139,16 @@ const (
 	// ArgVector and whose distance is a finite number. Two parameters: the
 	// vector text and the threshold (float8).
 	ArgVectorDistance
+	// ArgTextDistance is an edit-distance threshold against a reference
+	// text: an object {text, distance} whose distance is a non-negative
+	// integer. Two parameters: the text and the threshold (int4).
+	ArgTextDistance
+	// ArgSubpath is a label range of an ltree path: an object {offset,
+	// length} of integers, length optional. offset counts labels from the
+	// start, or from the end when negative; length is non-negative, and
+	// absent or null for the rest of the path. Two parameters (int4), the
+	// second NULL without a length, so the SQL text does not depend on it.
+	ArgSubpath
 )
 
 func (k ArgKind) String() string {
@@ -152,6 +171,10 @@ func (k ArgKind) String() string {
 		return "vector"
 	case ArgVectorDistance:
 		return "vector distance"
+	case ArgTextDistance:
+		return "text distance"
+	case ArgSubpath:
+		return "subpath"
 	}
 	return ""
 }
@@ -164,7 +187,7 @@ func (k ArgKind) arity() (int, int) {
 		return 1, 2
 	case ArgRange, ArgMultirange:
 		return 3, 3
-	case ArgVectorDistance:
+	case ArgVectorDistance, ArgTextDistance, ArgSubpath:
 		return 2, 2
 	}
 	return 1, 1
@@ -291,7 +314,9 @@ func (o Op) RankSQL(r Rank, col string, args ...string) string {
 }
 
 // Expr is a value expression over a column and one operand, used for
-// ordering or as a computed output (trigram similarity and distance).
+// ordering or as a computed output (trigram similarity and distance), or,
+// when [Expr.Derived], a derived value whose operand is part of each use
+// (an hstore key, ltree subpath positions).
 type Expr struct {
 	// Name is the expression's field name.
 	Name string
@@ -313,6 +338,13 @@ type Expr struct {
 	// and the vector distances). The trigram distances are not scores:
 	// each is 1 - its similarity and serves index-assisted ordering only.
 	Score bool
+	// Derived marks a parameterised derived value of the column, like an
+	// [Accessor] that takes arguments: the hstore value of a key, the ltree
+	// lca with a path or subpath by position. Its operand is given with
+	// each use (a field argument, a select item's arguments) rather than
+	// taken from a request-wide reference, and it is neither a score nor a
+	// best-first ordering; Ascending is false.
+	Derived bool
 
 	q      qual
 	render func(q qual, col string, a []string) string
@@ -338,8 +370,8 @@ func (e Expr) Render(col string, args ...string) string {
 	return e.render(e.q, col, args)
 }
 
-// Accessor is a derived, operand-free value of a column (ltree nlevel, inet
-// family, range bounds), exposable as a sibling output field.
+// Accessor is a derived, operand-free value of a column (ltree nlevel and
+// parent, inet family, range bounds), exposable as a sibling output field.
 type Accessor struct {
 	// Name is the accessor's field name (callers typically append its
 	// UpperCamel form to the column's field name).
@@ -354,7 +386,8 @@ type Accessor struct {
 	sql func(q qual, ref string) string
 }
 
-// SQL renders the accessor over a column reference.
+// SQL renders the accessor over a column reference, which it may evaluate
+// more than once.
 func (a Accessor) SQL(ref string) string { return a.sql(a.q, ref) }
 
 // Codec converts input values for a column of the vocabulary's type into
@@ -625,9 +658,14 @@ func forType(cat *introspect.Catalog, schema, name string, arr bool) []Vocabular
 		return e.Schema, true
 	}
 	if arr {
-		if base == "ltree" {
+		switch {
+		case base == "ltree":
 			if s, ok := ext(ExtLtree); ok {
 				return []Vocabulary{LtreeArray().Bind(s)}
+			}
+		case base == "int4" && core && cat != nil:
+			if e := cat.Extension(ExtIntarray); e != nil {
+				return []Vocabulary{Intarray().Bind(e.Schema)}
 			}
 		}
 		return nil
@@ -701,6 +739,9 @@ func forType(cat *introspect.Catalog, schema, name string, arr bool) []Vocabular
 		}
 		if e := cat.Extension(ExtUnaccent); e != nil {
 			out = append(out, Unaccent(base).Bind(e.Schema))
+		}
+		if e := cat.Extension(ExtFuzzy); e != nil {
+			out = append(out, Fuzzy(base).Bind(e.Schema))
 		}
 	}
 	return out

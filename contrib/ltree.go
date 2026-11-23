@@ -1,5 +1,7 @@
 package contrib
 
+import "strconv"
+
 func ltreeInfix(op, operandType string) func(qual, string, []string) string {
 	return func(q qual, col string, a []string) string {
 		return paren(col) + " " + q.op(op) + " " + q.cast(a[0], operandType)
@@ -7,15 +9,56 @@ func ltreeInfix(op, operandType string) func(qual, string, []string) string {
 }
 
 func ltreeAccessors() []Accessor {
-	return []Accessor{{
-		Name: "nlevel", Type: "int4",
-		Description: "Number of labels in the path (nlevel).",
-		sql:         func(q qual, ref string) string { return q.fn("nlevel") + "(" + ref + ")" },
-	}}
+	nlevel := func(q qual, ref string) string { return q.fn("nlevel") + "(" + ref + ")" }
+	return []Accessor{
+		{
+			Name: "nlevel", Type: "int4",
+			Description: "Number of labels in the path (nlevel).",
+			sql:         nlevel,
+		},
+		{
+			Name: "parent", Type: "ltree",
+			Description: "The path without its last label (subpath(path, 0, nlevel(path) - 1)): empty for a " +
+				"single-label path, null for the empty path.",
+			sql: func(q qual, ref string) string {
+				n := nlevel(q, ref)
+				return "CASE WHEN " + n + " > 0 THEN " + q.fn("subpath") + "(" + ref + ", 0, " + n + " - 1) END"
+			},
+		},
+	}
+}
+
+// ltreeExprs are the derived values of an ltree path that take an operand.
+// subpath is guarded so that positions outside a row's path yield NULL
+// instead of ltree's "invalid positions" error.
+func ltreeExprs() []Expr {
+	return []Expr{
+		{
+			Name: "lca", Arg: ArgText, Type: "ltree", Extension: ExtLtree, Derived: true,
+			Description: "Longest common ancestor of the path and the given path (lca); empty when they share no label.",
+			render: func(q qual, col string, a []string) string {
+				return q.fn("lca") + "(" + col + ", " + q.cast(a[0], "ltree") + ")"
+			},
+		},
+		{
+			Name: "subpath", Arg: ArgSubpath, Type: "ltree", Extension: ExtLtree, Derived: true,
+			Description: "The labels from offset (counted from the end when negative) on, length of them or the " +
+				"rest of the path (subpath); null when offset lies outside the path.",
+			render: func(q qual, col string, a []string) string {
+				n := q.fn("nlevel") + "(" + col + ")"
+				off := atom(a[0]) + "::int4"
+				return "CASE WHEN " + off + " < " + n + " AND -" + off + " <= " + n + " THEN " +
+					q.fn("subpath") + "(" + col + ", " + off + ", COALESCE(" + atom(a[1]) + "::int4, " +
+					strconv.Itoa(MaxLtreeLevels) + ")) END"
+			},
+		},
+	}
 }
 
 // Ltree is the vocabulary of ltree columns. Paths, lqueries and ltxtqueries
-// are strings; Postgres validates their syntax.
+// are strings; Postgres validates their syntax. The nlevel and parent
+// accessors and the lca and subpath expressions ([Expr.Derived]) derive
+// paths and depths from the column.
 func Ltree() Vocabulary {
 	idx := []IndexHint{{Method: "gist", OpClass: "gist_ltree_ops"}}
 	return Vocabulary{
@@ -58,6 +101,7 @@ func Ltree() Vocabulary {
 			},
 		},
 		Accessors: ltreeAccessors(),
+		Exprs:     ltreeExprs(),
 		Codec: &Codec{
 			Arg: ArgText,
 			sql: func(q qual, a []string) string { return q.cast(a[0], "ltree") },
@@ -66,7 +110,8 @@ func Ltree() Vocabulary {
 }
 
 // LtreeArray is the vocabulary of ltree[] columns; each operator holds when
-// some element of the array satisfies it.
+// some element of the array satisfies it. The lca accessor is the longest
+// common ancestor of the non-null elements.
 func LtreeArray() Vocabulary {
 	idx := []IndexHint{{Method: "gist", OpClass: "gist__ltree_ops"}}
 	return Vocabulary{
@@ -98,6 +143,13 @@ func LtreeArray() Vocabulary {
 				render:      ltreeInfix("@", "ltxtquery"),
 			},
 		},
+		Accessors: []Accessor{{
+			Name: "lca", Type: "ltree",
+			Description: "Longest common ancestor of the non-null paths (lca); null for an empty array.",
+			sql: func(q qual, ref string) string {
+				return q.fn("lca") + "(array_remove(" + ref + ", NULL))"
+			},
+		}},
 		Codec: &Codec{
 			Arg: ArgTextList,
 			sql: func(q qual, a []string) string { return q.cast(a[0], "ltree[]") },

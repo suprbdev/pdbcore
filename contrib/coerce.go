@@ -3,8 +3,10 @@ package contrib
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -43,6 +45,14 @@ func coerce(k ArgKind, v any) ([]any, error) {
 			return nil, err
 		}
 		return []any{s}, nil
+	case ArgTextDistance:
+		s, d, err := TextDistanceParam(v)
+		if err != nil {
+			return nil, err
+		}
+		return []any{s, d}, nil
+	case ArgSubpath:
+		return SubpathParams(v)
 	case ArgRange, ArgMultirange, ArgElement:
 		return nil, fmt.Errorf("%s operand needs a range type", k)
 	}
@@ -165,4 +175,103 @@ func clip(s string) string {
 		return s
 	}
 	return s[:limit] + "..."
+}
+
+// Integer coerces a whole JSON number (or the equivalent Go integer, or a
+// string of decimal digits) to an int64.
+func Integer(v any) (int64, error) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), nil
+	case int32:
+		return int64(n), nil
+	case int64:
+		return n, nil
+	case float64:
+		if n != math.Trunc(n) || math.Abs(n) > 1<<53 {
+			return 0, fmt.Errorf("must be an integer")
+		}
+		return int64(n), nil
+	case float32:
+		return Integer(float64(n))
+	case json.Number:
+		return Integer(n.String())
+	case string:
+		i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("must be an integer")
+		}
+		return i, nil
+	}
+	return 0, fmt.Errorf("must be an integer")
+}
+
+// int4 coerces an integer operand that must lie in [lo, hi].
+func int4(v any, lo, hi int64) (int32, error) {
+	i, err := Integer(v)
+	if err != nil {
+		return 0, err
+	}
+	if i < lo || i > hi {
+		return 0, fmt.Errorf("must be between %d and %d", lo, hi)
+	}
+	return int32(i), nil
+}
+
+// TextDistanceParam coerces an [ArgTextDistance] operand, an object {text,
+// distance} with a non-negative integer distance, into its text and
+// threshold.
+func TextDistanceParam(v any) (string, int32, error) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return "", 0, fmt.Errorf("operand must be an object with text and distance")
+	}
+	t, ok := m["text"]
+	if !ok || t == nil {
+		return "", 0, fmt.Errorf("operand requires a text")
+	}
+	s, err := Text(t)
+	if err != nil {
+		return "", 0, fmt.Errorf("text %w", err)
+	}
+	d, ok := m["distance"]
+	if !ok || d == nil {
+		return "", 0, fmt.Errorf("operand requires a distance")
+	}
+	n, err := int4(d, 0, math.MaxInt32)
+	if err != nil {
+		return "", 0, fmt.Errorf("distance %w", err)
+	}
+	return s, n, nil
+}
+
+// MaxLtreeLevels is the most labels an ltree path can have.
+const MaxLtreeLevels = 65535
+
+// SubpathParams coerces an [ArgSubpath] operand, an object {offset,
+// length} with length optional, into two parameters: the offset (int32,
+// within ±[MaxLtreeLevels]) and the non-negative length (int32), or nil
+// when length is absent or null, meaning the rest of the path.
+func SubpathParams(v any) ([]any, error) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("operand must be an object with offset and length")
+	}
+	o, ok := m["offset"]
+	if !ok || o == nil {
+		return nil, fmt.Errorf("operand requires an offset")
+	}
+	off, err := int4(o, -MaxLtreeLevels, MaxLtreeLevels)
+	if err != nil {
+		return nil, fmt.Errorf("offset %w", err)
+	}
+	l, ok := m["length"]
+	if !ok || l == nil {
+		return []any{off, nil}, nil
+	}
+	n, err := int4(l, 0, MaxLtreeLevels)
+	if err != nil {
+		return nil, fmt.Errorf("length %w", err)
+	}
+	return []any{off, n}, nil
 }

@@ -52,7 +52,7 @@ func openLive(t *testing.T) *liveDB {
 	d := &liveDB{t: t, ctx: ctx, tx: tx}
 	d.exec(`CREATE SCHEMA ` + quote(extSchema))
 	d.exec(`CREATE SCHEMA ` + dataSchema)
-	for _, ext := range []string{contrib.ExtTrgm, contrib.ExtHstore, contrib.ExtLtree, contrib.ExtCitext, contrib.ExtUnaccent} {
+	for _, ext := range []string{contrib.ExtTrgm, contrib.ExtHstore, contrib.ExtLtree, contrib.ExtCitext, contrib.ExtUnaccent, contrib.ExtFuzzy, contrib.ExtIntarray} {
 		d.exec(`CREATE EXTENSION IF NOT EXISTS ` + ext + ` SCHEMA ` + quote(extSchema))
 	}
 	d.exec(`SET LOCAL search_path TO ` + dataSchema)
@@ -63,7 +63,7 @@ func openLive(t *testing.T) *liveDB {
 		t.Fatal(err)
 	}
 	d.cat = cat
-	for _, ext := range []string{contrib.ExtTrgm, contrib.ExtHstore, contrib.ExtLtree, contrib.ExtCitext, contrib.ExtUnaccent} {
+	for _, ext := range []string{contrib.ExtTrgm, contrib.ExtHstore, contrib.ExtLtree, contrib.ExtCitext, contrib.ExtUnaccent, contrib.ExtFuzzy, contrib.ExtIntarray} {
 		if s := d.schemaOf(ext); s != extSchema {
 			t.Logf("%s is already installed in schema %q; testing it there", ext, s)
 		}
@@ -161,10 +161,11 @@ var sampleColumns = []struct {
 	{"spanm", `"Span Multi"`, []any{[]any{map[string]any{"start": 1, "end": 3}}, nil, "{}"}},
 	{"addr", "inet", []any{"10.1.2.3", nil, "::1"}},
 	{"net", "cidr", []any{"10.0.0.0/8", nil, "2001:db8::/32"}},
+	{"ids", "int4[]", []any{"{1,2,3}", nil, "{}"}},
 }
 
-// textCast renders a text-like value for a column without a codec.
-func textCast(typ, ph string) string { return ph + "::" + typ }
+// textCast renders a value for a column without a codec from its text form.
+func textCast(typ, ph string) string { return ph + "::text::" + typ }
 
 func setupTable(t *testing.T, d *liveDB) {
 	t.Helper()
@@ -200,7 +201,7 @@ func setupTable(t *testing.T, d *liveDB) {
 			}
 			codec := codecFor(t, d, tbl.Column(c.name))
 			if codec == nil {
-				exprs = append(exprs, textCast("text", a.add(v)[0]))
+				exprs = append(exprs, textCast(extType(c.typ), a.add(v)[0]))
 				continue
 			}
 			ps, err := codec.Params(v)
@@ -255,6 +256,13 @@ func operand(v contrib.Vocabulary, op contrib.Op) any {
 			return el
 		}
 		return map[string]any{"start": el}
+	case contrib.VocabFuzzy:
+		if op.Arg == contrib.ArgTextDistance {
+			return map[string]any{"text": "hello", "distance": 3}
+		}
+		return "hello"
+	case contrib.VocabIntarray:
+		return "1&(2|!4)"
 	case contrib.VocabHstore:
 		switch op.Arg {
 		case contrib.ArgTextList:
@@ -262,6 +270,19 @@ func operand(v contrib.Vocabulary, op contrib.Op) any {
 		case contrib.ArgHstore:
 			return map[string]any{"a": "1", "b": nil}
 		}
+		return "a"
+	}
+	return "hello"
+}
+
+// exprOperand returns a sample operand for an expression.
+func exprOperand(e contrib.Expr) any {
+	switch e.Name {
+	case "subpath":
+		return map[string]any{"offset": 1, "length": 1}
+	case "lca":
+		return "a.b"
+	case "value":
 		return "a"
 	}
 	return "hello"
@@ -312,8 +333,12 @@ func TestEveryOpExecutes(t *testing.T) {
 			}
 			for _, e := range v.Exprs {
 				var a args
-				ps, _ := e.Params("hello")
-				q := "SELECT max(" + e.Render(ref, a.add(ps...)...) + ") FROM samples AS t"
+				ps, err := e.Params(exprOperand(e))
+				if err != nil {
+					t.Errorf("%s %s: %v", c.name, e.Name, err)
+					continue
+				}
+				q := "SELECT max((" + e.Render(ref, a.add(ps...)...) + ")::text) FROM samples AS t"
 				var r any
 				if err := d.query(q, a.vals, &r); err != nil {
 					t.Errorf("%s %s: %v\n%s", c.name, e.Name, err, q)
@@ -343,7 +368,8 @@ func TestEveryOpExecutes(t *testing.T) {
 		}
 	}
 	for _, n := range []string{contrib.VocabFullText, contrib.VocabTextSearch, contrib.VocabTrgm, contrib.VocabCitext,
-		contrib.VocabHstore, contrib.VocabLtree, contrib.VocabLtreeArray, contrib.VocabRange, contrib.VocabMultirange, contrib.VocabInet} {
+		contrib.VocabHstore, contrib.VocabLtree, contrib.VocabLtreeArray, contrib.VocabRange, contrib.VocabMultirange, contrib.VocabInet,
+		contrib.VocabUnaccent, contrib.VocabFuzzy, contrib.VocabIntarray} {
 		if !seen[n] {
 			t.Errorf("vocabulary %s not exercised", n)
 		}
@@ -378,7 +404,7 @@ func (d *liveDB) eval(t *testing.T, typ string, colValue any, opName string, ope
 	if err != nil {
 		t.Fatalf("%s %s(%v): %v", typ, opName, operandValue, err)
 	}
-	q := "SELECT " + op.Render("t.c", a.add(ps...)...) + " FROM (SELECT " + colSQL + " AS c) AS t"
+	q := "SELECT (" + op.Render("t.c", a.add(ps...)...) + ") IS TRUE FROM (SELECT " + colSQL + " AS c) AS t"
 	var got bool
 	if err := d.query(q, a.vals, &got); err != nil {
 		t.Fatalf("%s %s(%v): %v\n%s", typ, opName, operandValue, err, q)
@@ -495,6 +521,25 @@ func TestOpValuesLive(t *testing.T) {
 		{"cidr", "10.0.0.0/8", "containsOrContainedBy", "10.1.0.0/16", true},
 		{"cidr", "10.0.0.0/8", "containsOrContainedBy", "11.0.0.0/8", false},
 		{"cidr", "2001:db8::/32", "contains", "2001:db8::1", true},
+		{"hstore", map[string]any{"a": "1", "b": nil}, "hasDefinedKey", "a", true},
+		{"hstore", map[string]any{"a": "1", "b": nil}, "hasDefinedKey", "b", false},
+		{"hstore", map[string]any{"a": "1", "b": nil}, "hasDefinedKey", "z", false},
+		{"text", "kitten", "levenshteinDistanceLessThan", map[string]any{"text": "sitting", "distance": 4}, true},
+		{"text", "kitten", "levenshteinDistanceLessThan", map[string]any{"text": "sitting", "distance": 3}, false},
+		{"text", "kitten", "levenshteinDistanceLessThan", map[string]any{"text": "kitten", "distance": 0}, false},
+		{"text", "kitten", "levenshteinDistanceLessThan", map[string]any{"text": "kitten", "distance": 1}, true},
+		{"text", strings.Repeat("a", 300), "levenshteinDistanceLessThan", map[string]any{"text": "a", "distance": 1000}, false},
+		{"varchar", "Robert", "soundexEqualTo", "Rupert", true},
+		{"bpchar", "Robert", "soundexEqualTo", "Smith", false},
+		{"citext", "Knight", "metaphoneEqualTo", "night", true},
+		{"text", "Knight", "metaphoneEqualTo", "Kite", false},
+		{"text", strings.Repeat("a", 300), "metaphoneEqualTo", "a", false},
+		{"text", "Smith", "doubleMetaphoneEqualTo", "Smyth", true},
+		{"text", "Smith", "doubleMetaphoneEqualTo", "Jones", false},
+		{"_int4", "{1,2,3}", "matchesQueryInt", "1&(2|4)", true},
+		{"_int4", "{1,2,3}", "matchesQueryInt", "4", false},
+		{"_int4", "{1,2,3}", "matchesQueryInt", "!4", true},
+		{"_int4", "{}", "matchesQueryInt", "!4", true},
 	}
 	for _, tc := range tests {
 		if got := d.eval(t, tc.typ, tc.col, tc.op, tc.operand); got != tc.expected {
@@ -572,10 +617,87 @@ func TestExprsAndAccessorsLive(t *testing.T) {
 		{"int4multirange", "start", "{[1,3), [5,7)}", "1"},
 		{"int4multirange", "end", "{[1,3), [5,7)}", "7"},
 		{"int4multirange", "isEmpty", "{}", "true"},
+		{"ltree", "parent", "a.b.c", "a.b"},
+		{"ltree", "parent", "a", ""},
+		{"ltree", "parent", "", "<nil>"},
 	}
 	for _, tc := range tests {
 		if got := fmt.Sprint(accessor(tc.typ, tc.name, tc.val)); got != tc.want {
 			t.Errorf("%s %s(%v) = %s, want %s", tc.typ, tc.name, tc.val, got, tc.want)
+		}
+	}
+
+	text := func(expr string, vals ...any) string {
+		t.Helper()
+		return fmt.Sprint(d.scalar(t, "("+expr+")::text", vals...))
+	}
+	arr, _ := contrib.ForType(d.cat, "_ltree", false)[0].Accessor("lca")
+	for val, want := range map[string]string{
+		"{a.b.c,a.b.d}": "a.b", "{a.b,NULL,a.c}": "a", "{x}": "", "{}": "<nil>",
+	} {
+		if got := text(arr.SQL(textCast(quote(d.schemaOf(contrib.ExtLtree))+".ltree[]", "$1")), val); got != want {
+			t.Errorf("ltree[] lca(%s) = %s, want %s", val, got, want)
+		}
+	}
+	icount, _ := contrib.ForType(d.cat, "_int4", false)[0].Accessor("icount")
+	if got := text(icount.SQL("$1::text::int4[]"), "{1,NULL,3}"); got != "3" {
+		t.Errorf("icount = %s", got)
+	}
+
+	derived := func(typ, name, col string, operand any) string {
+		t.Helper()
+		vs := contrib.ForType(d.cat, typ, false)
+		var e contrib.Expr
+		var ok bool
+		for _, v := range vs {
+			if e, ok = v.Expr(name); ok {
+				break
+			}
+		}
+		if !ok {
+			t.Fatalf("%s: no expression %s", typ, name)
+		}
+		ps, err := e.Params(operand)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var a args
+		colSQL := textCast(typ, a.add(col)[0])
+		return text(e.Render("("+colSQL+")", a.add(ps...)...), a.vals...)
+	}
+	hs := quote(d.schemaOf(contrib.ExtHstore)) + ".hstore"
+	lt := quote(d.schemaOf(contrib.ExtLtree)) + ".ltree"
+	derivedTests := []struct {
+		typ, name, col string
+		operand        any
+		want           string
+	}{
+		{hs, "value", "a=>1, b=>NULL", "a", "1"},
+		{hs, "value", "a=>1, b=>NULL", "b", "<nil>"},
+		{hs, "value", "a=>1, b=>NULL", "z", "<nil>"},
+		{lt, "lca", "a.b.c", "a.b.d", "a.b"},
+		{lt, "lca", "a.b.c", "x", ""},
+		{lt, "subpath", "a.b.c", map[string]any{"offset": 1}, "b.c"},
+		{lt, "subpath", "a.b.c", map[string]any{"offset": 0, "length": 2}, "a.b"},
+		{lt, "subpath", "a.b.c", map[string]any{"offset": -1}, "c"},
+		{lt, "subpath", "a.b.c", map[string]any{"offset": -3, "length": 1}, "a"},
+		{lt, "subpath", "a.b.c", map[string]any{"offset": 1, "length": 0}, ""},
+		{lt, "subpath", "a.b.c", map[string]any{"offset": 1, "length": 100}, "b.c"},
+		{lt, "subpath", "a.b.c", map[string]any{"offset": 3}, "<nil>"},
+		{lt, "subpath", "a.b.c", map[string]any{"offset": -4}, "<nil>"},
+		{lt, "subpath", "", map[string]any{"offset": 0}, "<nil>"},
+		{"text", "levenshteinDistance", "kitten", "sitting", "3"},
+		{"bpchar", "levenshteinDistance", "kitten", "kitten", "0"},
+		{"text", "levenshteinDistance", strings.Repeat("a", 256), "a", "<nil>"},
+	}
+	long, _ := contrib.FindOp(contrib.ForType(d.cat, "text", false), "levenshteinDistanceLessThan")
+	pred := long.Render("$1::text", "$2", "$3")
+	if got := text("("+pred+") IS NULL AND (NOT ("+pred+")) IS NULL", strings.Repeat("a", 256), "a", 1000); got != "true" {
+		t.Errorf("levenshtein threshold over a long value: %s", got)
+	}
+	for _, tc := range derivedTests {
+		if got := derived(tc.typ, tc.name, tc.col, tc.operand); got != tc.want {
+			t.Errorf("%s %s(%q, %v) = %s, want %s", tc.typ, tc.name, tc.col, tc.operand, got, tc.want)
 		}
 	}
 }
@@ -788,7 +910,12 @@ func TestTrgmOldVersionLive(t *testing.T) {
 		t.Fatal("pg_trgm 1.3 unexpectedly has <<%")
 	}
 	vs := contrib.ForColumn(d.cat, d.cat.Table(dataSchema, "words").Column("w"))
-	v := vs[len(vs)-1]
+	var v contrib.Vocabulary
+	for _, x := range vs {
+		if x.Name == contrib.VocabTrgm {
+			v = x
+		}
+	}
 	if v.Name != contrib.VocabTrgm {
 		t.Fatalf("vocabularies %v", vs)
 	}
@@ -830,6 +957,8 @@ func TestOperandErrorsClassifyLive(t *testing.T) {
 		{"ltree", "matchesAnyLquery", "a.b", []any{"*{2,1}"}},
 		{"ltree", "matchesLtxtquery", "a.b", "(a"},
 		{"ltree", "matchesLtxtquery", "a.b", "a | | b"},
+		{"_int4", "matchesQueryInt", "{1,2}", "1 &"},
+		{"_int4", "matchesQueryInt", "{1,NULL}", "1"},
 	}
 	for _, tc := range tests {
 		vs := contrib.ForType(d.cat, tc.typ, false)
@@ -839,7 +968,7 @@ func TestOperandErrorsClassifyLive(t *testing.T) {
 		if vs[0].Codec != nil {
 			colSQL = vs[0].Codec.SQL(a.add(tc.col)...)
 		} else {
-			colSQL = textCast("text", a.add(tc.col)[0])
+			colSQL = textCast(tc.typ, a.add(tc.col)[0])
 		}
 		ps, err := op.Params(tc.operand)
 		if err != nil {

@@ -23,6 +23,13 @@ func HstoreOutputJSONSQL(schema, ref string) string {
 
 // Hstore is the vocabulary of hstore columns. Values are JSON objects of
 // string keys to string or null values on the way in and out.
+//
+// Besides the key and containment operators, the value of one key is a
+// [Expr.Derived] expression (value: col -> $1::text, text or NULL), for
+// selection, text comparisons and ordering; no index serves it, since an
+// expression index on (col -> 'key') cannot match a bound key. hasDefinedKey
+// (defined(col, key)) holds when the key is present with a non-null value;
+// the hstore operator classes do not index it.
 func Hstore() Vocabulary {
 	idx := []IndexHint{{Method: "gin", OpClass: "gin_hstore_ops"}, {Method: "gist", OpClass: "gist_hstore_ops"}}
 	return Vocabulary{
@@ -63,7 +70,21 @@ func Hstore() Vocabulary {
 					return paren(col) + " " + q.op("<@") + " " + HstoreSQL(q.schema, a[0])
 				},
 			},
+			{
+				Name: "hasDefinedKey", Arg: ArgText, Extension: ExtHstore,
+				Description: "Contains the given key with a non-null value (defined). Cannot use an index.",
+				render: func(q qual, col string, a []string) string {
+					return q.fn("defined") + "(" + col + ", " + atom(a[0]) + "::text)"
+				},
+			},
 		},
+		Exprs: []Expr{{
+			Name: "value", Arg: ArgText, Type: "text", Extension: ExtHstore, Derived: true,
+			Description: "Value of the given key (->); null when the key is absent or its value is null.",
+			render: func(q qual, col string, a []string) string {
+				return paren(col) + " " + q.op("->") + " " + atom(a[0]) + "::text"
+			},
+		}},
 		Codec: &Codec{
 			Arg:        ArgHstore,
 			sql:        func(q qual, a []string) string { return HstoreSQL(q.schema, a[0]) },
