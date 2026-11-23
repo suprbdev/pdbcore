@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -89,7 +90,9 @@ func QueryTx(ctx context.Context, db ConnAcquirer, opts TxOptions, id Identity, 
 		log = slog.Default()
 	}
 	for attempt := 0; ; attempt++ {
+		start := time.Now()
 		err := p.runOnce(ctx, db, stmts)
+		observeAttempt(ctx, opts.Observer, OpQueryTx, attempt, start, err)
 		if err == nil || attempt >= opts.MaxRetries || !IsSerializationFailure(err) || ctx.Err() != nil {
 			return err
 		}

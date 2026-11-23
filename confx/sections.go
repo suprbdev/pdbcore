@@ -94,3 +94,16 @@ type Log struct {
 	Level  string `koanf:"level" doc:"Log level: debug, info, warn, error."`
 	Format string `koanf:"format" doc:"Log format: text or json."`
 }
+
+// Metrics is the Prometheus endpoint section (see package metrics).
+type Metrics struct {
+	Enabled bool   `koanf:"enabled" doc:"Serve Prometheus metrics (HTTP requests, database operations, pool statistics, schema rebuilds)."`
+	Path    string `koanf:"path" doc:"URL path of the metrics endpoint."`
+	Addr    string `koanf:"addr" doc:"Separate listen address for the metrics endpoint, e.g. :9090, keeping it off the public listener; empty serves it on the main server address."`
+}
+
+// DefaultMetrics is the metrics section's default: disabled, at /metrics on
+// the main listener.
+func DefaultMetrics() Metrics {
+	return Metrics{Path: "/metrics"}
+}
