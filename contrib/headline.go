@@ -11,9 +11,10 @@ import (
 )
 
 // Limits on [HeadlineOptions]. ts_headline parses its whole document on
-// every call whatever the options say; the limits bound what it returns
-// per row (MaxFragments fragments of up to MaxWords words each, or the
-// whole document with HighlightAll) and the markup it repeats.
+// every call whatever the options say ([HeadlineDocumentSQL] bounds the
+// document); the limits bound what it returns per row (MaxFragments
+// fragments of up to MaxWords words each, or the whole document with
+// HighlightAll) and the markup it repeats.
 const (
 	// MaxHeadlineWords bounds MaxWords, MinWords and ShortWord.
 	MaxHeadlineWords = 100
@@ -25,9 +26,60 @@ const (
 )
 
 // HeadlineCost is the cost, in column reads per returned row, a consumer's
-// cost estimate charges for a headline: ts_headline re-parses the whole
-// document with the text search parser on every call.
+// cost estimate charges for a headline over a document of up to
+// [HeadlineCostChars] characters. ts_headline re-parses the whole document
+// with the text search parser on every call, so its work grows with the
+// document's length: price a headline with [HeadlineDocumentCost] over a
+// document bounded by [HeadlineDocumentSQL]. A flat HeadlineCost on an
+// unbounded document underprices it by the ratio of the document's length
+// to HeadlineCostChars.
 const HeadlineCost = 10
+
+// HeadlineCostChars is the document length, in characters, that one
+// [HeadlineCost] pays for: on PostgreSQL 18, ts_headline takes about a
+// millisecond over 8192 characters of text and grows linearly from there.
+const HeadlineCostChars = 8192
+
+// MaxHeadlineDocument is a default for the bound on a headline's document,
+// in characters, that [HeadlineDocumentSQL] applies and
+// [HeadlineDocumentCost] prices: 8 [HeadlineCost]s, so one headline per row
+// on a page of 100 rows costs 8000 column reads.
+const MaxHeadlineDocument = 65536
+
+// HeadlineDocumentCost returns the cost, in column reads per returned row,
+// of a headline whose document [HeadlineDocumentSQL] bounds to maxLen
+// characters: [HeadlineCost] per started [HeadlineCostChars] characters, and
+// at least HeadlineCost.
+func HeadlineDocumentCost(maxLen int) int {
+	chunks := 1
+	if maxLen > HeadlineCostChars {
+		chunks = (maxLen + HeadlineCostChars - 1) / HeadlineCostChars
+	}
+	return HeadlineCost * chunks
+}
+
+// HeadlineDocumentSQL bounds the document expression doc, of pg type pgType
+// (as Column.PGType spells it), to maxLen characters for [Op.HeadlineSQL],
+// so ts_headline's work grows with maxLen instead of with the stored
+// document. maxLen is the placeholder of an integer parameter, e.g.
+// [MaxHeadlineDocument]; price the headline with [HeadlineDocumentCost].
+//
+// A text-like document ([IsText]) becomes left(doc, maxLen): the headline
+// is taken from its first maxLen characters, so a match further in is not
+// highlighted and ts_headline returns the opening words, as it does for a
+// document without a match. A json or jsonb document cannot be cut without
+// breaking it, so it is kept whole when its text form has at most maxLen
+// characters and is NULL otherwise, which makes the headline NULL. It
+// returns "" for a type that is not a document ([IsDocument]).
+func HeadlineDocumentSQL(doc, pgType, maxLen string) string {
+	switch {
+	case IsText(pgType):
+		return "left(" + doc + ", " + atom(maxLen) + "::int4)"
+	case IsDocument(pgType):
+		return "CASE WHEN length(" + paren(doc) + "::text) <= " + atom(maxLen) + "::int4 THEN " + doc + " END"
+	}
+	return ""
+}
 
 // ts_headline's defaults, which apply to the options a request leaves out.
 const (
@@ -237,7 +289,7 @@ func IsDocument(pgType string) bool {
 // so a result filtered by the operator can show where it matched. doc is
 // the filtered column itself for the text and json search vocabularies, or
 // another column holding the source of a tsvector column; it must be a
-// [IsDocument] type. options is the placeholder of the text parameter
+// [IsDocument] type, and should be bounded by [HeadlineDocumentSQL]. options is the placeholder of the text parameter
 // holding [HeadlineOptions.String], or "" for PostgreSQL's defaults. It
 // returns "" for operators that are not full-text matches.
 func (o Op) HeadlineSQL(doc, options string, args ...string) string {

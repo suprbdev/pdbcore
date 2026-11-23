@@ -42,6 +42,37 @@ func TestHeadlineSQL(t *testing.T) {
 	}
 }
 
+func TestHeadlineDocumentSQL(t *testing.T) {
+	tests := []struct{ doc, pgType, maxLen, want string }{
+		{"t.body", "text", "$4", "left(t.body, $4::int4)"},
+		{"t.c", "citext", "$2", "left(t.c, $2::int4)"},
+		{"t.c", "bpchar", "65536", "left(t.c, (65536)::int4)"},
+		{"t.doc", "jsonb", "$3", "CASE WHEN length((t.doc)::text) <= $3::int4 THEN t.doc END"},
+		{"t.doc", "json", "$3", "CASE WHEN length((t.doc)::text) <= $3::int4 THEN t.doc END"},
+		{"t.tags", "_text", "$3", ""},
+		{"t.n", "int4", "$3", ""},
+	}
+	for _, tc := range tests {
+		if got := contrib.HeadlineDocumentSQL(tc.doc, tc.pgType, tc.maxLen); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.pgType, got, tc.want)
+		}
+	}
+}
+
+func TestHeadlineDocumentCost(t *testing.T) {
+	for maxLen, want := range map[int]int{
+		0: contrib.HeadlineCost, 1: contrib.HeadlineCost,
+		contrib.HeadlineCostChars:     contrib.HeadlineCost,
+		contrib.HeadlineCostChars + 1: 2 * contrib.HeadlineCost,
+		contrib.MaxHeadlineDocument:   8 * contrib.HeadlineCost,
+		1 << 20:                       128 * contrib.HeadlineCost,
+	} {
+		if got := contrib.HeadlineDocumentCost(maxLen); got != want {
+			t.Errorf("HeadlineDocumentCost(%d) = %d, want %d", maxLen, got, want)
+		}
+	}
+}
+
 func TestParseHeadlineOptions(t *testing.T) {
 	tests := []struct {
 		in   any
