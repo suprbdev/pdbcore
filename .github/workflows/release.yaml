@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 env:
   GO_VERSION: "1.26"
@@ -20,6 +22,18 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Tests (race)
         run: go test -race ./...
+      - name: SBOM (CycloneDX)
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0
+          mkdir -p dist
+          cyclonedx-gomod mod -json -licenses -output "dist/pdbcore_${VERSION#v}_sbom.cdx.json" .
+      - name: Attest build provenance
+        if: ${{ !env.ACT }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.cdx.json
       - name: Create GitHub release
         # Skipped under act (local workflow testing); act sets ACT=true.
         # Library module: notes only, no binaries.
@@ -29,4 +43,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes
+            --generate-notes \
+            dist/*
