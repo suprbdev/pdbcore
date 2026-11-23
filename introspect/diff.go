@@ -24,6 +24,7 @@ func Diff(cached, live *Catalog) []string {
 	out = append(out, diffFunctions(cached.Functions, live.Functions)...)
 	out = append(out, diffExtensions(cached.Extensions, live.Extensions)...)
 	out = append(out, diffNamed("range type", rangeMap(cached.Ranges), rangeMap(live.Ranges))...)
+	out = append(out, diffNamed("domain", domainMap(cached.Domains), domainMap(live.Domains))...)
 	return out
 }
 
@@ -202,6 +203,9 @@ func typeDesc(c *Column) string {
 			t += "[]"
 		}
 	}
+	if c.Domain != "" {
+		t += " (domain " + c.Domain + ")"
+	}
 	if c.NotNull {
 		t += " not null"
 	}
@@ -227,6 +231,14 @@ func rangeMap(ranges []*RangeType) map[string]any {
 	out := map[string]any{}
 	for _, r := range ranges {
 		out[r.Schema+"."+r.Name] = r
+	}
+	return out
+}
+
+func domainMap(domains []*Domain) map[string]any {
+	out := map[string]any{}
+	for _, d := range domains {
+		out[d.Ref()] = d
 	}
 	return out
 }
@@ -282,8 +294,8 @@ func functionAspectChanges(cached, live *Function) []string {
 	aspect("argument defaults",
 		argsWith(cached, func(a FuncArg) any { return [2]any{a.HasDefault, a.Default} }),
 		argsWith(live, func(a FuncArg) any { return [2]any{a.HasDefault, a.Default} }))
-	aspect("return type", [3]any{cached.ReturnType, cached.ReturnTypeSchema, cached.ReturnsSet},
-		[3]any{live.ReturnType, live.ReturnTypeSchema, live.ReturnsSet})
+	aspect("return type", [4]any{cached.ReturnType, cached.ReturnTypeSchema, cached.ReturnDomain, cached.ReturnsSet},
+		[4]any{live.ReturnType, live.ReturnTypeSchema, live.ReturnDomain, live.ReturnsSet})
 	aspect("return columns", cached.ReturnColumns, live.ReturnColumns)
 	aspect("volatility", cached.Volatility, live.Volatility)
 	aspect("comment", cached.Comment, live.Comment)

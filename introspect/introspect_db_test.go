@@ -67,7 +67,7 @@ func TestIntrospectTypmodsLive(t *testing.T) {
 				ADD g0 geometry, ADD g1 geometry(Point,4326), ADD g2 geometry(LineStringZM,3857),
 				ADD g3 geometry(GeometryZ), ADD g4 geography, ADD g5 geography(Polygon),
 				ADD g6 geometry(MultiPolygon,4326)[], ADD g7 pdbcore_typmod_test.pt,
-				ADD g8 pdbcore_typmod_test.pt2`,
+				ADD g8 pdbcore_typmod_test.pt2, ADD g9 pdbcore_typmod_test.pt[]`,
 			`ALTER TYPE pdbcore_typmod_test.c ADD ATTRIBUTE g geometry(MultiPoint,2154)`,
 		)
 	}
@@ -128,6 +128,7 @@ func TestIntrospectTypmodsLive(t *testing.T) {
 		"g6": {Subtype: SpatialMultiPolygon, SRID: 4326},
 		"g7": {Subtype: SpatialPoint, SRID: 4326},
 		"g8": {Subtype: SpatialPoint, SRID: 4326},
+		"g9": {Subtype: SpatialPoint, SRID: 4326},
 	} {
 		col := tbl.Column(name)
 		if col.Spatial == nil || *col.Spatial != want || col.SQLType != "" || !isPostGISName(col) {
@@ -694,5 +695,124 @@ func TestIntrospectSkipsTypeOwnedFunctionsLive(t *testing.T) {
 	}
 	if cat.Range("pdbcore_typefn_test", "floatrange") == nil {
 		t.Fatal("range type itself must still be listed")
+	}
+}
+
+// TestIntrospectDomainsLive checks the recorded domains (constraints,
+// defaults, comments, parents, array bases), which domains outside the
+// introspected schemas are kept, and the Domain refs on columns, arrays of
+// domains, composite attributes and function parameters and results.
+func TestIntrospectDomainsLive(t *testing.T) {
+	tx := liveTx(t,
+		`CREATE SCHEMA pdbcore_dom`,
+		`CREATE SCHEMA pdbcore_dom_other`,
+		`CREATE DOMAIN pdbcore_dom.email AS text CHECK (VALUE ~ '^[^@]+@[^@]+$')`,
+		`COMMENT ON DOMAIN pdbcore_dom.email IS 'An email address.'`,
+		`CREATE DOMAIN pdbcore_dom.positive_int AS int NOT NULL DEFAULT 1 CONSTRAINT a_positive CHECK (VALUE > 0)`,
+		`CREATE DOMAIN pdbcore_dom.small_positive AS pdbcore_dom.positive_int
+			CONSTRAINT b_upper CHECK (VALUE <= 100) CONSTRAINT a_odd CHECK (VALUE % 2 = 1)`,
+		`CREATE DOMAIN pdbcore_dom.int_list AS int[]`,
+		`CREATE DOMAIN pdbcore_dom_other.code AS varchar(10)`,
+		`CREATE DOMAIN pdbcore_dom_other.code2 AS pdbcore_dom_other.code`,
+		`CREATE DOMAIN pdbcore_dom_other.unused AS text`,
+		`CREATE DOMAIN pdbcore_dom_other.arg AS text`,
+		`CREATE TABLE pdbcore_dom.t (
+			e  pdbcore_dom.email,
+			es pdbcore_dom.email[],
+			s  pdbcore_dom.small_positive,
+			l  pdbcore_dom.int_list,
+			c  pdbcore_dom_other.code2,
+			cs pdbcore_dom_other.code[],
+			n  int
+		)`,
+		`CREATE TYPE pdbcore_dom.comp AS (e pdbcore_dom.email, n int)`,
+		`CREATE FUNCTION pdbcore_dom.f(e pdbcore_dom.email, es pdbcore_dom.email[], o pdbcore_dom_other.arg)
+			RETURNS pdbcore_dom.small_positive LANGUAGE sql AS 'SELECT 1'`,
+		`CREATE FUNCTION pdbcore_dom.g() RETURNS TABLE (x pdbcore_dom.email, y int) LANGUAGE sql AS $$SELECT 'a@b'::pdbcore_dom.email, 1$$`,
+		`CREATE FUNCTION pdbcore_dom.h() RETURNS pdbcore_dom.email[] LANGUAGE sql AS $$SELECT ARRAY['a@b']::pdbcore_dom.email[]$$`,
+	)
+	cat, err := Introspect(context.Background(), tx, []string{"pdbcore_dom"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refs []string
+	for _, d := range cat.Domains {
+		refs = append(refs, d.Ref())
+	}
+	wantRefs := []string{
+		"pdbcore_dom.email", "pdbcore_dom.int_list", "pdbcore_dom.positive_int", "pdbcore_dom.small_positive",
+		"pdbcore_dom_other.arg", "pdbcore_dom_other.code", "pdbcore_dom_other.code2",
+	}
+	if !reflect.DeepEqual(refs, wantRefs) {
+		t.Fatalf("domains = %v, want %v", refs, wantRefs)
+	}
+	for ref, want := range map[string]Domain{
+		"pdbcore_dom.email": {Schema: "pdbcore_dom", Name: "email", BaseType: "text", BaseTypeSchema: "pg_catalog",
+			Checks: []string{"CHECK ((VALUE ~ '^[^@]+@[^@]+$'::text))"}, Comment: "An email address."},
+		"pdbcore_dom.positive_int": {Schema: "pdbcore_dom", Name: "positive_int", BaseType: "int4", BaseTypeSchema: "pg_catalog",
+			NotNull: true, Default: "1", Checks: []string{"CHECK ((VALUE > 0))"}},
+		"pdbcore_dom.small_positive": {Schema: "pdbcore_dom", Name: "small_positive", BaseType: "int4", BaseTypeSchema: "pg_catalog",
+			Parent: "pdbcore_dom.positive_int", Default: "1",
+			Checks: []string{"CHECK ((((VALUE)::integer % 2) = 1))", "CHECK (((VALUE)::integer <= 100))"}},
+		"pdbcore_dom.int_list": {Schema: "pdbcore_dom", Name: "int_list", BaseType: "_int4", BaseTypeSchema: "pg_catalog", IsArrayBase: true},
+		"pdbcore_dom_other.code2": {Schema: "pdbcore_dom_other", Name: "code2", BaseType: "varchar", BaseTypeSchema: "pg_catalog",
+			Parent: "pdbcore_dom_other.code"},
+	} {
+		d := cat.DomainByRef(ref)
+		if d == nil || !reflect.DeepEqual(*d, want) {
+			t.Errorf("domain %s = %+v, want %+v", ref, d, want)
+		}
+	}
+	if got := cat.DomainChain(cat.Domain("pdbcore_dom", "small_positive")); len(got) != 2 || got[1] != cat.Domain("pdbcore_dom", "positive_int") {
+		t.Errorf("DomainChain = %+v", got)
+	}
+
+	tbl := cat.Table("pdbcore_dom", "t")
+	type colWant struct {
+		pgType, sqlType, domain string
+		isArray                 bool
+	}
+	for name, want := range map[string]colWant{
+		"e":  {"text", "", "pdbcore_dom.email", false},
+		"es": {"_text", "", "pdbcore_dom.email", true},
+		"s":  {"int4", "", "pdbcore_dom.small_positive", false},
+		"l":  {"_int4", "", "pdbcore_dom.int_list", true},
+		"c":  {"varchar", "character varying(10)", "pdbcore_dom_other.code2", false},
+		"cs": {"_varchar", "character varying(10)[]", "pdbcore_dom_other.code", true},
+		"n":  {"int4", "", "", false},
+	} {
+		c := tbl.Column(name)
+		if got := (colWant{c.PGType, c.SQLType, c.Domain, c.IsArray}); got != want {
+			t.Errorf("column %s = %+v, want %+v", name, got, want)
+		}
+		if c.BaseTypeSchema != "pg_catalog" {
+			t.Errorf("column %s BaseTypeSchema = %q", name, c.BaseTypeSchema)
+		}
+	}
+	if es := tbl.Column("es"); es.TypeSchema != "pdbcore_dom" {
+		t.Errorf("column es TypeSchema = %q", es.TypeSchema)
+	}
+	comp := cat.Composite("pdbcore_dom", "comp")
+	if comp == nil || comp.Fields[0].Domain != "pdbcore_dom.email" || comp.Fields[0].PGType != "text" || comp.Fields[1].Domain != "" {
+		t.Errorf("composite = %+v", comp)
+	}
+	fns := map[string]*Function{}
+	for _, f := range cat.Functions {
+		fns[f.Name] = f
+	}
+	f := fns["f"]
+	if f == nil || f.ReturnType != "small_positive" || f.ReturnDomain != "pdbcore_dom.small_positive" {
+		t.Fatalf("f = %+v", f)
+	}
+	for i, want := range [][2]string{{"email", "pdbcore_dom.email"}, {"_email", "pdbcore_dom.email"}, {"arg", "pdbcore_dom_other.arg"}} {
+		if got := [2]string{f.Args[i].PGType, f.Args[i].Domain}; got != want {
+			t.Errorf("f arg %d (PGType, Domain) = %v, want %v", i, got, want)
+		}
+	}
+	if g := fns["g"]; g == nil || g.ReturnColumns[0].Domain != "pdbcore_dom.email" || g.ReturnColumns[1].Domain != "" || g.ReturnDomain != "" {
+		t.Errorf("g = %+v", g)
+	}
+	if h := fns["h"]; h == nil || h.ReturnType != "_email" || h.ReturnDomain != "pdbcore_dom.email" {
+		t.Errorf("h = %+v", h)
 	}
 }

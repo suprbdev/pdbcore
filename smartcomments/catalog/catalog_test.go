@@ -184,6 +184,7 @@ func TestIndexLookups(t *testing.T) {
 	cat.Enum("public", "mood").Comment = "@name feeling"
 	cat.Functions[0].Comment = "@name findPosts" // search_posts
 	cat.Table("public", "posts").ForeignKeys[0].Comment = "@fieldName writer"
+	cat.Domains = append(cat.Domains, &introspect.Domain{Schema: "public", Name: "email", Comment: "@name address\nAn email."})
 	ix := catalog.BuildIndex(cat)
 
 	if ix.RenamedTable("public", "users") != "customers" || ix.RenamedTable("", "users") != "customers" {
@@ -200,6 +201,9 @@ func TestIndexLookups(t *testing.T) {
 	}
 	if ix.Enum("public", "mood").First("name") != "feeling" || ix.Enum("", "mood").First("name") != "feeling" {
 		t.Fatal("enum lookup")
+	}
+	if ix.Domain("public", "email").First("name") != "address" || ix.Domain("", "email").First("name") != "address" || ix.Domain("other", "email") != nil {
+		t.Fatal("domain lookup")
 	}
 	if ix.Function("public", "search_posts").First("name") != "findPosts" || ix.Function("", "search_posts").First("name") != "findPosts" {
 		t.Fatal("function lookup")

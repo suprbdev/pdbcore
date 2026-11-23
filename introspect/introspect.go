@@ -3,6 +3,7 @@ package introspect
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -52,6 +53,9 @@ func Introspect(ctx context.Context, db Querier, schemas []string) (*Catalog, er
 		return nil, err
 	}
 	if err := readRanges(ctx, db, cat); err != nil {
+		return nil, err
+	}
+	if err := readDomains(ctx, db, cat); err != nil {
 		return nil, err
 	}
 	if err := convertEnumTables(ctx, db, cat); err != nil {
@@ -125,24 +129,46 @@ const typmodColumns = `CASE WHEN m.typmod >= 0 THEN format_type(m.typoid, m.typm
 // chain of domains to the first non-domain base (typoid, typname,
 // typnamespace, typcategory, typelem), plus the effective modifier typmod:
 // a.atttypmod for a non-domain type, otherwise the typtypmod of the nearest
-// domain in the chain that declares one (-1 if none does).
+// domain in the chain that declares one (-1 if none does). An array of a
+// domain resolves its element domain instead and yields the array type of
+// that domain's base (so email[] becomes _text), unless the base has no
+// array type (a domain over an array), which leaves typ as it is. domain is
+// the "schema.name" of the domain typ is, or of the element domain so
+// resolved; empty otherwise.
 func resolvedType(typ string) string {
 	return fmt.Sprintf(`CROSS JOIN LATERAL (
-		    WITH RECURSIVE chain AS (
-		        SELECT %[1]s.oid, %[1]s.typtype, %[1]s.typbasetype, %[1]s.typtypmod, 0 AS depth
+		    WITH RECURSIVE subject AS (
+		        SELECT COALESCE(e.oid, %[1]s.oid) AS oid, e.oid IS NOT NULL AS array_of
+		        FROM (SELECT 1) one
+		        LEFT JOIN pg_type e ON %[1]s.typtype <> 'd' AND %[1]s.typcategory = 'A'
+		                           AND e.oid = %[1]s.typelem AND e.typtype = 'd'
+		    ), chain AS (
+		        SELECT d.oid, d.typtype, d.typbasetype, d.typtypmod, 0 AS depth
+		        FROM subject JOIN pg_type d ON d.oid = subject.oid
 		        UNION ALL
 		        SELECT d.oid, d.typtype, d.typbasetype, d.typtypmod, chain.depth + 1
 		        FROM chain JOIN pg_type d ON d.oid = chain.typbasetype
 		        WHERE chain.typtype = 'd'
+		    ), base AS (
+		        SELECT b.oid, b.typarray, subject.array_of AND b.typarray <> 0 AS array_of
+		        FROM chain JOIN pg_type b ON b.oid = chain.oid CROSS JOIN subject
+		        WHERE chain.typtype <> 'd'
 		    )
-		    SELECT b.oid AS typoid, b.typname, b.typnamespace, b.typcategory, b.typelem,
-		           CASE WHEN %[1]s.typtype = 'd'
+		    SELECT r.oid AS typoid, r.typname, r.typnamespace, r.typcategory, r.typelem,
+		           CASE WHEN %[1]s.typtype = 'd' OR base.array_of
 		                THEN COALESCE((SELECT typtypmod FROM chain
 		                               WHERE typtype = 'd' AND typtypmod >= 0
 		                               ORDER BY depth LIMIT 1), -1)
-		                ELSE a.atttypmod END AS typmod
-		    FROM chain JOIN pg_type b ON b.oid = chain.oid
-		    WHERE chain.typtype <> 'd'
+		                ELSE a.atttypmod END AS typmod,
+		           CASE WHEN %[1]s.typtype = 'd' OR base.array_of
+		                THEN (SELECT dn.nspname || '.' || dt.typname
+		                      FROM subject JOIN pg_type dt ON dt.oid = subject.oid
+		                      JOIN pg_namespace dn ON dn.oid = dt.typnamespace)
+		                ELSE '' END AS domain
+		    FROM base
+		    JOIN pg_type r ON r.oid = CASE WHEN base.array_of THEN base.typarray
+		                                   WHEN (SELECT array_of FROM subject) THEN %[1]s.oid
+		                                   ELSE base.oid END
 		) m`, typ)
 }
 
@@ -161,6 +187,7 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		            WHEN a.attgenerated = 'v' THEN 'virtual'
 		            ELSE '' END,
 		       COALESCE(col_description(c.oid, a.attnum), ''),
+		       m.domain,
 		       `+typmodColumns+`
 		FROM pg_attribute a
 		JOIN pg_class c ON c.oid = a.attrelid
@@ -184,7 +211,7 @@ func readColumns(ctx context.Context, db Querier, schemas []string, cat *Catalog
 		if err := rows.Scan(&schema, &table, &col.Name, &col.Position,
 			&col.TypeSchema, &col.PGType, &col.BaseTypeSchema, &col.IsArray,
 			&col.NotNull, &col.HasDefault, &col.Generated, &genKind, &col.Comment,
-			&formatted, &builtin, &spatial); err != nil {
+			&col.Domain, &formatted, &builtin, &spatial); err != nil {
 			return err
 		}
 		col.GeneratedKind = GeneratedKind(genKind)
@@ -350,6 +377,97 @@ func readRanges(ctx context.Context, db Querier, cat *Catalog) error {
 	return rows.Err()
 }
 
+// readDomains reads every domain and keeps those [Catalog.Domains]
+// documents: the ones in the introspected schemas, the ones the recorded
+// columns, composite attributes and function parameters and results use,
+// and their parent domains.
+func readDomains(ctx context.Context, db Querier, cat *Catalog) error {
+	rows, err := db.Query(ctx, `
+		SELECT n.nspname, t.typname,
+		       COALESCE((SELECT pn.nspname || '.' || pt.typname
+		                 FROM pg_type pt JOIN pg_namespace pn ON pn.oid = pt.typnamespace
+		                 WHERE pt.oid = t.typbasetype AND pt.typtype = 'd'), ''),
+		       m.typname, bn.nspname, m.typcategory = 'A',
+		       t.typnotnull, COALESCE(t.typdefault, ''),
+		       ARRAY(SELECT pg_get_constraintdef(con.oid) FROM pg_constraint con
+		             WHERE con.contypid = t.oid AND con.contype = 'c' ORDER BY con.conname),
+		       COALESCE(obj_description(t.oid, 'pg_type'), '')
+		FROM pg_type t
+		JOIN pg_namespace n ON n.oid = t.typnamespace
+		CROSS JOIN LATERAL (
+		    WITH RECURSIVE chain AS (
+		        SELECT t.typbasetype AS oid
+		        UNION ALL
+		        SELECT d.typbasetype FROM chain JOIN pg_type d ON d.oid = chain.oid WHERE d.typtype = 'd'
+		    )
+		    SELECT b.typname, b.typnamespace, b.typcategory
+		    FROM chain JOIN pg_type b ON b.oid = chain.oid
+		    WHERE b.typtype <> 'd'
+		) m
+		JOIN pg_namespace bn ON bn.oid = m.typnamespace
+		WHERE t.typtype = 'd'
+		ORDER BY n.nspname, t.typname`)
+	if err != nil {
+		return fmt.Errorf("introspect: domains: %w", err)
+	}
+	defer rows.Close()
+	all := map[string]*Domain{}
+	var order []*Domain
+	for rows.Next() {
+		d := &Domain{}
+		if err := rows.Scan(&d.Schema, &d.Name, &d.Parent, &d.BaseType, &d.BaseTypeSchema, &d.IsArrayBase,
+			&d.NotNull, &d.Default, &d.Checks, &d.Comment); err != nil {
+			return err
+		}
+		if len(d.Checks) == 0 {
+			d.Checks = nil
+		}
+		all[d.Ref()] = d
+		order = append(order, d)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	keep := map[string]bool{}
+	var want func(ref string)
+	want = func(ref string) {
+		if d := all[ref]; d != nil && !keep[ref] {
+			keep[ref] = true
+			want(d.Parent)
+		}
+	}
+	for _, d := range order {
+		if slices.Contains(cat.Schemas, d.Schema) {
+			want(d.Ref())
+		}
+	}
+	for _, t := range cat.Tables {
+		for _, c := range t.Columns {
+			want(c.Domain)
+		}
+	}
+	for _, ct := range cat.Composites {
+		for _, f := range ct.Fields {
+			want(f.Domain)
+		}
+	}
+	for _, f := range cat.Functions {
+		want(f.ReturnDomain)
+		for _, a := range f.Args {
+			want(a.Domain)
+		}
+		for _, a := range f.ReturnColumns {
+			want(a.Domain)
+		}
+	}
+	for _, d := range order {
+		if keep[d.Ref()] {
+			cat.Domains = append(cat.Domains, d)
+		}
+	}
+	return nil
+}
+
 func readEnums(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, t.typname,
@@ -384,6 +502,7 @@ func readComposites(ctx context.Context, db Querier, schemas []string, cat *Cata
 		       bn.nspname,
 		       m.typcategory = 'A',
 		       COALESCE(col_description(c.oid, a.attnum), ''),
+		       m.domain,
 		       `+typmodColumns+`
 		FROM pg_type t
 		JOIN pg_namespace n ON n.oid = t.typnamespace
@@ -406,7 +525,7 @@ func readComposites(ctx context.Context, db Querier, schemas []string, cat *Cata
 		f := &Column{}
 		if err := rows.Scan(&schema, &name, &f.Name, &f.Position,
 			&f.TypeSchema, &f.PGType, &f.BaseTypeSchema, &f.IsArray, &f.Comment,
-			&formatted, &builtin, &spatial); err != nil {
+			&f.Domain, &formatted, &builtin, &spatial); err != nil {
 			return err
 		}
 		applyTypmod(f, formatted, builtin, spatial)
@@ -429,6 +548,7 @@ func readComposites(ctx context.Context, db Querier, schemas []string, cat *Cata
 func readFunctions(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, p.proname, p.provolatile, p.proretset, rt.typname, rtn.nspname,
+		       `+domainRef("rt")+`,
 		       p.pronargdefaults,
 		       ARRAY(SELECT COALESCE(p.proargnames[a.ord::int], '') FROM `+funcArgs+` ORDER BY a.ord),
 		       ARRAY(SELECT COALESCE(p.proargmodes[a.ord::int], 'i')::text FROM `+funcArgs+` ORDER BY a.ord),
@@ -437,6 +557,7 @@ func readFunctions(ctx context.Context, db Querier, schemas []string, cat *Catal
 		             JOIN pg_type t ON t.oid = a.oid
 		             JOIN pg_namespace tn ON tn.oid = t.typnamespace ORDER BY a.ord),
 		       ARRAY(SELECT COALESCE(pg_get_function_arg_default(p.oid, a.ord::int), '') FROM `+funcArgs+` ORDER BY a.ord),
+		       ARRAY(SELECT `+domainRef("t")+` FROM `+funcArgs+` JOIN pg_type t ON t.oid = a.oid ORDER BY a.ord),
 		       COALESCE(obj_description(p.oid, 'pg_proc'), '')
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -466,9 +587,9 @@ func readFunctions(ctx context.Context, db Querier, schemas []string, cat *Catal
 		f := &Function{}
 		var vol rune
 		var nDefaults int
-		var names, modes, types, typeSchemas, defaults []string
-		if err := rows.Scan(&f.Schema, &f.Name, &vol, &f.ReturnsSet, &f.ReturnType, &f.ReturnTypeSchema,
-			&nDefaults, &names, &modes, &types, &typeSchemas, &defaults, &f.Comment); err != nil {
+		var names, modes, types, typeSchemas, defaults, domains []string
+		if err := rows.Scan(&f.Schema, &f.Name, &vol, &f.ReturnsSet, &f.ReturnType, &f.ReturnTypeSchema, &f.ReturnDomain,
+			&nDefaults, &names, &modes, &types, &typeSchemas, &defaults, &domains, &f.Comment); err != nil {
 			return err
 		}
 		switch vol {
@@ -479,11 +600,23 @@ func readFunctions(ctx context.Context, db Querier, schemas []string, cat *Catal
 		default:
 			f.Volatility = VolatilityVolatile
 		}
-		if buildFuncArgs(f, nDefaults, names, modes, types, typeSchemas, defaults) {
+		if buildFuncArgs(f, nDefaults, names, modes, types, typeSchemas, defaults, domains) {
 			cat.Functions = append(cat.Functions, f)
 		}
 	}
 	return rows.Err()
+}
+
+// domainRef selects the "schema.name" of the domain the pg_type alias typ
+// is, or of its element domain when typ is an array of a domain, and the
+// empty string for any other type. A domain over an array is itself a
+// domain (typtype 'd').
+func domainRef(typ string) string {
+	return fmt.Sprintf(`COALESCE((SELECT dn.nspname || '.' || dt.typname
+		         FROM pg_type dt JOIN pg_namespace dn ON dn.oid = dt.typnamespace
+		         WHERE dt.typtype = 'd'
+		           AND dt.oid = CASE WHEN %[1]s.typtype = 'd' THEN %[1]s.oid
+		                             WHEN %[1]s.typcategory = 'A' THEN %[1]s.typelem END), '')`, typ)
 }
 
 // funcArgs is the FROM item over every parameter of pg_proc p, one row
@@ -493,10 +626,10 @@ const funcArgs = `unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[])) WITH 
 // buildFuncArgs fills f.Args and f.ReturnColumns from parallel per-parameter
 // arrays. It reports false for a function with an unnamed input parameter,
 // which named notation and named API arguments cannot address.
-func buildFuncArgs(f *Function, nDefaults int, names, modes, types, typeSchemas, defaults []string) bool {
+func buildFuncArgs(f *Function, nDefaults int, names, modes, types, typeSchemas, defaults, domains []string) bool {
 	outs := 0
 	for i, typ := range types {
-		a := FuncArg{Name: names[i], PGType: typ, TypeSchema: typeSchemas[i], Default: defaults[i]}
+		a := FuncArg{Name: names[i], PGType: typ, TypeSchema: typeSchemas[i], Default: defaults[i], Domain: domains[i]}
 		switch modes[i] {
 		case "o":
 			a.Mode = ArgModeOut

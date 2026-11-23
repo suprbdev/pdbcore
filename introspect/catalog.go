@@ -11,7 +11,7 @@ import (
 
 // CatalogFormatVersion is bumped whenever the Catalog wire format changes
 // incompatibly; the cache layer refuses to load mismatched versions.
-const CatalogFormatVersion = 7
+const CatalogFormatVersion = 8
 
 // Catalog is the complete introspected model of the database. It is the only
 // input to API building, which keeps caching trivial and plugin transforms
@@ -36,9 +36,51 @@ type Catalog struct {
 	// schemas were introspected, so a column whose range type lives
 	// elsewhere still resolves. The built-in range types are not listed.
 	Ranges []*RangeType `json:"ranges,omitempty"`
+	// Domains lists the domains (CREATE DOMAIN) defined in the introspected
+	// schemas plus every domain a recorded column, composite attribute or
+	// function parameter or result uses, wherever it is defined, and the
+	// parent domains of all of these: every Domain and Parent ref in the
+	// catalog resolves through [Catalog.DomainByRef].
+	Domains []*Domain `json:"domains,omitempty"`
 
 	idx catalogIndexes
 }
+
+// Domain is a domain type as recorded in pg_type (typtype 'd').
+type Domain struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+	// BaseType is the first non-domain type of the domain's chain as
+	// Column.PGType spells a type, e.g. "text" or "_int4" for a domain over
+	// int[], and BaseTypeSchema its schema.
+	BaseType       string `json:"base_type"`
+	BaseTypeSchema string `json:"base_type_schema"`
+	// IsArrayBase reports that BaseType is an array type: the domain itself
+	// holds arrays, as opposed to a column declared as an array of the
+	// domain (see [Column.Domain]).
+	IsArrayBase bool `json:"is_array_base,omitempty"`
+	// Parent is the "schema.name" ref of the domain this one is declared
+	// over (CREATE DOMAIN d AS other_domain), empty when its base is not a
+	// domain. The parent's NOT NULL and CHECK constraints apply to this
+	// domain's values too; see [Catalog.DomainChain].
+	Parent string `json:"parent,omitempty"`
+	// NotNull is the domain's own NOT NULL constraint.
+	NotNull bool `json:"not_null,omitempty"`
+	// Checks are the domain's own CHECK constraints as pg_get_constraintdef
+	// renders them, e.g. "CHECK ((VALUE > 0))", ordered by constraint name.
+	// Over a parent domain VALUE may render cast to the base type, e.g.
+	// "CHECK (((VALUE)::integer <= 100))".
+	Checks []string `json:"checks,omitempty"`
+	// Default is the domain's DEFAULT expression as text (pg_type.typdefault),
+	// empty when it has none. A domain declared over another domain without
+	// a DEFAULT of its own inherits its parent's.
+	Default string `json:"default,omitempty"`
+	Comment string `json:"comment,omitempty"`
+}
+
+// Ref returns the domain's "schema.name" ref, the form [Column.Domain],
+// [FuncArg.Domain] and [Domain.Parent] use.
+func (d *Domain) Ref() string { return d.Schema + "." + d.Name }
 
 // RangeType is a range type as recorded in pg_range.
 type RangeType struct {
@@ -192,6 +234,16 @@ type Column struct {
 	// while a domain over it may live anywhere). Empty when unknown
 	// (hand-built catalogs).
 	BaseTypeSchema string `json:"base_type_schema,omitempty"`
+	// Domain is the "schema.name" ref of the domain the column is declared
+	// as, the outermost one when domains are layered, or of the element
+	// domain of a column declared as an array of a domain (IsArray then
+	// holds and PGType is the array type of the element domain's base,
+	// e.g. "_text" for email[]). A column declared as a domain over an
+	// array type has IsArray set too; [Domain.IsArrayBase] tells the two
+	// apart. PGType, BaseTypeSchema, SQLType and Spatial always describe
+	// the resolved base type. Empty for a column whose type involves no
+	// domain.
+	Domain string `json:"domain,omitempty"`
 }
 
 // GeneratedKind distinguishes identity columns from stored and virtual
@@ -368,12 +420,16 @@ type Function struct {
 	// ReturnType is "record" and each result row has exactly these columns.
 	// With one, PostgreSQL returns that column's type directly (ReturnType
 	// is that type, and the column name only labels SELECT * FROM f()).
-	ReturnColumns    []FuncArg  `json:"return_columns,omitempty"`
-	ReturnType       string     `json:"return_type"`
-	ReturnTypeSchema string     `json:"return_type_schema"`
-	ReturnsSet       bool       `json:"returns_set"`
-	Volatility       Volatility `json:"volatility"`
-	Comment          string     `json:"comment,omitempty"`
+	ReturnColumns    []FuncArg `json:"return_columns,omitempty"`
+	ReturnType       string    `json:"return_type"`
+	ReturnTypeSchema string    `json:"return_type_schema"`
+	// ReturnDomain is the "schema.name" ref of the domain ReturnType is, or
+	// of its element domain when ReturnType is an array of a domain; empty
+	// otherwise. ReturnType keeps naming the declared type.
+	ReturnDomain string     `json:"return_domain,omitempty"`
+	ReturnsSet   bool       `json:"returns_set"`
+	Volatility   Volatility `json:"volatility"`
+	Comment      string     `json:"comment,omitempty"`
 }
 
 // ArgMode mirrors pg_proc.proargmodes.
@@ -412,6 +468,13 @@ type FuncArg struct {
 	// renders it, for documentation only: it is never needed to call the
 	// function, which evaluates its own defaults.
 	Default string `json:"default,omitempty"`
+	// Domain is the "schema.name" ref of the domain PGType is, or of its
+	// element domain when PGType is an array of a domain (e.g. "_email");
+	// empty otherwise. Unlike a column's, a parameter's PGType and
+	// TypeSchema keep naming the declared type, so casts to it apply the
+	// domain's constraints; resolve the base type through
+	// [Catalog.DomainByRef].
+	Domain string `json:"domain,omitempty"`
 }
 
 // Variadic reports whether a is the VARIADIC parameter.
@@ -474,6 +537,35 @@ func (c *Catalog) RangeOfMultirange(schema, name string) *RangeType {
 	return lookup(&c.idx.multis, c.Ranges, nameKey{schema, name}, func(r *RangeType) nameKey { return nameKey{r.MultirangeSchema, r.Multirange} })
 }
 
+// Domain returns the domain with the given schema+name from
+// [Catalog.Domains], or nil.
+func (c *Catalog) Domain(schema, name string) *Domain {
+	return lookup(&c.idx.domains, c.Domains, nameKey{schema, name}, func(d *Domain) nameKey { return nameKey{d.Schema, d.Name} })
+}
+
+// DomainByRef returns the domain a "schema.name" ref ([Column.Domain],
+// [FuncArg.Domain], [Function.ReturnDomain], [Domain.Parent]) points at, or
+// nil for an empty or unknown ref.
+func (c *Catalog) DomainByRef(ref string) *Domain {
+	if ref == "" {
+		return nil
+	}
+	return lookup(&c.idx.domainRefs, c.Domains, ref, func(d *Domain) string { return d.Ref() })
+}
+
+// DomainChain returns d followed by its parent domains, outermost first,
+// stopping at a parent missing from the catalog. A value of d satisfies the
+// NOT NULL and CHECK constraints of every domain in the chain.
+func (c *Catalog) DomainChain(d *Domain) []*Domain {
+	var out []*Domain
+	seen := map[*Domain]bool{}
+	for ; d != nil && !seen[d]; d = c.DomainByRef(d.Parent) {
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
+}
+
 // Composite returns the composite type with the given schema+name, or nil.
 func (c *Catalog) Composite(schema, name string) *Composite {
 	return lookup(&c.idx.composites, c.Composites, nameKey{schema, name}, func(ct *Composite) nameKey { return nameKey{ct.Schema, ct.Name} })
@@ -523,5 +615,11 @@ func (c *Catalog) sortStable() {
 			return c.Ranges[i].Schema < c.Ranges[j].Schema
 		}
 		return c.Ranges[i].Name < c.Ranges[j].Name
+	})
+	sort.Slice(c.Domains, func(i, j int) bool {
+		if c.Domains[i].Schema != c.Domains[j].Schema {
+			return c.Domains[i].Schema < c.Domains[j].Schema
+		}
+		return c.Domains[i].Name < c.Domains[j].Name
 	})
 }

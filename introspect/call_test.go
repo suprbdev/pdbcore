@@ -89,7 +89,8 @@ func TestBuildFuncArgs(t *testing.T) {
 		[]string{"i", "o", "o", "b"},
 		[]string{"int4", "int4", "text", "text"},
 		[]string{"pg_catalog", "pg_catalog", "pg_catalog", "pg_catalog"},
-		[]string{"", "", "", "'x'::text"})
+		[]string{"", "", "", "'x'::text"},
+		[]string{"", "", "", ""})
 	if !ok {
 		t.Fatal("buildFuncArgs rejected a function with named inputs")
 	}
@@ -109,7 +110,7 @@ func TestBuildFuncArgs(t *testing.T) {
 		t.Fatal("Variadic() on a function without one")
 	}
 
-	if buildFuncArgs(&Function{}, 0, []string{""}, []string{"i"}, []string{"int4"}, []string{"pg_catalog"}, []string{""}) {
+	if buildFuncArgs(&Function{}, 0, []string{""}, []string{"i"}, []string{"int4"}, []string{"pg_catalog"}, []string{""}, []string{""}) {
 		t.Fatal("buildFuncArgs accepted an unnamed input parameter")
 	}
 }

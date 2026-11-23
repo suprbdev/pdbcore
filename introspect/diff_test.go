@@ -27,6 +27,18 @@ func diffFixture() *Catalog {
 	}
 }
 
+func TestDiffDomainChanged(t *testing.T) {
+	cached, live := diffFixture(), diffFixture()
+	cached.Domains = []*Domain{{Schema: "public", Name: "email", BaseType: "text", BaseTypeSchema: "pg_catalog"}}
+	live.Domains = []*Domain{{Schema: "public", Name: "email", BaseType: "text", BaseTypeSchema: "pg_catalog", Checks: []string{"CHECK ((VALUE ~ '@'::text))"}}}
+	if d := Diff(cached, live); len(d) != 1 || d[0] != "domain public.email changed" {
+		t.Fatalf("diff = %v", d)
+	}
+	if d := Diff(live, diffFixture()); len(d) != 1 || d[0] != "domain public.email removed" {
+		t.Fatalf("diff = %v", d)
+	}
+}
+
 func TestDiffEqual(t *testing.T) {
 	if d := Diff(diffFixture(), diffFixture()); len(d) != 0 {
 		t.Fatalf("expected no diff, got %v", d)
@@ -64,6 +76,15 @@ func TestDiff(t *testing.T) {
 		{"enum changed", func(c *Catalog) {
 			c.Enums[0].Values = append(c.Enums[0].Values, "ANGRY")
 		}, "enum public.mood changed"},
+		{"domain added", func(c *Catalog) {
+			c.Domains = append(c.Domains, &Domain{Schema: "public", Name: "email", BaseType: "text", BaseTypeSchema: "pg_catalog"})
+		}, "domain public.email added"},
+		{"column became a domain", func(c *Catalog) {
+			c.Tables[0].Columns[1].Domain = "public.email"
+		}, "table public.users: column email type changed (text not null -> text (domain public.email) not null)"},
+		{"function returns a domain", func(c *Catalog) {
+			c.Functions[0].ReturnType, c.Functions[0].ReturnDomain = "positive", "public.positive"
+		}, "function public.f(text) changed (return type)"},
 		{"function removed", func(c *Catalog) { c.Functions = nil }, "function public.f(text) removed"},
 		{"function default added", func(c *Catalog) {
 			c.Functions[0].Args[0].HasDefault = true
