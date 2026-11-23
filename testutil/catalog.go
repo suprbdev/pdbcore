@@ -291,6 +291,61 @@ func FixtureCatalog() *introspect.Catalog {
 			Args:       []introspect.FuncArg{{Name: "m", PGType: "mood", TypeSchema: "public", Mode: introspect.ArgModeIn}},
 			ReturnType: "mood", ReturnTypeSchema: "public",
 			Volatility: introspect.VolatilityVolatile,
+		}, {
+			Schema: "public", Name: "user_greeting",
+			Args: []introspect.FuncArg{
+				{Name: "greeting", PGType: "text", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
+				{Name: "u", PGType: "users", TypeSchema: "public", Mode: introspect.ArgModeIn},
+			},
+			ReturnType: "text", ReturnTypeSchema: "pg_catalog",
+			Volatility: introspect.VolatilityStable,
+		}, {
+			Schema: "public", Name: "total_title_length",
+			Args:       []introspect.FuncArg{{Name: "ps", PGType: "_posts", TypeSchema: "public", Mode: introspect.ArgModeIn}},
+			ReturnType: "int4", ReturnTypeSchema: "pg_catalog",
+			Volatility: introspect.VolatilityStable,
+		}, {
+			Schema: "public", Name: "address_cities",
+			Args:       []introspect.FuncArg{{Name: "addrs", PGType: "_address", TypeSchema: "public", Mode: introspect.ArgModeIn}},
+			ReturnType: "_text", ReturnTypeSchema: "pg_catalog",
+			Volatility: introspect.VolatilityStable,
+		}, {
+			Schema: "public", Name: "rename_user",
+			Args: []introspect.FuncArg{
+				{Name: "u", PGType: "users", TypeSchema: "public", Mode: introspect.ArgModeIn},
+				{Name: "new_name", PGType: "text", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
+			},
+			ReturnType: "users", ReturnTypeSchema: "public",
+			Volatility: introspect.VolatilityVolatile,
+		}, {
+			Schema: "public", Name: "pick_first",
+			Args: []introspect.FuncArg{
+				{Name: "a", PGType: "anyelement", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
+				{Name: "b", PGType: "anyelement", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
+			},
+			ReturnType: "anyelement", ReturnTypeSchema: "pg_catalog",
+			Volatility: introspect.VolatilityImmutable,
+			Comment:    "@anyelement text",
+		}, {
+			Schema: "public", Name: "larger_of",
+			Args: []introspect.FuncArg{
+				{Name: "a", PGType: "anycompatible", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
+				{Name: "b", PGType: "anycompatible", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn},
+			},
+			ReturnType: "anycompatible", ReturnTypeSchema: "pg_catalog",
+			Volatility: introspect.VolatilityImmutable,
+			Comment:    "@anycompatible numeric",
+		}, {
+			Schema: "public", Name: "range_lower",
+			Args:       []introspect.FuncArg{{Name: "r", PGType: "anyrange", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn}},
+			ReturnType: "anyelement", ReturnTypeSchema: "pg_catalog",
+			Volatility: introspect.VolatilityImmutable,
+			Comment:    "@anyelement integer",
+		}, {
+			Schema: "public", Name: "array_first",
+			Args:       []introspect.FuncArg{{Name: "arr", PGType: "anyarray", TypeSchema: "pg_catalog", Mode: introspect.ArgModeIn}},
+			ReturnType: "anyelement", ReturnTypeSchema: "pg_catalog",
+			Volatility: introspect.VolatilityImmutable,
 		}},
 		// The extension version tracks the server image; the drift gate
 		// normalises it.
