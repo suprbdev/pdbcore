@@ -256,7 +256,9 @@ func (c *Catalog) typeExists(schema, name string) bool {
 // its element type; the same holds for the compatible variants. Calling the
 // function with arguments cast to the resolved types makes PostgreSQL
 // resolve its polymorphic signature the same way. The error names the
-// first type that cannot be resolved (missing element type, anyenum over a
+// first type that cannot be resolved (an element type that is the row type of a
+// table recorded with [Catalog.HideRelation] or that is neither in pg_catalog
+// nor known to the catalog, missing element type, anyenum over a
 // non-enum, an array where an array or range is derived, no or several
 // candidate ranges).
 func (c *Catalog) ResolvePolymorphic(f *Function, elem, compat *TypeRef) (*Function, error) {
@@ -305,6 +307,12 @@ func (c *Catalog) ResolvePolymorphic(f *Function, elem, compat *TypeRef) (*Funct
 }
 
 func (c *Catalog) derivePolymorphic(kind polyKind, base TypeRef) (TypeRef, error) {
+	if c.RelationHidden(base.Schema, base.Name) {
+		return TypeRef{}, fmt.Errorf("element type %s is the row type of a hidden table", base)
+	}
+	if !c.polymorphicTypeKnown(base) {
+		return TypeRef{}, fmt.Errorf("element type %s is neither built in nor in the catalog", base)
+	}
 	if base.IsArray() && kind != polyElem {
 		return TypeRef{}, fmt.Errorf("element type %s is an array", base)
 	}
@@ -351,4 +359,19 @@ func (c *Catalog) rangeOver(base TypeRef) (rng, multi TypeRef, err error) {
 		return found[0][0], found[0][1], nil
 	}
 	return TypeRef{}, TypeRef{}, fmt.Errorf("several range types over %s", base)
+}
+
+// polymorphicTypeKnown reports whether t (or the element type of an array
+// type) is a pg_catalog type or one the catalog knows: a table, enum,
+// composite, domain or range, or a type of an installed extension.
+func (c *Catalog) polymorphicTypeKnown(t TypeRef) bool {
+	if t.Schema == "pg_catalog" {
+		return true
+	}
+	name := strings.TrimPrefix(t.Name, "_")
+	if c.typeExists(t.Schema, name) {
+		return true
+	}
+	ext := c.Extension(extensionTypes[name])
+	return ext != nil && ext.Schema == t.Schema
 }

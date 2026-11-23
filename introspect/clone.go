@@ -1,6 +1,9 @@
 package introspect
 
-import "slices"
+import (
+	"maps"
+	"slices"
+)
 
 // Clone returns a deep copy of c: every table, column, constraint, index,
 // enum, composite, function, extension, range and domain is copied, so
@@ -23,6 +26,7 @@ func (c *Catalog) Clone() *Catalog {
 		Extensions:       clonePtrs(c.Extensions, func(e *Extension) *Extension { cp := *e; return &cp }),
 		Ranges:           clonePtrs(c.Ranges, func(r *RangeType) *RangeType { cp := *r; return &cp }),
 		Domains:          clonePtrs(c.Domains, (*Domain).clone),
+		hiddenRelations:  maps.Clone(c.hiddenRelations),
 	}
 }
 

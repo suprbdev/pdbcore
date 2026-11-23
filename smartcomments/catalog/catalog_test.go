@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/suprbdev/pdbcore/contract"
 	"github.com/suprbdev/pdbcore/introspect"
 	"github.com/suprbdev/pdbcore/plugin"
 	"github.com/suprbdev/pdbcore/smartcomments/catalog"
@@ -289,5 +290,106 @@ func TestPolymorphicTagsResolveFunctions(t *testing.T) {
 	}
 	if fns["pick_first"].Comment != "@anyelement text" {
 		t.Error("the comment must survive resolution")
+	}
+}
+
+func TestPolymorphicNeverResolvesToHiddenTable(t *testing.T) {
+	poly := func(name, tag string) *introspect.Function {
+		return &introspect.Function{Schema: "public", Name: name, Comment: tag,
+			Args:       []introspect.FuncArg{{Name: "v", PGType: "anyelement", TypeSchema: "pg_catalog"}},
+			ReturnType: "anyelement", ReturnTypeSchema: "pg_catalog"}
+	}
+	prep := func(c *introspect.Catalog) {
+		c.Functions = append(c.Functions,
+			poly("peek_q", "@anyelement public.metrics"),
+			poly("peek_u", "@anyelement metrics"),
+			poly("peek_arr", "@anyelement public.metrics[]"),
+			poly("peek_users", "@anyelement public.users"),
+		)
+	}
+	check := func(t *testing.T, cat *introspect.Catalog, hidden bool) {
+		t.Helper()
+		for _, f := range cat.Functions {
+			switch f.Name {
+			case "peek_q", "peek_u", "peek_arr":
+				if got := f.ReturnType != "anyelement"; got == hidden {
+					t.Errorf("%s: resolved=%v with hidden=%v", f.Name, got, hidden)
+				}
+			case "peek_users":
+				if f.ReturnType != "users" {
+					t.Errorf("peek_users must still resolve, got %s", f.ReturnType)
+				}
+			}
+		}
+	}
+
+	t.Run("omitted table", func(t *testing.T) {
+		cat, _ := run(t, func(c *introspect.Catalog) {
+			prep(c)
+			c.Table("public", "metrics").Comment = "@omit"
+		})
+		check(t, cat, true)
+	})
+	t.Run("contract applied first", func(t *testing.T) {
+		cat := testutil.FixtureCatalog()
+		prep(cat)
+		cat.Table("public", "metrics").Comment = "@behavior -contract:public"
+		contract.Contract{Name: "public"}.Apply(cat)
+		if err := plugin.NewRegistry(catalog.New()).TransformCatalog(context.Background(), nil, cat); err != nil {
+			t.Fatal(err)
+		}
+		check(t, cat, true)
+	})
+	t.Run("contract view clone", func(t *testing.T) {
+		base := testutil.FixtureCatalog()
+		prep(base)
+		base.Table("public", "metrics").Comment = "@behavior -contract:public"
+		cat, _ := contract.Contract{Name: "public"}.View(base)
+		if err := plugin.NewRegistry(catalog.New()).TransformCatalog(context.Background(), nil, cat); err != nil {
+			t.Fatal(err)
+		}
+		check(t, cat, true)
+	})
+	t.Run("visible table", func(t *testing.T) {
+		cat, _ := run(t, prep)
+		check(t, cat, false)
+	})
+}
+
+func TestPolymorphicOnlyResolvesToKnownTypes(t *testing.T) {
+	tags := map[string]string{
+		"to_builtin":     "@anyelement int4",
+		"to_builtin_q":   "@anyelement pg_catalog.text",
+		"to_enum":        "@anyelement public.mood",
+		"to_composite":   "@anyelement public.address",
+		"to_domain":      "@anyelement public.posint",
+		"to_other_enum":  "@anyelement private.secret_kind",
+		"to_other_table": "@anyelement private.secrets",
+		"to_other_arr":   "@anyelement private.secrets[]",
+		"to_other_dom":   "@anyelement private.secret_dom",
+	}
+	cat, _ := run(t, func(c *introspect.Catalog) {
+		c.Domains = append(c.Domains, &introspect.Domain{Schema: "public", Name: "posint", BaseType: "int4", BaseTypeSchema: "pg_catalog"})
+		for name, tag := range tags {
+			c.Functions = append(c.Functions, &introspect.Function{Schema: "public", Name: name, Comment: tag,
+				Args:       []introspect.FuncArg{{Name: "v", PGType: "anyelement", TypeSchema: "pg_catalog"}},
+				ReturnType: "anyelement", ReturnTypeSchema: "pg_catalog"})
+		}
+	})
+	want := map[string]bool{
+		"to_builtin": true, "to_builtin_q": true, "to_enum": true, "to_composite": true, "to_domain": true,
+	}
+	seen := 0
+	for _, f := range cat.Functions {
+		if _, ok := tags[f.Name]; !ok {
+			continue
+		}
+		seen++
+		if resolved := f.ReturnType != "anyelement"; resolved != want[f.Name] {
+			t.Errorf("%s: resolved=%v, want %v", f.Name, resolved, want[f.Name])
+		}
+	}
+	if seen != len(tags) {
+		t.Fatalf("saw %d of %d functions", seen, len(tags))
 	}
 }
