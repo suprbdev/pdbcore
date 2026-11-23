@@ -3,6 +3,14 @@
 Shared engine for [pdbq](https://github.com/suprbdev/pdbq) (GraphQL) and
 [pdbr](https://github.com/suprbdev/pdbr) (REST): everything about turning a
 live PostgreSQL database into an API that is not specific to one transport.
+
+> **pdbcore is the engine for pdbq and pdbr. It is v0.x and makes no external
+> compatibility promise**: minor releases may change any exported API, and
+> the products pin an exact version. The 1.0 promise is made by pdbq and pdbr
+> for their own surfaces. See [docs/compatibility.md](docs/compatibility.md),
+> [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md) and
+> [CHANGELOG.md](CHANGELOG.md).
+
 Library only — no binary, no GraphQL or REST grammar, no `gqlparser`
 (CI asserts `go list -deps ./...` contains no GraphQL dependency).
 
@@ -88,13 +96,6 @@ prefix stays per product (`X-Pdbq-Claim-` / `X-Pdbr-Claim-`): names SQL
 sees are product-neutral so policies port, while names on the wire between
 a gateway and the server are namespaced like every other product header; `watch.TriggerName` differs
 (`pdbq_watch` / `pdbr_watch`) so both can watch one database.
-
-Until the first tag lands the products point at a sibling checkout:
-
-```
-// go.mod (pdbq, pdbr)
-replace github.com/suprbdev/pdbcore => ../pdbcore
-```
 
 ## Metrics
 
@@ -258,8 +259,9 @@ pdbcore change first and a golden update in both products second.
 
 ## Versioning
 
-Semver `v0.x.y` while pre-1.0: minor bumps may break API, patch bumps may
-not; products pin an exact version. `introspect.CatalogFormatVersion` is
+Semver `v0.x.y`, and it stays there (see
+[docs/compatibility.md](docs/compatibility.md)): minor bumps may break API,
+patch bumps may not; products pin an exact version. `introspect.CatalogFormatVersion` is
 owned here — bumping it is a minor release and both products upgrade in
 lockstep so a cache written by one (`pdbq schema dump` / `pdbr schema dump`)
 loads in the other. Fixture changes are patch/minor releases; products
@@ -288,12 +290,10 @@ same way.
 pdbcore is a library, so a release is a tag: `make release` verifies the tree
 is clean, prompts for `vX.Y.Z`, runs `make test lint`, tags and pushes; the
 `Release` workflow (`.github/workflows/release.yaml`) re-runs the race tests
-and creates the GitHub release with generated notes (no binaries; publishing
-is skipped under `act`).
+and creates the GitHub release with generated notes (no binaries; an SBOM is attached;
+publishing is skipped under `act`).
 
-Consumers then bump with `go get github.com/suprbdev/pdbcore@vX.Y.Z` (and,
-for the very first tag, delete their `replace ../pdbcore` line and any
-"check out pdbcore next to the repo" / `go mod vendor` steps in their
-Makefile, Dockerfile and workflows). Order for the first release: pdbcore
-`v0.1.0` → pdbq `v0.11.0` → pdbr `v0.1.0`; the exact steps are in pdbr's
-`docs/deployment.md` § Releasing.
+Consumers then bump with `go get github.com/suprbdev/pdbcore@vX.Y.Z`. Release
+order is pdbcore, then pdbq, then pdbr. The workflow also publishes a
+CycloneDX SBOM with a build provenance attestation. See
+[CONTRIBUTING.md](CONTRIBUTING.md#releasing).
