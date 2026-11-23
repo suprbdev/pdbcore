@@ -60,7 +60,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Load fixture schema
         run: |
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client; }
           go run ./testutil/cmd/fixture | PGPASSWORD=pdbcore psql -v ON_ERROR_STOP=1 -h localhost -p 5434 -U pdbcore -d pdbcore_test -f -
       - name: DB-backed tests
         env:
