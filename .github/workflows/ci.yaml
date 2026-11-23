@@ -61,4 +61,4 @@ jobs:
       - name: DB-backed tests
         env:
           PDBCORE_TEST_DATABASE_URL: postgres://pdbcore:pdbcore@localhost:5434/pdbcore_test
-        run: go test -race -count=1 ./testutil/ ./pgexec/ ./watch/ ./introspect/ ./postgis/ ./contrib/
+        run: go test -race -count=1 ./testutil/ ./pgexec/ ./watch/ ./introspect/ ./postgis/ ./contrib/ ./metrics/

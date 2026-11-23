@@ -10,7 +10,7 @@ The products own the transport: schema/route generation, request parsing,
 SQL compilation, response shaping. pdbcore owns what both need identically:
 the catalog model and its introspection, naming helpers, the schema cache and
 watcher, PostGIS and contrib-type value handling, authentication, transaction execution with
-RLS identity, JWT minting, HTTP scaffolding, configuration loading, the
+RLS identity, JWT minting, HTTP scaffolding, Prometheus metrics, configuration loading, the
 generic plugin registry, the catalog half of smart comments, and the one test
 fixture both products are tested against.
 
@@ -26,10 +26,11 @@ fixture both products are tested against.
 | `postgis` | spatial value layer: flavour detection, GeoJSON/WKT/EWKT parsing to one bound parameter, filter `Ops`, derived accessors, transform/simplify/KNN/distance SQL |
 | `contrib` | operator vocabularies + value coercion for full-text search, `pg_trgm`, `hstore`, `ltree`, `citext`, range/multirange and `inet`/`cidr` columns (see [Contrib vocabularies](#contrib-vocabularies)): `ForColumn`/`ForType` lookup bound to the extension's schema, filter `Op`s, ordering `Expr`s, `Accessor`s, value `Codec`s |
 | `auth` | `Authenticator`: JWT (HS*, JWKS RS*/ES* with kid-matched cache), trusted-gateway claim headers with `TrustedProxies`, role resolution and allowlist; `ErrInvalidToken` / `ErrRoleNotAllowed` |
-| `pgexec` | pool `Connect`, `RunTx` (isolation, `SET LOCAL ROLE`, claims via `set_config(prefix.k, v, true)`, 40001/40P01 retries), `Identity`, `Classify` PG errors into classes with `dev`/`prod`/`strict` message policies (malformed tsquery/ltree operands and unknown text search configs are user input), `QuoteIdent`/`ValidRole`/`ValidClaimKey` |
+| `pgexec` | pool `Connect`, `RunTx` (isolation, `SET LOCAL ROLE`, claims via `set_config(prefix.k, v, true)`, 40001/40P01 retries), `QueryTx` (one pipelined round trip), `Observer` (per-attempt duration and error via `TxOptions.Observer`, `Observe` for direct statements), `Identity`, `Classify` PG errors into classes with `dev`/`prod`/`strict` message policies (malformed tsquery/ltree operands and unknown text search configs are user input), `QuoteIdent`/`ValidRole`/`ValidClaimKey` |
 | `jwtmint` | composite-typed function results → signed HS256 JWT (`MintsFunction`, `Mint`, `Sign`) |
 | `httpx` | CORS + preflight, gzip, `Healthz`, `ListenAndServe` with the standard timeouts and graceful shutdown |
-| `confx` | koanf `Load` (defaults < YAML < env < changed flags), env key mapper (`_` → `.`, `__` → `_`, comma-separated lists), `ExampleYAML` from `koanf`/`doc` tags, `Discover`, `ParseTrustedProxy`, shared config sections (`Database`, `Schema`, `Filters`, `RLS`/`Auth`, `TX`, `Watch`, `Errors`, `Plugins`, `Log`) + `Validate*` helpers, `AuthConfig(RLS)` |
+| `metrics` | Prometheus instrumentation on a per-instance registry (or a caller's `Registerer` + `ConstLabels`): HTTP `Middleware` (requests, duration, in flight by route class, method, status class; `SetRoute`), `DBObserver` (a `pgexec.Observer`: duration, errors by SQLSTATE class, retries), `RegisterPool` (pgxpool `Stat`), `SchemaRebuilt`, `ObserveCompile`, product counters via `NewCounter`; a nil `*Metrics` records nothing (see [Metrics](#metrics)) |
+| `confx` | koanf `Load` (defaults < YAML < env < changed flags), env key mapper (`_` → `.`, `__` → `_`, comma-separated lists), `ExampleYAML` from `koanf`/`doc` tags, `Discover`, `ParseTrustedProxy`, shared config sections (`Database`, `Schema`, `Filters`, `RLS`/`Auth`, `TX`, `Watch`, `Errors`, `Plugins`, `Log`, `Metrics`) + `Validate*` helpers, `AuthConfig(RLS)` |
 | `plugin` | `Plugin`, `Registry` (priority + registration order), `CatalogHook`, `InflectionHook`, `TransformCatalog`, `Inflector` chain |
 | `smartcomments/catalog` | catalog half of the smart-comments plugin (`@omit`, `@primaryKey`, `@unique`, `@foreignKey`, `@notNull`, `@filterable`, `@name` index) — products add their transport half on top |
 | `testutil` | `FixtureSQL` (embedded DDL) and `FixtureCatalog()`, the one fixture both products test against; `testutil/cmd/fixture` prints the SQL; `drift_test.go` is the fixture drift gate |
@@ -68,6 +69,41 @@ Until the first tag lands the products point at a sibling checkout:
 // go.mod (pdbq, pdbr)
 replace github.com/suprbdev/pdbcore => ../pdbcore
 ```
+
+## Metrics
+
+`metrics.New(metrics.Options{Namespace: "pdbq"})` builds one instance's
+instruments on a private registry with the Go and process collectors, so two
+products embedded in one process never collide; pass `Registerer` (and
+`Gatherer` when it is not a `*prometheus.Registry`) to share an existing one,
+with `ConstLabels` telling instances apart. Products wire it like this:
+
+```go
+m, _ := metrics.New(metrics.Options{Namespace: "pdbr"}) // nil when metrics.enabled is false
+_ = m.RegisterPool(pool)
+opts := pgexec.TxOptions{Observer: m.DBObserver()} // nil observer on a nil *Metrics
+handler = m.Middleware(handler, classify)          // classify: *http.Request -> route class
+mux.Handle(cfg.Metrics.Path, m.Handler())          // or a separate listener on cfg.Metrics.Addr
+watcher.OnChange = func(cat *introspect.Catalog) { m.SchemaRebuilt(rebuild(cat)) }
+hits, _ := m.NewCounter("document_cache_requests_total", "Document cache lookups.", "result")
+```
+
+| Metric (`<ns>_` prefix) | Type | Labels |
+|---|---|---|
+| `http_requests_total`, `http_request_duration_seconds` | counter, histogram | `route`, `method`, `status_class` |
+| `http_requests_in_flight` | gauge | |
+| `db_duration_seconds` | histogram | `op` (`run_tx`, `query_tx`, or the caller's name for `pgexec.Observe`) |
+| `db_errors_total` | counter | `op`, `sqlstate_class` (`23`, `40`, ..., `canceled`, `timeout`, `other`) |
+| `db_retries_total` | counter | `op` |
+| `db_pool_{acquired,idle,constructing,total,max}_conns` | gauge | |
+| `db_pool_{acquires,canceled_acquires,empty_acquires,new_conns,max_lifetime_destroys,max_idle_destroys}_total`, `db_pool_acquire_duration_seconds_total`, `db_pool_empty_acquire_wait_seconds_total` | counter | |
+| `schema_rebuilds_total` | counter | `result` (`success`, `failure`) |
+| `schema_last_rebuild_timestamp_seconds` | gauge | |
+| `compile_duration_seconds` | histogram | |
+
+`confx.Metrics` (`metrics.enabled`, default off; `metrics.path`, default
+`/metrics`; `metrics.addr`, an optional separate listener) and
+`confx.ValidateMetrics` are the shared config section.
 
 ## Contrib vocabularies
 
@@ -132,7 +168,7 @@ regenerate their goldens on upgrade.
 
 ```sh
 make test       # hermetic unit tests (go test -race ./...)
-make test-e2e   # DB-backed tests (fixture drift gate, pgexec RLS matrix, watch, live introspection, postgis and contrib SQL validity) on a disposable PostGIS (project pdbcore-test, host port 5434)
+make test-e2e   # DB-backed tests (fixture drift gate, pgexec RLS matrix, watch, live introspection, postgis and contrib SQL validity, metrics against a real pool) on a disposable PostGIS (project pdbcore-test, host port 5434)
 make lint       # golangci-lint (falls back to go vet)
 make fixture    # print testutil.FixtureSQL
 make release    # interactive: clean tree check, version prompt, test+lint, annotated tag, push

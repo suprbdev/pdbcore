@@ -2,6 +2,7 @@ package confx
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 
@@ -96,6 +97,28 @@ func ValidateWatch(w Watch, cachePath string) []string {
 	}
 	if w.Enabled && len(w.Channel) > 63 {
 		errs = append(errs, fmt.Sprintf("watch.channel: %q is longer than 63 bytes", w.Channel))
+	}
+	return errs
+}
+
+// ValidateMetrics checks the metrics section: path must start with "/" and
+// not be "/" itself, and addr, when set, must be a host:port listen address
+// other than serverAddr (the main listener; "" skips that comparison).
+// Path collisions with product routes are the product's check.
+func ValidateMetrics(m Metrics, serverAddr string) []string {
+	var errs []string
+	if !strings.HasPrefix(m.Path, "/") || m.Path == "/" {
+		errs = append(errs, fmt.Sprintf("metrics.path: %q must start with / and name a path other than /", m.Path))
+	}
+	if strings.ContainsAny(m.Path, "?#") {
+		errs = append(errs, fmt.Sprintf("metrics.path: %q must not contain a query or fragment", m.Path))
+	}
+	if m.Addr != "" {
+		if _, port, err := net.SplitHostPort(m.Addr); err != nil || port == "" {
+			errs = append(errs, fmt.Sprintf("metrics.addr: %q is not a host:port listen address, e.g. :9090", m.Addr))
+		} else if serverAddr != "" && m.Addr == serverAddr {
+			errs = append(errs, fmt.Sprintf("metrics.addr: %q is the main server address; leave it empty to serve metrics there", m.Addr))
+		}
 	}
 	return errs
 }

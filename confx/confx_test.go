@@ -52,6 +52,7 @@ type pdbqConfig struct {
 	Errors   Errors     `koanf:"errors"`
 	Plugins  Plugins    `koanf:"plugins"`
 	Log      Log        `koanf:"log"`
+	Metrics  Metrics    `koanf:"metrics"`
 }
 
 func pdbqDefaults() pdbqConfig {
@@ -72,6 +73,7 @@ func pdbqDefaults() pdbqConfig {
 		Errors:  Errors{Detail: "prod"},
 		Plugins: Plugins{Settings: map[string]map[string]any{}},
 		Log:     Log{Level: "info", Format: "text"},
+		Metrics: DefaultMetrics(),
 	}
 }
 
@@ -250,6 +252,7 @@ func TestValidateDefaultsClean(t *testing.T) {
 	errs = append(errs, ValidateWatch(cfg.Watch, cfg.Schema.CachePath)...)
 	errs = append(errs, ValidateSchema(cfg.Schema)...)
 	errs = append(errs, ValidateLog(cfg.Log)...)
+	errs = append(errs, ValidateMetrics(cfg.Metrics, cfg.Server.Addr)...)
 	if err := InvalidConfig(errs); err != nil {
 		t.Fatalf("defaults invalid: %v", err)
 	}
@@ -312,6 +315,18 @@ func TestValidateRejects(t *testing.T) {
 			"schema.schemas must list at least one schema"},
 		"log level": {func() []string { return ValidateLog(Log{Level: "loud"}) },
 			`log.level: "loud" invalid`},
+		"metrics path relative": {func() []string { return ValidateMetrics(Metrics{Path: "metrics"}, "") },
+			`metrics.path: "metrics" must start with / and name a path other than /`},
+		"metrics path root": {func() []string { return ValidateMetrics(Metrics{Path: "/"}, "") },
+			`metrics.path: "/" must start with / and name a path other than /`},
+		"metrics path query": {func() []string { return ValidateMetrics(Metrics{Path: "/metrics?x=1"}, "") },
+			`metrics.path: "/metrics?x=1" must not contain a query or fragment`},
+		"metrics addr": {func() []string { return ValidateMetrics(Metrics{Path: "/metrics", Addr: "9090"}, "") },
+			`metrics.addr: "9090" is not a host:port listen address, e.g. :9090`},
+		"metrics addr no port": {func() []string { return ValidateMetrics(Metrics{Path: "/metrics", Addr: "localhost:"}, "") },
+			`metrics.addr: "localhost:" is not a host:port listen address, e.g. :9090`},
+		"metrics addr is server addr": {func() []string { return ValidateMetrics(Metrics{Path: "/metrics", Addr: ":8080"}, ":8080") },
+			`metrics.addr: ":8080" is the main server address; leave it empty to serve metrics there`},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -367,5 +382,18 @@ func TestLoadSplitsEnvLists(t *testing.T) {
 	}
 	if cfg.Database.URL != "postgres://a,b@h/db" {
 		t.Errorf("non-list value split: %q", cfg.Database.URL)
+	}
+}
+
+func TestValidateMetricsAccepts(t *testing.T) {
+	for _, m := range []Metrics{
+		DefaultMetrics(),
+		{Enabled: true, Path: "/internal/metrics", Addr: ":9090"},
+		{Enabled: true, Path: "/metrics", Addr: "127.0.0.1:9090"},
+		{Enabled: true, Path: "/metrics", Addr: "[::1]:9090"},
+	} {
+		if errs := ValidateMetrics(m, ":8080"); len(errs) != 0 {
+			t.Errorf("%+v rejected: %v", m, errs)
+		}
 	}
 }

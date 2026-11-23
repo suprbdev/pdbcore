@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -59,6 +60,9 @@ type TxOptions struct {
 	ScanBeforeCommit bool
 	// Log receives the retry warning; nil uses slog.Default().
 	Log *slog.Logger
+	// Observer, when non-nil, is called after every attempt with its
+	// duration and error (see [Observer]).
+	Observer Observer
 }
 
 // RunTx begins a transaction with opts.Isolation, applies the identity (RLS
@@ -74,7 +78,9 @@ func RunTx(ctx context.Context, db TxBeginner, opts TxOptions, id Identity, fn f
 		log = slog.Default()
 	}
 	for attempt := 0; ; attempt++ {
+		start := time.Now()
 		err := runOnce(ctx, db, opts, id, fn)
+		observeAttempt(ctx, opts.Observer, OpRunTx, attempt, start, err)
 		if err == nil || attempt >= opts.MaxRetries || !IsSerializationFailure(err) || ctx.Err() != nil {
 			return err
 		}
