@@ -211,3 +211,45 @@ func TestClassifyRestrictViolation(t *testing.T) {
 		t.Fatalf("message %q not passed through (PG: %q)", c.Message, c.PG.Message)
 	}
 }
+
+func TestSavepointPartialCommit(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	stamp := time.Now().Format("150405.000000")
+	good1, good2, dup := "sp-a-"+stamp+"@example.com", "sp-b-"+stamp+"@example.com", "sp-a-"+stamp+"@example.com"
+	var failures []error
+	err := pgexec.RunTx(ctx, pool, pgexec.TxOptions{}, pgexec.Identity{}, func(q pgexec.Querier) error {
+		failures = nil
+		for _, email := range []string{good1, dup, good2} {
+			err := pgexec.Savepoint(ctx, q, func() error {
+				_, err := q.Exec(ctx, "INSERT INTO users (email) VALUES ($1)", email)
+				return err
+			})
+			var rb *pgexec.RolledBackError
+			if errors.As(err, &rb) {
+				failures = append(failures, rb.Err)
+				continue
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("failures = %v, want exactly the duplicate", failures)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM users WHERE email IN ($1, $2)", good1, good2).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("committed %d rows, want 2", n)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM users WHERE email IN ($1, $2)", good1, good2); err != nil {
+		t.Fatal(err)
+	}
+}
