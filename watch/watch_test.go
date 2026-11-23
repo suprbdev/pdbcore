@@ -141,25 +141,38 @@ func awaitStop(t *testing.T, stop context.CancelFunc, done <-chan error) {
 	}
 }
 
-// TestWatchDDLDuringStartup issues DDL immediately after Run starts, with no
-// wait for the trigger or LISTEN, and requires OnChange to see it. Run with
-// -count to shake out the race.
+// TestWatchDDLDuringStartup runs DDL in a transaction that is open while Run
+// installs the event trigger and commits only after the trigger exists. The
+// change is neither notified nor visible to introspection until the commit,
+// so Run must hold Ready until that transaction ends. Run with -count to
+// shake out the race.
 func TestWatchDDLDuringStartup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	pool := watchTestPool(t, ctx)
 	const schema = "watch_startup_test"
+	const trigger = "pdbcore_startup_watch"
 	if _, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE; CREATE SCHEMA "+schema); err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
-	defer dropTriggers(pool, "pdbcore_startup_watch")
+	defer dropTriggers(pool, trigger)
+	dropTriggers(pool, trigger)
 	cat, err := introspect.Introspect(ctx, pool, []string{schema})
 	if err != nil {
 		t.Fatal(err)
 	}
 	hash, err := cat.Hash()
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := tx.Exec(ctx, "CREATE TABLE "+schema+".probe (id int PRIMARY KEY)"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -172,7 +185,13 @@ func TestWatchDDLDuringStartup(t *testing.T) {
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- w.Run(runCtx) }()
-	if _, err := pool.Exec(ctx, "CREATE TABLE "+schema+".probe (id int PRIMARY KEY)"); err != nil {
+	waitTriggerInstalled(t, ctx, pool, trigger+"_drop")
+	select {
+	case <-w.Ready():
+		t.Fatal("Ready closed while a transaction open at trigger install was still running")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	waitProbe(t, changes, schema)
@@ -278,4 +297,20 @@ func waitTable(t *testing.T, changes <-chan *introspect.Catalog, schema, table s
 			t.Fatalf("OnChange never reported %s.%s", schema, table)
 		}
 	}
+}
+
+func waitTriggerInstalled(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var ok bool
+		if err := pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = $1)", name).Scan(&ok); err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("event trigger %s never installed", name)
 }

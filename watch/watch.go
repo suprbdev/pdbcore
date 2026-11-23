@@ -44,6 +44,13 @@ type Watcher struct {
 	// comparison starts from it. When empty, the first DDL event always
 	// calls OnChange and the first poll only records the hash.
 	InitialHash string
+	// InstallWait bounds how long Run waits, after installing the event
+	// trigger, for transactions that were open at that moment to end before
+	// the InitialHash re-check. Only used when InitialHash is set. Zero
+	// means [DefaultInstallWait]. When it elapses Run logs a warning and
+	// re-checks anyway; DDL in a still-open transaction that commits later
+	// is then not reported.
+	InstallWait time.Duration
 
 	lastHash  string
 	readyOnce sync.Once
@@ -55,12 +62,24 @@ func (w *Watcher) readyChan() chan struct{} {
 	return w.ready
 }
 
+// DefaultInstallWait is the default [Watcher.InstallWait].
+const DefaultInstallWait = 30 * time.Second
+
+const installPollInterval = 50 * time.Millisecond
+
 // Ready returns a channel that is closed once Run is listening for DDL
 // notifications, or, when the event trigger cannot be installed, once the
 // polling loop has started. Every change made after Ready is closed reaches
 // OnChange, as does any change made since InitialHash was taken. The channel
 // is never closed if Run returns an error before reaching that point. It may
 // be called before Run.
+//
+// When InitialHash is set and the event trigger was installed, Ready is
+// closed only after every transaction that was open at install time has
+// ended and the catalog has been re-checked against InitialHash, because
+// DDL run in such a transaction before the trigger existed is neither
+// notified nor visible until it commits. A long-running transaction
+// therefore delays Ready, up to [Watcher.InstallWait].
 func (w *Watcher) Ready() <-chan struct{} {
 	return w.readyChan()
 }
@@ -105,11 +124,57 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return w.poll(ctx)
 	}
 	w.Log.Info("watch: DDL event trigger installed", "channel", w.Channel)
-	close(ready)
 	if w.lastHash != "" {
+		if err := w.waitInstallTxns(ctx); err != nil {
+			return nil
+		}
 		w.reintrospect(ctx)
 	}
+	close(ready)
 	return w.listen(ctx, conn.Conn())
+}
+
+// waitInstallTxns blocks until every transaction holding an xid below the
+// snapshot's xmax taken now, after the trigger commit, has ended, or until
+// InstallWait elapses. A transaction that ran DDL before the trigger became
+// visible has an xid in that range; one that runs DDL later fires the
+// trigger. It returns the context error if ctx is cancelled.
+func (w *Watcher) waitInstallTxns(ctx context.Context) error {
+	var xmax string
+	if err := w.Pool.QueryRow(ctx, `SELECT pg_snapshot_xmax(pg_current_snapshot())::text`).Scan(&xmax); err != nil {
+		w.Log.Warn("watch: cannot snapshot open transactions; re-checking immediately", "err", err)
+		return nil
+	}
+	wait := w.InstallWait
+	if wait <= 0 {
+		wait = DefaultInstallWait
+	}
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	tick := time.NewTicker(installPollInterval)
+	defer tick.Stop()
+	for {
+		var done bool
+		err := w.Pool.QueryRow(ctx, `SELECT pg_snapshot_xmin(pg_current_snapshot()) >= $1::xid8`, xmax).Scan(&done)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			w.Log.Warn("watch: cannot poll open transactions; re-checking immediately", "err", err)
+			return nil
+		}
+		if done {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			w.Log.Warn("watch: transactions open at trigger install still running; re-checking anyway", "wait", wait)
+			return nil
+		case <-tick.C:
+		}
+	}
 }
 
 // installTrigger creates or replaces the notify function and creates the
