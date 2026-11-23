@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strings"
 )
 
 // CatalogFormatVersion is bumped whenever the Catalog wire format changes
@@ -44,6 +45,8 @@ type Catalog struct {
 	Domains []*Domain `json:"domains,omitempty"`
 
 	idx catalogIndexes
+
+	hiddenRelations map[string]bool
 }
 
 // Domain is a domain type as recorded in pg_type (typtype 'd').
@@ -622,4 +625,25 @@ func (c *Catalog) sortStable() {
 		}
 		return c.Domains[i].Name < c.Domains[j].Name
 	})
+}
+
+// HideRelation records that the table schema.name was removed from the
+// catalog on purpose (by a contract or a full @omit), so that
+// [Catalog.ResolvePolymorphic] never resolves a polymorphic function to its
+// row type. The record survives [Catalog.Clone].
+func (c *Catalog) HideRelation(schema, name string) {
+	if c.hiddenRelations == nil {
+		c.hiddenRelations = map[string]bool{}
+	}
+	c.hiddenRelations[schema+"."+name] = true
+}
+
+// RelationHidden reports whether the table schema.name, or the array type
+// named so ("_name"), was recorded with [Catalog.HideRelation].
+func (c *Catalog) RelationHidden(schema, name string) bool {
+	if len(c.hiddenRelations) == 0 {
+		return false
+	}
+	return c.hiddenRelations[schema+"."+name] ||
+		strings.HasPrefix(name, "_") && c.hiddenRelations[schema+"."+name[1:]]
 }

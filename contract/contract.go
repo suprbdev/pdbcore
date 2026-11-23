@@ -127,6 +127,7 @@ func (ct Contract) Apply(c *introspect.Catalog) Summary {
 			tables = append(tables, t)
 		} else {
 			hidden[t.Schema+"."+t.Name] = true
+			c.HideRelation(t.Schema, t.Name)
 			sum.Tables++
 		}
 	}

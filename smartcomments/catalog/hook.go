@@ -54,6 +54,8 @@ func (h *Hook) TransformCatalog(_ context.Context, c *introspect.Catalog) error 
 	for _, t := range c.Tables {
 		if _, everything := h.idx.Tables[tableKey(t.Schema, t.Name)].Omits(); !everything {
 			tables = append(tables, t)
+		} else {
+			c.HideRelation(t.Schema, t.Name)
 		}
 	}
 	c.Tables = tables
