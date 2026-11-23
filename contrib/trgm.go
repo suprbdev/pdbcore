@@ -61,18 +61,18 @@ func Trgm(textType string) Vocabulary {
 		},
 		Exprs: []Expr{
 			{
-				Name: "similarity", Arg: ArgText, Type: "float4", Extension: ExtTrgm,
+				Name: "similarity", Arg: ArgText, Type: "float4", Extension: ExtTrgm, Score: true,
 				Description: "Trigram similarity between the column and the given text, 0 to 1 (similarity).",
 				render:      call("similarity", false),
 			},
 			{
-				Name: "wordSimilarity", Arg: ArgText, Type: "float4", Extension: ExtTrgm,
+				Name: "wordSimilarity", Arg: ArgText, Type: "float4", Extension: ExtTrgm, Score: true,
 				Description: "Greatest similarity between the given text and an extent of the column, 0 to 1 (word_similarity).",
 				since:       "1.2",
 				render:      call("word_similarity", true),
 			},
 			{
-				Name: "strictWordSimilarity", Arg: ArgText, Type: "float4", Extension: ExtTrgm,
+				Name: "strictWordSimilarity", Arg: ArgText, Type: "float4", Extension: ExtTrgm, Score: true,
 				Description: "Greatest similarity between the given text and whole words of the column, 0 to 1 (strict_word_similarity).",
 				since:       "1.4",
 				render:      call("strict_word_similarity", true),

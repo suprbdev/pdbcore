@@ -397,3 +397,30 @@ func TestJSONOutputMatchesJSONB(t *testing.T) {
 		t.Errorf("NULL geometry = %v, %v; want NULL", got, err)
 	}
 }
+
+// TestDistanceUnits measures one degree of longitude on the equator: SRID
+// units for geometry, metres for geography and for geometry on the
+// spheroid.
+func TestDistanceUnits(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	const a, b = "POINT(0 0)", "POINT(1 0)"
+	tests := []struct {
+		name     string
+		sql      string
+		min, max float64
+	}{
+		{"geometry", postgis.DistanceSQL(column(postgis.Geometry), strings.ReplaceAll(column(postgis.Geometry), "$1", "$2")), 1, 1},
+		{"geography", postgis.DistanceSQL(column(postgis.Geography), strings.ReplaceAll(column(postgis.Geography), "$1", "$2")), 111000, 111400},
+		{"spheroid", postgis.SpheroidDistanceSQL(column(postgis.Geometry), strings.ReplaceAll(column(postgis.Geometry), "$1", "$2")), 111000, 111400},
+	}
+	for _, tc := range tests {
+		var got float64
+		if err := conn.QueryRow(ctx, "SELECT "+tc.sql, a, b).Scan(&got); err != nil {
+			t.Fatalf("%s: %v\n%s", tc.name, err, tc.sql)
+		}
+		if got < tc.min || got > tc.max {
+			t.Errorf("%s distance = %v, want within [%v, %v]", tc.name, got, tc.min, tc.max)
+		}
+	}
+}
