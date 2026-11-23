@@ -355,3 +355,41 @@ func TestPolymorphicNeverResolvesToHiddenTable(t *testing.T) {
 		check(t, cat, false)
 	})
 }
+
+func TestPolymorphicOnlyResolvesToKnownTypes(t *testing.T) {
+	tags := map[string]string{
+		"to_builtin":     "@anyelement int4",
+		"to_builtin_q":   "@anyelement pg_catalog.text",
+		"to_enum":        "@anyelement public.mood",
+		"to_composite":   "@anyelement public.address",
+		"to_domain":      "@anyelement public.posint",
+		"to_other_enum":  "@anyelement private.secret_kind",
+		"to_other_table": "@anyelement private.secrets",
+		"to_other_arr":   "@anyelement private.secrets[]",
+		"to_other_dom":   "@anyelement private.secret_dom",
+	}
+	cat, _ := run(t, func(c *introspect.Catalog) {
+		c.Domains = append(c.Domains, &introspect.Domain{Schema: "public", Name: "posint", BaseType: "int4", BaseTypeSchema: "pg_catalog"})
+		for name, tag := range tags {
+			c.Functions = append(c.Functions, &introspect.Function{Schema: "public", Name: name, Comment: tag,
+				Args:       []introspect.FuncArg{{Name: "v", PGType: "anyelement", TypeSchema: "pg_catalog"}},
+				ReturnType: "anyelement", ReturnTypeSchema: "pg_catalog"})
+		}
+	})
+	want := map[string]bool{
+		"to_builtin": true, "to_builtin_q": true, "to_enum": true, "to_composite": true, "to_domain": true,
+	}
+	seen := 0
+	for _, f := range cat.Functions {
+		if _, ok := tags[f.Name]; !ok {
+			continue
+		}
+		seen++
+		if resolved := f.ReturnType != "anyelement"; resolved != want[f.Name] {
+			t.Errorf("%s: resolved=%v, want %v", f.Name, resolved, want[f.Name])
+		}
+	}
+	if seen != len(tags) {
+		t.Fatalf("saw %d of %d functions", seen, len(tags))
+	}
+}
