@@ -1094,3 +1094,43 @@ func TestHeadlineLive(t *testing.T) {
 		}
 	}
 }
+
+// TestHeadlineDocumentLive checks HeadlineDocumentSQL's bound: a text
+// document is cut to its first maxLen characters, and a json document
+// longer than maxLen yields a NULL headline.
+func TestHeadlineDocumentLive(t *testing.T) {
+	d := openLive(t)
+	body := "alpha beta gamma delta fox"
+	op, _ := contrib.FullText().Op("matches")
+	tests := []struct {
+		doc, pgType string
+		maxLen      int
+		want        string
+	}{
+		{"$1::text", "text", 100, "alpha beta gamma delta <b>fox</b>"},
+		{"$1::text", "text", 10, "alpha beta"},
+		{"$1::varchar", "varchar", 22, "alpha beta gamma delta"},
+		{"jsonb_build_object('t', $1::text)", "jsonb", 100, `{"t": "alpha beta gamma delta <b>fox</b>"}`},
+		{"jsonb_build_object('t', $1::text)", "jsonb", 10, "NULL"},
+		{"json_build_object('t', $1::text)", "json", 36, `{"t":"alpha beta gamma delta <b>fox</b>"}`},
+		{"json_build_object('t', $1::text)", "json", 35, "NULL"},
+	}
+	for _, tc := range tests {
+		a := args{vals: []any{body}}
+		ps, err := op.Params("fox")
+		if err != nil {
+			t.Fatal(err)
+		}
+		phs := a.add(ps...)
+		doc := contrib.HeadlineDocumentSQL(tc.doc, tc.pgType, a.add(tc.maxLen)[0])
+		q := "SELECT COALESCE((" + op.HeadlineSQL(doc, "", phs...) + ")::text, 'NULL')"
+		var got string
+		if err := d.query(q, a.vals, &got); err != nil {
+			t.Errorf("%s %d: %v\n%s", tc.pgType, tc.maxLen, err, q)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s %d:\n got %s\nwant %s", tc.pgType, tc.maxLen, got, tc.want)
+		}
+	}
+}

@@ -15,8 +15,8 @@ import (
 // FixtureSQL is loaded by the compose stack (see compose.test.yaml), the
 // database is introspected, and the result must equal FixtureCatalog()
 // after normalising the parts a hand-written fixture cannot mirror (server
-// and PostGIS versions, the relations/composites CREATE EXTENSION postgis
-// installs, and the extra extensions the postgis image preinstalls).
+// and PostGIS versions, the composites CREATE EXTENSION postgis installs,
+// and the extra extensions the postgis image preinstalls).
 func TestFixtureCatalogMatchesLiveIntrospection(t *testing.T) {
 	url := os.Getenv("PDBCORE_TEST_DATABASE_URL")
 	if url == "" {
@@ -47,15 +47,12 @@ func TestFixtureCatalogMatchesLiveIntrospection(t *testing.T) {
 }
 
 // postgisObjects are installed by CREATE EXTENSION postgis into the same
-// schema (introspection filters extension functions but not relations or
+// schema (introspection filters extension functions and relations but not
 // types); they are not part of the fixture surface.
 var postgisObjects = map[string]bool{
-	"spatial_ref_sys":   true,
-	"geometry_columns":  true,
-	"geography_columns": true,
-	"geometry_dump":     true,
-	"valid_detail":      true,
-	"simple_detail":     true,
+	"geometry_dump": true,
+	"valid_detail":  true,
+	"simple_detail": true,
 }
 
 // imageExtensions are created in POSTGRES_DB by the postgis/postgis image's
@@ -81,13 +78,6 @@ func normalize(live, fixture *introspect.Catalog) {
 		}
 	}
 	live.Extensions = exts
-	tables := live.Tables[:0]
-	for _, t := range live.Tables {
-		if !postgisObjects[t.Name] {
-			tables = append(tables, t)
-		}
-	}
-	live.Tables = tables
 	comps := live.Composites[:0]
 	for _, c := range live.Composites {
 		if !postgisObjects[c.Name] {

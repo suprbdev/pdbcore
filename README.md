@@ -18,14 +18,14 @@ fixture both products are tested against.
 
 | Package | What it holds |
 |---|---|
-| `introspect` | `Catalog` model (`Table`, `Column`, `Constraint`, `ForeignKey`, `Index`, `Enum`, `Composite`, `Function`, `Extension`, privileges, RLS flag, comments; `Column.Spatial` (`SpatialType`: PostGIS subtype, SRID, Z/M from the geometry/geography typmod) and `Column.SQLType` (built-in modifiers such as `character varying(255)`, `numeric(10,2)`); `Catalog.ServerVersionNum` for version gating; `Column.GeneratedKind` (identity, stored, virtual); domains (`Catalog.Domains`: base type, parent domain, NOT NULL, CHECK constraints, default, comment; `Column.Domain` / `FuncArg.Domain` / `Function.ReturnDomain` refs, `Catalog.Domain`, `DomainByRef`, `DomainChain`); PostgreSQL 18 temporal keys (`Constraint.WithoutOverlaps`, `ForeignKey.Period` with `JoinPairs`, `Table.RowKeys`) and `ForeignKey.NotEnforced`), `Introspect(ctx, querier, schemas)` (pg_catalog reader incl. `@enum` table conversion and installed extensions), `HasExtension`, polymorphic signatures (`IsPolymorphic`, `Function.PolymorphicFamilies`, `Catalog.ResolvePolymorphic`, `Catalog.ParseTypeName` for SQL type spellings), `Clone` (deep copy for per-contract catalog hooks), `Diff` (human-readable drift lines), `Hash`, `CatalogFormatVersion` |
+| `introspect` | `Catalog` model (`Table`, `Column`, `Constraint`, `ForeignKey`, `Index`, `Enum`, `Composite`, `Function`, `Extension`, privileges, RLS flag, comments; `Column.Spatial` (`SpatialType`: PostGIS subtype, SRID, Z/M from the geometry/geography typmod) and `Column.SQLType` (built-in modifiers such as `character varying(255)`, `numeric(10,2)`); `Catalog.ServerVersionNum` for version gating; `Column.GeneratedKind` (identity, stored, virtual); domains (`Catalog.Domains`: base type, parent domain, NOT NULL, CHECK constraints, default, comment; `Column.Domain` / `FuncArg.Domain` / `Function.ReturnDomain` refs, `Catalog.Domain`, `DomainByRef`, `DomainChain`); PostgreSQL 18 temporal keys (`Constraint.WithoutOverlaps`, `ForeignKey.Period` with `JoinPairs`, `Table.RowKeys`) and `ForeignKey.NotEnforced`; check constraints (`Table.Checks`) and the columns of index expressions and predicates (`Index.ExpressionColumns`), with `Table.ConstraintColumns` / `Table.ConstraintReferences` for integrity-error sanitizing), `Introspect(ctx, querier, schemas)` (pg_catalog reader incl. `@enum` table conversion and installed extensions), `HasExtension`, polymorphic signatures (`IsPolymorphic`, `Function.PolymorphicFamilies`, `Catalog.ResolvePolymorphic`, `Catalog.ParseTypeName` for SQL type spellings), `Clone` (deep copy for per-contract catalog hooks), `Diff` (human-readable drift lines), `Hash`, `CatalogFormatVersion` |
 | `smarttags` | PostGraphile-style smart-comment parser: `Parse`, `Strip`, `Tags`, `Omits`, `@behavior`, `Contracts` (`@contract` / `@behavior ±contract:<name>` membership), list splitting |
 | `contract` | schema contracts (see [Schema contracts](#schema-contracts)): `Contract{Name, Default}` with the `Include`/`Exclude` policies, `View` (clone + filter), `Apply`, `OmitAll`; also a `CatalogHook` |
 | `inflect` | naming pipeline types (`Kind`, `Input`, `Next`) + string helpers (`UpperCamel`, `LowerCamel`, `Singularize`, `Pluralize`, `EnumValue`, `ByColumns`); products define their own `Kind` constants and `Default` |
 | `cache` | gzip+JSON catalog cache: `Save` / `Load` / `Check`, format-version and content-hash checks, 256 MiB decompression guard |
 | `watch` | `Watcher`: DDL event trigger + `LISTEN/NOTIFY` (`TriggerName`, `Channel`), hash-polling fallback when the trigger cannot be installed → `OnChange(*Catalog)` |
 | `postgis` | spatial value layer: flavour detection, GeoJSON/WKT/EWKT parsing to one bound parameter, filter `Ops`, derived accessors, transform/simplify/buffer/KNN/distance SQL (`BufferSQL`, metres on geography; `DistanceSQL`, metres on the spheroid with `SpheroidDistanceSQL`), GeoJSON output with a bound coordinate precision (`OutputPrecisionSQL`/`OutputJSONPrecisionSQL`, `CheckPrecision`); `postgis_raster` columns (`IsRaster`): header-only metadata `RasterAccessors` (width, height, bands, SRID, pixel size, envelope as GeoJSON), `RasterValueSQL` (`ST_Value` at a bound point, reprojected to the raster's SRID), `RasterSummaryStatsSQL` (`ST_SummaryStats` of a band as a JSON object), `RasterIntersectsSQL` (served by a GiST index on `ST_ConvexHull(col)`) and `Raster*Cost` weights for cost estimators |
-| `contrib` | operator vocabularies + value coercion for full-text search (`tsvector`, and `to_tsvector` over text and json/jsonb documents, with `ts_headline` snippets), `pg_trgm`, `unaccent`, `fuzzystrmatch`, `hstore`, `ltree`, `citext`, `intarray`, range/multirange, `inet`/`cidr`, pgvector (`vector`, `halfvec`, `sparsevec`, plus bit distances on `bit`/`varbit`), `cube` and `earthdistance` (`earth` columns, `<@>` on `point`) columns (see [Contrib vocabularies](#contrib-vocabularies)): `ForColumn`/`ForType` lookup bound to the extension's schema, filter `Op`s, ordering `Expr`s (`Expr.Score` marks the selectable similarity/distance values, `Expr.Derived` the per-use parameterised values such as an hstore key's value, `Expr.OrderSQL` the index-served ordering form), `Accessor`s, value `Codec`s, `Op.RankSQL`/`Op.HeadlineSQL` with validated `HeadlineOptions` |
+| `contrib` | operator vocabularies + value coercion for full-text search (`tsvector`, and `to_tsvector` over text and json/jsonb documents, with `ts_headline` snippets), `pg_trgm`, `unaccent`, `fuzzystrmatch`, `hstore`, `ltree`, `citext`, `intarray`, range/multirange, `inet`/`cidr`, pgvector (`vector`, `halfvec`, `sparsevec`, plus bit distances on `bit`/`varbit`), `cube` and `earthdistance` (`earth` columns, `<@>` on `point`) columns (see [Contrib vocabularies](#contrib-vocabularies)): `ForColumn`/`ForType` lookup bound to the extension's schema, filter `Op`s, ordering `Expr`s (`Expr.Score` marks the selectable similarity/distance values, `Expr.Derived` the per-use parameterised values such as an hstore key's value, `Expr.OrderSQL` the index-served ordering form), `Accessor`s, value `Codec`s, `Op.RankSQL`/`Op.HeadlineSQL` with validated `HeadlineOptions`, `HeadlineDocumentSQL`/`HeadlineDocumentCost` to bound and price a headline's document |
 | `auth` | `Authenticator`: JWT (HS*, JWKS RS*/ES* with a kid-matched cache refreshed by one shared background fetch, stale keys served for one extra TTL during endpoint outages, failure backoff, endpoint details logged and never returned to clients), trusted-gateway claim headers with `TrustedProxies` (one spelling per claim: `User-Id` is `user_id`; underscores, repeats and case-folded duplicates are rejected; optional `HeaderClaims` allowlist; the gateway must strip every client-supplied prefixed header), role resolution and allowlist; `ErrInvalidToken` / `ErrRoleNotAllowed` |
 | `pgexec` | pool `Connect`, `RunTx` (isolation, `SET LOCAL ROLE`, claims via `set_config(prefix.k, v, true)`, 40001/40P01 retries), `QueryTx` (one pipelined round trip), `Savepoint` (run a step in a SAVEPOINT inside a `RunTx` callback; a failure rolls back to it and comes back as `*RolledBackError`, so the transaction goes on), `Observer` (per-attempt duration and error via `TxOptions.Observer`, `Observe` for direct statements), `Identity`, `Classify` PG errors into classes with `dev`/`prod`/`strict` message policies (malformed tsquery/ltree operands, unknown text search configs and raster/geometry SRID mismatches are user input), `QuoteIdent`/`ValidRole`/`ValidClaimKey` |
 | `jwtmint` | composite-typed function results → signed HS256 JWT (`MintsFunction`, `Mint`, `Sign`) |
@@ -55,6 +55,27 @@ err := pgexec.RunTx(ctx, pool,
 	pgexec.Identity{Role: role, Claims: claims, ClaimsPrefix: "pdbq.claims"},
 	func(q pgexec.Querier) error { return q.QueryRow(ctx, sql, args...).Scan(&data) })
 ```
+
+`Introspect` leaves out relations an extension owns (`pg_depend` deptype
+`e`), as it does extension functions: PostGIS's `spatial_ref_sys`,
+`geometry_columns`, `geography_columns`, `raster_columns` and
+`raster_overviews`, `pg_buffercache`'s view and so on. Catalog views such as
+`geometry_columns` list the columns of every table, including ones the API
+hides. To expose one anyway, create a view of your own over it in an
+exposed schema; the view is yours, not the extension's, and it is
+introspected like any other.
+
+An integrity error (class 23) names its constraint or index, and those
+names usually spell out their columns. Before passing such a message to a
+client, call `t.ConstraintReferences(pgErr.ConstraintName, hidden)` on the
+error's table: it reports whether the primary key, unique, foreign key or
+check constraint, or the index, of that name references a column `hidden`
+rejects, counting the columns of key expressions (`lower(secret)`),
+partial-index predicates (`WHERE secret LIKE 'vip%'`), exclusion
+constraints and check constraints, and every column for a whole-row
+reference. Its second result is false when the table records nothing by
+that name (a partition's own index, for example); treat that as hidden
+whenever the table has a hidden column.
 
 Both products embed the `confx` sections in their own `Config` struct (the
 product owns `Server` and its defaults such as `watch.channel` and the claim
@@ -192,9 +213,21 @@ filtered column for `textsearch`/`jsonsearch`, or another document column
 `highlightAll`, and `startSel`/`stopSel`/`fragmentDelimiter` of at most
 `MaxHeadlineMarkup` bytes without `"`, `\` or control characters) and
 `HeadlineOptions.String()` renders the options text, which is bound as one
-parameter. ts_headline parses the whole document on every call, so consumers
-evaluate it only on returned rows and price it at `HeadlineCost` column reads
-per row (`postgis.BufferCost` for a buffer projection).
+parameter. ts_headline parses the whole document on every call, so its cost
+grows with the document: about a millisecond per 8192 characters
+(`HeadlineCostChars`) on PostgreSQL 18, over 100 ms for a 1 MB text. Bound
+the document with `HeadlineDocumentSQL(doc, pgType, maxLenPh)` and pass the
+result as `doc`: a text-like document becomes `left(doc, $n::int4)` (the
+headline comes from its first n characters), and a json/jsonb document
+longer than n characters as text yields a NULL headline. Bind n as a
+parameter (`MaxHeadlineDocument`, 65536, is a default; make it
+configurable) and price each headline at `HeadlineDocumentCost(n)` column
+reads per returned row: `HeadlineCost` per started `HeadlineCostChars`
+characters, 80 at the default. Consumers evaluate headlines only on
+returned rows (`postgis.BufferCost` prices a buffer projection). The flat
+`HeadlineCost` is only honest for documents of up to `HeadlineCostChars`
+characters; with unbounded documents a few aliased headlines can keep a
+backend busy until `statement_timeout`.
 
 Each `Op` also carries `Arg` (operand kind), `Description`, `Index`
 (`IndexHint{Method, OpClass, Note, Ordering}`) and `Extension`; accessor and

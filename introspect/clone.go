@@ -51,6 +51,7 @@ func (t *Table) clone() *Table {
 	}
 	cp.Uniques = clonePtrs(t.Uniques, (*Constraint).clone)
 	cp.ForeignKeys = clonePtrs(t.ForeignKeys, (*ForeignKey).clone)
+	cp.Checks = clonePtrs(t.Checks, (*Constraint).clone)
 	cp.Indexes = clonePtrs(t.Indexes, (*Index).clone)
 	return &cp
 }
@@ -80,6 +81,7 @@ func (fk *ForeignKey) clone() *ForeignKey {
 func (ix *Index) clone() *Index {
 	cp := *ix
 	cp.Columns = slices.Clone(ix.Columns)
+	cp.ExpressionColumns = slices.Clone(ix.ExpressionColumns)
 	return &cp
 }
 

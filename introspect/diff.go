@@ -179,6 +179,7 @@ func tableAspectChanges(cached, live *Table) []string {
 	aspect("primary key", cached.PrimaryKey, live.PrimaryKey)
 	aspect("unique constraints", cached.Uniques, live.Uniques)
 	aspect("foreign keys", cached.ForeignKeys, live.ForeignKeys)
+	aspect("check constraints", cached.Checks, live.Checks)
 	aspect("indexes", cached.Indexes, live.Indexes)
 	aspect("privileges", cached.Privileges, live.Privileges)
 	aspect("partitioning", [2]any{cached.Partitioned, cached.PartitionOf}, [2]any{live.Partitioned, live.PartitionOf})

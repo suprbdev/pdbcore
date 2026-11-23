@@ -65,6 +65,11 @@ func Introspect(ctx context.Context, db Querier, schemas []string) (*Catalog, er
 	return cat, nil
 }
 
+// readTables reads the tables, views and materialized views of schemas the
+// current role can SELECT from, skipping extension members (PostGIS's
+// spatial_ref_sys, geometry_columns, raster_columns, ...): like extension
+// functions they are implementation detail, and catalog views such as
+// geometry_columns list columns of every table, hidden or not.
 func readTables(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, c.relname, c.relkind, c.relrowsecurity,
@@ -82,6 +87,9 @@ func readTables(ctx context.Context, db Querier, schemas []string, cat *Catalog)
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = ANY($1)
 		  AND c.relkind IN ('r', 'p', 'v', 'm')
+		  AND NOT EXISTS (SELECT 1 FROM pg_depend d
+		                  WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid
+		                    AND d.deptype = 'e')
 		ORDER BY n.nspname, c.relname`, schemas)
 	if err != nil {
 		return fmt.Errorf("introspect: tables: %w", err)
@@ -232,17 +240,25 @@ func pg18ConstraintColumns(serverVersionNum int) string {
 	return `false, true`
 }
 
-// readConstraints reads primary key, unique and foreign key constraints,
-// skipping the copies PostgreSQL clones from a partitioned table's
-// constraints (conparentid <> 0): one per partition, plus, for a foreign key
-// referencing a partitioned table, one per referenced partition on the
-// referencing table.
+// readConstraints reads primary key, unique, foreign key and check
+// constraints, skipping the copies PostgreSQL clones from a partitioned
+// table's constraints (conparentid <> 0): one per partition, plus, for a
+// foreign key referencing a partitioned table, one per referenced partition
+// on the referencing table. Check constraints are inherited rather than
+// cloned, so a partition's are skipped unless declared on it (conislocal).
+// A check's columns are the ones its expression references (conkey),
+// where 0 stands for a whole-row reference and selects every column.
 func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, c.relname, con.conname, con.contype,
-		       ARRAY(SELECT a.attname FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
-		             JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
-		             ORDER BY k.ord),
+		       CASE WHEN con.contype = 'c'
+		            THEN ARRAY(SELECT a.attname FROM pg_attribute a
+		                       WHERE a.attrelid = con.conrelid AND a.attnum > 0 AND NOT a.attisdropped
+		                         AND (a.attnum = ANY(con.conkey) OR 0 = ANY(con.conkey))
+		                       ORDER BY a.attnum)
+		            ELSE ARRAY(SELECT a.attname FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+		                       JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+		                       ORDER BY k.ord) END,
 		       COALESCE(fn.nspname, ''), COALESCE(fc.relname, ''),
 		       COALESCE(ARRAY(SELECT a.attname FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord)
 		             JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum
@@ -254,8 +270,9 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		LEFT JOIN pg_class fc ON fc.oid = con.confrelid
 		LEFT JOIN pg_namespace fn ON fn.oid = fc.relnamespace
-		WHERE n.nspname = ANY($1) AND con.contype IN ('p', 'u', 'f')
+		WHERE n.nspname = ANY($1) AND con.contype IN ('p', 'u', 'f', 'c')
 		  AND con.conparentid = 0
+		  AND (con.contype <> 'c' OR con.conislocal OR NOT c.relispartition)
 		ORDER BY n.nspname, c.relname, con.conname`, schemas)
 	if err != nil {
 		return fmt.Errorf("introspect: constraints: %w", err)
@@ -286,27 +303,46 @@ func readConstraints(ctx context.Context, db Querier, schemas []string, cat *Cat
 				RefSchema: refSchema, RefTable: refTable, RefColumns: refCols,
 				Comment: comment, Period: period, NotEnforced: !enforced,
 			})
+		case 'c':
+			t.Checks = append(t.Checks, &Constraint{Name: name, Columns: cols, Comment: comment})
 		}
 	}
 	return rows.Err()
 }
 
+// varAttnoPattern matches a Var node in the text form of a pg_node_tree
+// (nodeToString), capturing its varattno. Every PostgreSQL release from 14
+// on writes varno and varattno as a Var's first two fields. Constants are
+// written as bytes, never as text, so the pattern cannot match inside a
+// literal.
+const varAttnoPattern = `\{VAR :varno \d+ :varattno (\d+) `
+
 // readIndexes reads valid indexes, skipping partition indexes attached to a
 // partitioned index (relispartition): the parent's partitioned index stands
-// for them.
+// for them. The columns of key expressions and of the predicate are pulled
+// from the Vars of indexprs and indpred, the way pull_varattnos does; a Var
+// with varattno 0 is a whole-row reference and selects every column.
 func readIndexes(ctx context.Context, db Querier, schemas []string, cat *Catalog) error {
 	rows, err := db.Query(ctx, `
 		SELECT n.nspname, c.relname, ic.relname, i.indisunique, am.amname,
 		       ARRAY(SELECT a.attname FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
 		             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-		             WHERE k.attnum > 0 ORDER BY k.ord)
+		             WHERE k.attnum > 0 ORDER BY k.ord),
+		       ARRAY(SELECT a.attname FROM pg_attribute a
+		             WHERE a.attrelid = i.indrelid AND a.attnum > 0 AND NOT a.attisdropped
+		               AND (a.attnum = ANY(refs.attnums) OR 0 = ANY(refs.attnums))
+		             ORDER BY a.attnum)
 		FROM pg_index i
 		JOIN pg_class c ON c.oid = i.indrelid
 		JOIN pg_class ic ON ic.oid = i.indexrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		JOIN pg_am am ON am.oid = ic.relam
+		CROSS JOIN LATERAL (
+		    SELECT array_agg(v[1]::int2) AS attnums
+		    FROM regexp_matches(COALESCE(i.indexprs::text, '') || ' ' || COALESCE(i.indpred::text, ''), $2, 'g') AS v
+		) refs
 		WHERE n.nspname = ANY($1) AND i.indisvalid AND NOT ic.relispartition
-		ORDER BY n.nspname, c.relname, ic.relname`, schemas)
+		ORDER BY n.nspname, c.relname, ic.relname`, schemas, varAttnoPattern)
 	if err != nil {
 		return fmt.Errorf("introspect: indexes: %w", err)
 	}
@@ -314,8 +350,11 @@ func readIndexes(ctx context.Context, db Querier, schemas []string, cat *Catalog
 	for rows.Next() {
 		var schema, table string
 		ix := &Index{}
-		if err := rows.Scan(&schema, &table, &ix.Name, &ix.Unique, &ix.Method, &ix.Columns); err != nil {
+		if err := rows.Scan(&schema, &table, &ix.Name, &ix.Unique, &ix.Method, &ix.Columns, &ix.ExpressionColumns); err != nil {
 			return err
+		}
+		if len(ix.ExpressionColumns) == 0 {
+			ix.ExpressionColumns = nil
 		}
 		if t := cat.Table(schema, table); t != nil {
 			t.Indexes = append(t.Indexes, ix)

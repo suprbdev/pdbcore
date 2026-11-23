@@ -70,6 +70,9 @@ func TestDiff(t *testing.T) {
 		{"index/key change", func(c *Catalog) {
 			c.Tables[0].Uniques = []*Constraint{{Name: "users_email_key", Columns: []string{"email"}}}
 		}, "table public.users changed (unique constraints)"},
+		{"check change", func(c *Catalog) {
+			c.Tables[0].Checks = []*Constraint{{Name: "users_email_check", Columns: []string{"email"}}}
+		}, "table public.users changed (check constraints)"},
 		{"privilege change", func(c *Catalog) {
 			c.Tables[0].Privileges.Insert = true
 		}, "table public.users changed (privileges)"},
