@@ -18,7 +18,7 @@ fixture both products are tested against.
 
 | Package | What it holds |
 |---|---|
-| `introspect` | `Catalog` model (`Table`, `Column`, `Constraint`, `ForeignKey`, `Index`, `Enum`, `Composite`, `Function`, `Extension`, privileges, RLS flag, comments; `Column.Spatial` (`SpatialType`: PostGIS subtype, SRID, Z/M from the geometry/geography typmod) and `Column.SQLType` (built-in modifiers such as `character varying(255)`, `numeric(10,2)`); `Catalog.ServerVersionNum` for version gating; `Column.GeneratedKind` (identity, stored, virtual); domains (`Catalog.Domains`: base type, parent domain, NOT NULL, CHECK constraints, default, comment; `Column.Domain` / `FuncArg.Domain` / `Function.ReturnDomain` refs, `Catalog.Domain`, `DomainByRef`, `DomainChain`); PostgreSQL 18 temporal keys (`Constraint.WithoutOverlaps`, `ForeignKey.Period` with `JoinPairs`, `Table.RowKeys`) and `ForeignKey.NotEnforced`), `Introspect(ctx, querier, schemas)` (pg_catalog reader incl. `@enum` table conversion and installed extensions), `HasExtension`, polymorphic signatures (`IsPolymorphic`, `Function.PolymorphicFamilies`, `Catalog.ResolvePolymorphic`, `Catalog.ParseTypeName` for SQL type spellings), `Clone` (deep copy for per-contract catalog hooks), `Diff` (human-readable drift lines), `Hash`, `CatalogFormatVersion` |
+| `introspect` | `Catalog` model (`Table`, `Column`, `Constraint`, `ForeignKey`, `Index`, `Enum`, `Composite`, `Function`, `Extension`, privileges, RLS flag, comments; `Column.Spatial` (`SpatialType`: PostGIS subtype, SRID, Z/M from the geometry/geography typmod) and `Column.SQLType` (built-in modifiers such as `character varying(255)`, `numeric(10,2)`); `Catalog.ServerVersionNum` for version gating; `Column.GeneratedKind` (identity, stored, virtual); domains (`Catalog.Domains`: base type, parent domain, NOT NULL, CHECK constraints, default, comment; `Column.Domain` / `FuncArg.Domain` / `Function.ReturnDomain` refs, `Catalog.Domain`, `DomainByRef`, `DomainChain`); PostgreSQL 18 temporal keys (`Constraint.WithoutOverlaps`, `ForeignKey.Period` with `JoinPairs`, `Table.RowKeys`) and `ForeignKey.NotEnforced`; check constraints (`Table.Checks`) and the columns of index expressions and predicates (`Index.ExpressionColumns`), with `Table.ConstraintColumns` / `Table.ConstraintReferences` for integrity-error sanitizing), `Introspect(ctx, querier, schemas)` (pg_catalog reader incl. `@enum` table conversion and installed extensions), `HasExtension`, polymorphic signatures (`IsPolymorphic`, `Function.PolymorphicFamilies`, `Catalog.ResolvePolymorphic`, `Catalog.ParseTypeName` for SQL type spellings), `Clone` (deep copy for per-contract catalog hooks), `Diff` (human-readable drift lines), `Hash`, `CatalogFormatVersion` |
 | `smarttags` | PostGraphile-style smart-comment parser: `Parse`, `Strip`, `Tags`, `Omits`, `@behavior`, `Contracts` (`@contract` / `@behavior ±contract:<name>` membership), list splitting |
 | `contract` | schema contracts (see [Schema contracts](#schema-contracts)): `Contract{Name, Default}` with the `Include`/`Exclude` policies, `View` (clone + filter), `Apply`, `OmitAll`; also a `CatalogHook` |
 | `inflect` | naming pipeline types (`Kind`, `Input`, `Next`) + string helpers (`UpperCamel`, `LowerCamel`, `Singularize`, `Pluralize`, `EnumValue`, `ByColumns`); products define their own `Kind` constants and `Default` |
@@ -55,6 +55,27 @@ err := pgexec.RunTx(ctx, pool,
 	pgexec.Identity{Role: role, Claims: claims, ClaimsPrefix: "pdbq.claims"},
 	func(q pgexec.Querier) error { return q.QueryRow(ctx, sql, args...).Scan(&data) })
 ```
+
+`Introspect` leaves out relations an extension owns (`pg_depend` deptype
+`e`), as it does extension functions: PostGIS's `spatial_ref_sys`,
+`geometry_columns`, `geography_columns`, `raster_columns` and
+`raster_overviews`, `pg_buffercache`'s view and so on. Catalog views such as
+`geometry_columns` list the columns of every table, including ones the API
+hides. To expose one anyway, create a view of your own over it in an
+exposed schema; the view is yours, not the extension's, and it is
+introspected like any other.
+
+An integrity error (class 23) names its constraint or index, and those
+names usually spell out their columns. Before passing such a message to a
+client, call `t.ConstraintReferences(pgErr.ConstraintName, hidden)` on the
+error's table: it reports whether the primary key, unique, foreign key or
+check constraint, or the index, of that name references a column `hidden`
+rejects, counting the columns of key expressions (`lower(secret)`),
+partial-index predicates (`WHERE secret LIKE 'vip%'`), exclusion
+constraints and check constraints, and every column for a whole-row
+reference. Its second result is false when the table records nothing by
+that name (a partition's own index, for example); treat that as hidden
+whenever the table has a hidden column.
 
 Both products embed the `confx` sections in their own `Config` struct (the
 product owns `Server` and its defaults such as `watch.channel` and the claim

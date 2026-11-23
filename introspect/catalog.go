@@ -6,13 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 )
 
 // CatalogFormatVersion is bumped whenever the Catalog wire format changes
 // incompatibly; the cache layer refuses to load mismatched versions.
-const CatalogFormatVersion = 8
+const CatalogFormatVersion = 9
 
 // Catalog is the complete introspected model of the database. It is the only
 // input to API building, which keeps caching trivial and plugin transforms
@@ -136,14 +137,19 @@ type Table struct {
 	// [Table.IsPartition]). The primary key, unique constraints, foreign keys
 	// and indexes a partition inherits from its parent are recorded on the
 	// parent only; a partition lists just the ones declared on it directly.
+	// So are its check constraints.
 	PartitionOf string `json:"partition_of,omitempty"`
 	// PrimaryKey and Uniques may be temporal (WITHOUT OVERLAPS) keys; use
 	// RowKeys for single-row lookups and ON CONFLICT targets.
 	PrimaryKey  *Constraint   `json:"primary_key,omitempty"`
 	Uniques     []*Constraint `json:"uniques,omitempty"`
 	ForeignKeys []*ForeignKey `json:"foreign_keys,omitempty"`
-	Indexes     []*Index      `json:"indexes,omitempty"`
-	Privileges  Privileges    `json:"privileges"`
+	// Checks are the table's CHECK constraints. A check's Columns are the
+	// columns its expression references, in column order (every column for
+	// a whole-row reference); its WithoutOverlaps is always false.
+	Checks     []*Constraint `json:"checks,omitempty"`
+	Indexes    []*Index      `json:"indexes,omitempty"`
+	Privileges Privileges    `json:"privileges"`
 }
 
 // IsPartition reports whether t is a partition of another table.
@@ -183,6 +189,63 @@ func (t *Table) RowKeys() []*Constraint {
 		}
 	}
 	return out
+}
+
+// ConstraintColumns returns the columns referenced by the primary key,
+// unique, foreign key and check constraints and the indexes of t named
+// name, as an integrity error naming it (PgError.ConstraintName) may
+// reveal them: key and INCLUDE columns, the columns of key expressions and
+// partial-index predicates ([Index.ExpressionColumns]), a foreign key's
+// local columns and the columns a check references. A constraint and the
+// index enforcing it share a name, and the result is the union of every
+// match, without duplicates. ok is false when t records nothing named
+// name, e.g. a partition's own copy of an inherited index; callers should
+// then assume the worst. A foreign key's referenced columns belong to the
+// other table and are not included.
+func (t *Table) ConstraintColumns(name string) (cols []string, ok bool) {
+	seen := map[string]bool{}
+	add := func(cs []string) {
+		ok = true
+		for _, c := range cs {
+			if !seen[c] {
+				seen[c] = true
+				cols = append(cols, c)
+			}
+		}
+	}
+	if t.PrimaryKey != nil && t.PrimaryKey.Name == name {
+		add(t.PrimaryKey.Columns)
+	}
+	for _, list := range [][]*Constraint{t.Uniques, t.Checks} {
+		for _, c := range list {
+			if c.Name == name {
+				add(c.Columns)
+			}
+		}
+	}
+	for _, fk := range t.ForeignKeys {
+		if fk.Name == name {
+			add(fk.Columns)
+		}
+	}
+	for _, ix := range t.Indexes {
+		if ix.Name == name {
+			add(ix.Columns)
+			add(ix.ExpressionColumns)
+		}
+	}
+	return cols, ok
+}
+
+// ConstraintReferences reports whether a column [Table.ConstraintColumns]
+// returns for name satisfies hidden, and, as ok, whether t records anything
+// named name. Integrity error sanitizers call it with their own notion of a
+// hidden column to decide whether an error naming the constraint may pass
+// its name through; when ok is false they should treat the constraint as
+// hidden if t has any hidden column.
+func (t *Table) ConstraintReferences(name string, hidden func(column string) bool) (references, ok bool) {
+	cols, ok := t.ConstraintColumns(name)
+	return slices.ContainsFunc(cols, hidden), ok
 }
 
 // IndexedColumns returns the set of column names that are the leading column
@@ -371,8 +434,15 @@ func (fk *ForeignKey) ReferencesOne() bool { return !fk.Period }
 type Index struct {
 	Name    string   `json:"name"`
 	Columns []string `json:"columns"` // expression indexes contribute no columns
-	Unique  bool     `json:"unique"`
-	Method  string   `json:"method"` // btree, gin, gist, ...
+	// ExpressionColumns are the columns the index's key expressions and
+	// partial-index predicate (WHERE) reference, in column order: secret
+	// for an index on (owner, lower(secret)) or on (code) WHERE secret
+	// <> '', every column for a whole-row reference. A column may be in
+	// Columns too. Empty for an index on plain columns only. An exclusion
+	// constraint's index is recorded here, so its expressions are too.
+	ExpressionColumns []string `json:"expression_columns,omitempty"`
+	Unique            bool     `json:"unique"`
+	Method            string   `json:"method"` // btree, gin, gist, ...
 }
 
 type Privileges struct {

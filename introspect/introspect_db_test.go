@@ -816,3 +816,170 @@ func TestIntrospectDomainsLive(t *testing.T) {
 		t.Errorf("h = %+v", h)
 	}
 }
+
+// TestIntrospectSkipsExtensionRelationsLive checks that relations an
+// extension owns (pg_buffercache's view; PostGIS's spatial_ref_sys and
+// catalog views, raster's where postgis_raster is available) are not
+// introspected, while a user's own view over one, and a materialized view
+// that merely depends on an extension, are.
+func TestIntrospectSkipsExtensionRelationsLive(t *testing.T) {
+	tx := liveTx(t,
+		`CREATE SCHEMA pdbcore_ext_test`,
+		`CREATE EXTENSION pg_buffercache SCHEMA pdbcore_ext_test`,
+		`CREATE VIEW pdbcore_ext_test.buffers AS SELECT bufferid FROM pdbcore_ext_test.pg_buffercache`,
+		`CREATE MATERIALIZED VIEW pdbcore_ext_test.snap AS SELECT 1 AS n`,
+		`ALTER MATERIALIZED VIEW pdbcore_ext_test.snap DEPENDS ON EXTENSION pg_buffercache`,
+	)
+	ctx := context.Background()
+	var postgis, raster bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis'),
+		EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'postgis_raster')`).Scan(&postgis, &raster); err != nil {
+		t.Fatal(err)
+	}
+	schemas := []string{"pdbcore_ext_test"}
+	var hidden []string
+	if postgis {
+		var schema string
+		if err := tx.QueryRow(ctx, `SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'postgis'`).Scan(&schema); err != nil {
+			t.Fatal(err)
+		}
+		schemas = append(schemas, schema)
+		hidden = append(hidden, schema+".spatial_ref_sys", schema+".geometry_columns", schema+".geography_columns")
+		if raster {
+			if _, err := tx.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS postgis_raster SCHEMA `+schema); err != nil {
+				t.Fatal(err)
+			}
+			hidden = append(hidden, schema+".raster_columns", schema+".raster_overviews")
+		}
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL search_path = pg_catalog`); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := Introspect(ctx, tx, schemas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range append(hidden, "pdbcore_ext_test.pg_buffercache") {
+		s, n, _ := strings.Cut(ref, ".")
+		if cat.Table(s, n) != nil {
+			t.Errorf("extension relation %s introspected", ref)
+		}
+	}
+	for _, n := range []string{"buffers", "snap"} {
+		if cat.Table("pdbcore_ext_test", n) == nil {
+			t.Errorf("user relation %s not introspected", n)
+		}
+	}
+}
+
+// TestIntrospectConstraintColumnsLive checks the columns recorded for key
+// expressions, partial-index predicates, exclusion constraints and check
+// constraints, including whole-row references, a dropped column shifting
+// nothing, and a partitioned table's checks being recorded on the parent
+// only; and that ConstraintReferences sees them.
+func TestIntrospectConstraintColumnsLive(t *testing.T) {
+	tx := liveTx(t,
+		`CREATE SCHEMA pdbcore_conscols_test`,
+		`SET LOCAL search_path = pdbcore_conscols_test`,
+		`CREATE TABLE ux (id int PRIMARY KEY, gone int, owner int, secret text, code text,
+			CHECK (code IS DISTINCT FROM secret))`,
+		`ALTER TABLE ux DROP COLUMN gone`,
+		`CREATE FUNCTION row_code(ux) RETURNS text IMMUTABLE LANGUAGE sql AS 'SELECT $1.code'`,
+		`CREATE UNIQUE INDEX ux_owner_secret_lower_key ON ux (owner, lower(secret))`,
+		`CREATE UNIQUE INDEX ux_code_secret_partial_key ON ux (code) WHERE secret LIKE 'vip%'`,
+		`CREATE UNIQUE INDEX ux_code_partial_self_key ON ux (code) WHERE code <> ''`,
+		`CREATE INDEX ux_row_idx ON ux (row_code(ux))`,
+		`CREATE INDEX ux_owner_idx ON ux (owner) INCLUDE (code)`,
+		`ALTER TABLE ux ADD CONSTRAINT ux_code_excl EXCLUDE USING btree (lower(code) WITH =) WHERE (secret <> '')`,
+		`ALTER TABLE ux ADD CONSTRAINT ux_secret_check CHECK (length(secret) < 100)`,
+		`ALTER TABLE ux ADD CONSTRAINT ux_row_check CHECK (row_code(ux) IS NOT NULL) NOT VALID`,
+		`ALTER TABLE ux ADD CONSTRAINT ux_const_check CHECK (true)`,
+		`CREATE TABLE parted (id int NOT NULL, k text, CONSTRAINT parted_k_check CHECK (k <> '')) PARTITION BY LIST (id)`,
+		`CREATE TABLE parted_1 PARTITION OF parted (CONSTRAINT parted_1_id_check CHECK (id = 1)) FOR VALUES IN (1)`,
+		`SET LOCAL search_path = pg_catalog`,
+	)
+	cat, err := Introspect(context.Background(), tx, []string{"pdbcore_conscols_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ux := cat.Table("pdbcore_conscols_test", "ux")
+	if ux == nil {
+		t.Fatal("ux not introspected")
+	}
+	all := []string{"id", "owner", "secret", "code"}
+	wantIndexes := map[string][2][]string{
+		"ux_pkey":                    {{"id"}, nil},
+		"ux_owner_secret_lower_key":  {{"owner"}, {"secret"}},
+		"ux_code_secret_partial_key": {{"code"}, {"secret"}},
+		"ux_code_partial_self_key":   {{"code"}, {"code"}},
+		"ux_row_idx":                 {nil, all},
+		"ux_owner_idx":               {{"owner", "code"}, nil},
+		"ux_code_excl":               {nil, {"secret", "code"}},
+	}
+	for _, ix := range ux.Indexes {
+		want, ok := wantIndexes[ix.Name]
+		if !ok {
+			t.Errorf("unexpected index %s", ix.Name)
+			continue
+		}
+		delete(wantIndexes, ix.Name)
+		if len(ix.Columns) == 0 {
+			ix.Columns = nil
+		}
+		if !reflect.DeepEqual(ix.Columns, want[0]) || !reflect.DeepEqual(ix.ExpressionColumns, want[1]) {
+			t.Errorf("index %s: Columns %v ExpressionColumns %v, want %v %v", ix.Name, ix.Columns, ix.ExpressionColumns, want[0], want[1])
+		}
+	}
+	for name := range wantIndexes {
+		t.Errorf("index %s not introspected", name)
+	}
+	wantChecks := map[string][]string{
+		"ux_check":        {"secret", "code"},
+		"ux_secret_check": {"secret"},
+		"ux_row_check":    all,
+		"ux_const_check":  nil,
+	}
+	got := map[string][]string{}
+	for _, c := range ux.Checks {
+		if len(c.Columns) == 0 {
+			c.Columns = nil
+		}
+		got[c.Name] = c.Columns
+	}
+	if !reflect.DeepEqual(got, wantChecks) {
+		t.Errorf("ux checks = %v, want %v", got, wantChecks)
+	}
+
+	secret := func(c string) bool { return c == "secret" }
+	for name, want := range map[string]bool{
+		"ux_pkey": false, "ux_owner_idx": false, "ux_code_partial_self_key": false, "ux_const_check": false,
+		"ux_owner_secret_lower_key": true, "ux_code_secret_partial_key": true, "ux_row_idx": true,
+		"ux_code_excl": true, "ux_check": true, "ux_secret_check": true, "ux_row_check": true,
+	} {
+		if refs, ok := ux.ConstraintReferences(name, secret); refs != want || !ok {
+			t.Errorf("ConstraintReferences(%s) = %v, %v, want %v, true", name, refs, ok, want)
+		}
+	}
+	if _, ok := ux.ConstraintReferences("ux_missing", secret); ok {
+		t.Error("ConstraintReferences(ux_missing) reported a constraint")
+	}
+
+	checkNames := func(name string) []string {
+		t.Helper()
+		tb := cat.Table("pdbcore_conscols_test", name)
+		if tb == nil {
+			t.Fatalf("%s not introspected", name)
+		}
+		var out []string
+		for _, c := range tb.Checks {
+			out = append(out, c.Name+":"+strings.Join(c.Columns, ","))
+		}
+		return out
+	}
+	if got := checkNames("parted"); !reflect.DeepEqual(got, []string{"parted_k_check:k"}) {
+		t.Errorf("parted checks = %v", got)
+	}
+	if got := checkNames("parted_1"); !reflect.DeepEqual(got, []string{"parted_1_id_check:id"}) {
+		t.Errorf("parted_1 checks = %v", got)
+	}
+}
