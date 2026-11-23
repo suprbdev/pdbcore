@@ -304,6 +304,7 @@ func TestCounter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	want(t, scrape(t, m.Handler()), `test_cost_limit_rejections_total`, 0)
 	plain.Inc()
 	if _, err := m.NewCounter("cost_limit_rejections_total", "again"); err == nil {
 		t.Fatal("duplicate counter must fail")
@@ -345,6 +346,9 @@ func TestRegisterPoolUnconnected(t *testing.T) {
 	}
 	defer pool.Close()
 	m := mustNew(t, Options{})
+	if err := m.RegisterPool((*pgxpool.Pool)(nil)); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.RegisterPool(pool); err != nil {
 		t.Fatal(err)
 	}

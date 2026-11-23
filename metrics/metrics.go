@@ -206,8 +206,10 @@ type Counter struct {
 }
 
 // NewCounter registers the counter Namespace_name with the given help text
-// and label names. By convention name ends in _total. On a nil Metrics it
-// returns a nil *Counter and no error.
+// and label names. By convention name ends in _total. A counter without
+// labels is exported at zero from the start; labelled series appear on
+// first use or [Counter.Init]. On a nil Metrics it returns a nil *Counter
+// and no error.
 func (m *Metrics) NewCounter(name, help string, labels ...string) (*Counter, error) {
 	if m == nil {
 		return nil, nil
@@ -215,6 +217,9 @@ func (m *Metrics) NewCounter(name, help string, labels ...string) (*Counter, err
 	vec := prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: m.namespace, Name: name, Help: help}, labels)
 	if err := m.reg.Register(vec); err != nil {
 		return nil, fmt.Errorf("metrics: %s: %w", name, err)
+	}
+	if len(labels) == 0 {
+		vec.WithLabelValues()
 	}
 	return &Counter{vec: vec}, nil
 }

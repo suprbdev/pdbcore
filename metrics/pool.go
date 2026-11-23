@@ -18,9 +18,10 @@ type PoolStater interface {
 // constructing, total, max) and cumulative counters (acquires, canceled
 // and empty acquires, acquire wait time, new connections, connections
 // destroyed for max lifetime and max idle time). It fails when a pool is
-// already registered on this Metrics. A nil Metrics or nil p does nothing.
+// already registered on this Metrics. A nil Metrics, nil p or nil
+// *pgxpool.Pool does nothing.
 func (m *Metrics) RegisterPool(p PoolStater) error {
-	if m == nil || p == nil {
+	if pp, ok := p.(*pgxpool.Pool); m == nil || p == nil || (ok && pp == nil) {
 		return nil
 	}
 	if err := m.reg.Register(newPoolCollector(m.namespace, p)); err != nil {
