@@ -1,7 +1,8 @@
 // Package contrib models the operator vocabularies and value coercion for
 // PostgreSQL's non-scalar built-in types and the common contrib extensions —
-// full-text search (tsvector, and to_tsvector over text), pg_trgm, hstore,
-// ltree, citext, range and multirange types, and inet/cidr — as a small,
+// full-text search (tsvector, and to_tsvector over text), pg_trgm, unaccent,
+// hstore, ltree, citext, range and multirange types, inet/cidr and pgvector's
+// vector, halfvec and sparsevec — as a small,
 // catalog-driven layer shared by pdbq and pdbr, in the same style as the
 // postgis package.
 //
@@ -11,12 +12,13 @@
 //   - which filter operators ([Op]) apply, what operand each takes, how it
 //     renders and which index can serve it;
 //   - which operand-taking value expressions ([Expr]) exist for ordering or
-//     selection (trigram similarity and distance);
+//     selection (trigram similarity and distance, vector distances);
 //   - which derived accessors ([Accessor]) exist (ltree nlevel, inet family,
-//     range bounds);
+//     range bounds, vector dims);
 //   - how an input value for the column becomes bind parameters and back
 //     ([Codec]), where the text form is not good enough (hstore as a JSON
-//     object, ranges as {start, end, startInclusive, endInclusive}).
+//     object, ranges as {start, end, startInclusive, endInclusive}, vectors
+//     as lists of numbers).
 //
 // [ForColumn] and [ForType] resolve a column (by its resolved base type, so
 // domains over these types work) to the vocabularies that apply to it.
@@ -68,6 +70,10 @@ const (
 	ExtHstore = "hstore"
 	ExtLtree  = "ltree"
 	ExtCitext = "citext"
+	// ExtUnaccent is the unaccent extension.
+	ExtUnaccent = "unaccent"
+	// ExtVector is pgvector, whose extension name is "vector".
+	ExtVector = "vector"
 )
 
 // Vocabulary names.
@@ -82,6 +88,8 @@ const (
 	VocabRange      = "range"
 	VocabMultirange = "multirange"
 	VocabInet       = "inet"
+	VocabUnaccent   = "unaccent" // unaccent over text-like columns
+	VocabVector     = "vector"   // pgvector vector, halfvec and sparsevec columns
 )
 
 // ArgKind classifies an operand (or a column value fed to a [Codec]) so
@@ -111,6 +119,9 @@ const (
 	// ArgElement is one value of a range's element type (a number, or a
 	// string for numeric, date and timestamp elements); one parameter.
 	ArgElement
+	// ArgVector is a pgvector value: a list of numbers, or the type's text
+	// form as a string; one text parameter.
+	ArgVector
 )
 
 func (k ArgKind) String() string {
@@ -129,6 +140,8 @@ func (k ArgKind) String() string {
 		return "multirange"
 	case ArgElement:
 		return "element"
+	case ArgVector:
+		return "vector"
 	}
 	return ""
 }
@@ -148,7 +161,8 @@ func (k ArgKind) arity() (int, int) {
 // IndexHint names an index access method (and operator class, when it is
 // not the default for the type) that can serve an operator or expression.
 type IndexHint struct {
-	// Method is the access method: "gin", "gist", "spgist" or "btree".
+	// Method is the access method: "gin", "gist", "spgist", "btree", or
+	// pgvector's "hnsw" and "ivfflat".
 	Method string
 	// OpClass is the operator class the index must be built with, e.g.
 	// "gin_trgm_ops" or "inet_ops".
@@ -285,11 +299,17 @@ type Expr struct {
 
 	q      qual
 	render func(q qual, col string, a []string) string
+	params func(v any) ([]any, error)
 	since  string
 }
 
 // Params coerces the operand into the bind parameters Render expects.
-func (e Expr) Params(v any) ([]any, error) { return coerce(e.Arg, v) }
+func (e Expr) Params(v any) ([]any, error) {
+	if e.params != nil {
+		return e.params(v)
+	}
+	return coerce(e.Arg, v)
+}
 
 // Render builds the expression over col; "" when the number of placeholders
 // does not fit the operand kind.
@@ -618,6 +638,12 @@ func forType(cat *introspect.Catalog, schema, name string, arr bool) []Vocabular
 		return []Vocabulary{RangeOf(r)}
 	}
 	switch base {
+	case "vector", "halfvec", "sparsevec":
+		if e, ok := ext(ExtVector); ok {
+			v, _ := Vector(base)
+			return []Vocabulary{v.Bind(e).ForVersion(cat.Extension(ExtVector).Version)}
+		}
+		return nil
 	case "hstore":
 		if s, ok := ext(ExtHstore); ok {
 			return []Vocabulary{Hstore().Bind(s)}
@@ -646,6 +672,9 @@ func forType(cat *introspect.Catalog, schema, name string, arr bool) []Vocabular
 	if cat != nil {
 		if e := cat.Extension(ExtTrgm); e != nil {
 			out = append(out, Trgm(base).Bind(e.Schema).ForVersion(e.Version))
+		}
+		if e := cat.Extension(ExtUnaccent); e != nil {
+			out = append(out, Unaccent(base).Bind(e.Schema))
 		}
 	}
 	return out

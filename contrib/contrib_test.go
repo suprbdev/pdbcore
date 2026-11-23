@@ -105,7 +105,10 @@ func allVocabularies(t *testing.T) []contrib.Vocabulary {
 	vs := []contrib.Vocabulary{
 		contrib.FullText(), contrib.TextSearch("text"), contrib.Trgm("citext"),
 		contrib.Hstore(), contrib.Ltree(), contrib.LtreeArray(), contrib.Citext(),
-		m(contrib.Inet("inet")), m(contrib.Inet("cidr")),
+		m(contrib.Inet("inet")), m(contrib.Inet("cidr")), contrib.Unaccent("varchar"),
+	}
+	for _, typ := range contrib.VectorTypes {
+		vs = append(vs, m(contrib.Vector(typ)))
 	}
 	for _, r := range contrib.RangeTypes() {
 		vs = append(vs, m(contrib.Range(r)))

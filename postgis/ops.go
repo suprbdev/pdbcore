@@ -88,7 +88,7 @@ func fn(name string) func(string, string, []string) string {
 // Operand shapes: bboxIntersects, bboxContains and bboxContainedBy take a
 // BBoxInput envelope (the viewport case). Every other operator, including the
 // directional and equality bounding-box operators (bboxLeftOf, bboxEquals,
-// bboxIntersectsND, ...), takes a geometry, as connection-filter-postgis does:
+// bboxIntersectsND, bboxIntersects2D, ...), takes a geometry, as connection-filter-postgis does:
 // PostGIS compares against that geometry's bounding box, and a geometry can
 // carry the Z/M extent that &&& needs where an envelope cannot.
 var Ops = []Op{
@@ -246,6 +246,11 @@ var Ops = []Op{
 		Description: "n-D bounding boxes (including Z and M) overlap (&&&). Uses an n-D GiST index (gist_geometry_ops_nd), not the default 2D one.",
 		render:      binary("&&&"),
 	},
+	{
+		Name: "bboxIntersects2D", Arg: TypeName, Index: true, Geography: true,
+		Description: "This column's 2D bounding box overlaps the given geometry's (&&). Index-usable.",
+		render:      binary("&&"),
+	},
 }
 
 // OpByName looks up an operator by field name.
@@ -342,22 +347,17 @@ var Deriveds = []Derived{
 	},
 	{
 		Suffix: "Perimeter", Type: "Float",
-		Description: "Perimeter of a polygonal geometry (ST_Perimeter).",
-		sql: func(ref string, f Flavour) string {
-			if f == Geography {
-				// ST_Perimeter has no geography overload in older PostGIS;
-				// the geometry cast is exact for the planar perimeter.
-				return "ST_Perimeter(" + ref + "::geometry)"
-			}
-			return "ST_Perimeter(" + ref + ")"
-		},
+		Description: "Perimeter of a polygonal geometry (ST_Perimeter): metres for geography, SRID units for geometry.",
+		sql:         func(ref string, _ Flavour) string { return "ST_Perimeter(" + ref + ")" },
 	},
 	{
 		Suffix: "Centroid", Type: TypeName, GeoJSON: true,
-		Description: "Centroid of the geometry (ST_Centroid), as GeoJSON.",
+		Description: "Centroid of the geometry (ST_Centroid), as GeoJSON; spheroidal for geography.",
 		sql: func(ref string, f Flavour) string {
 			if f == Geography {
-				return "ST_Centroid(" + ref + "::geometry)"
+				// ST_Centroid(geography) raises on a GeometryCollection.
+				g := ref + "::geometry"
+				return "CASE WHEN ST_GeometryType(" + g + ") = 'ST_GeometryCollection' THEN ST_Centroid(" + g + ") ELSE ST_Centroid(" + ref + ")::geometry END"
 			}
 			return "ST_Centroid(" + ref + ")"
 		},

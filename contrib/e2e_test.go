@@ -52,7 +52,7 @@ func openLive(t *testing.T) *liveDB {
 	d := &liveDB{t: t, ctx: ctx, tx: tx}
 	d.exec(`CREATE SCHEMA ` + quote(extSchema))
 	d.exec(`CREATE SCHEMA ` + dataSchema)
-	for _, ext := range []string{contrib.ExtTrgm, contrib.ExtHstore, contrib.ExtLtree, contrib.ExtCitext} {
+	for _, ext := range []string{contrib.ExtTrgm, contrib.ExtHstore, contrib.ExtLtree, contrib.ExtCitext, contrib.ExtUnaccent} {
 		d.exec(`CREATE EXTENSION IF NOT EXISTS ` + ext + ` SCHEMA ` + quote(extSchema))
 	}
 	d.exec(`SET LOCAL search_path TO ` + dataSchema)
@@ -63,7 +63,7 @@ func openLive(t *testing.T) *liveDB {
 		t.Fatal(err)
 	}
 	d.cat = cat
-	for _, ext := range []string{contrib.ExtTrgm, contrib.ExtHstore, contrib.ExtLtree, contrib.ExtCitext} {
+	for _, ext := range []string{contrib.ExtTrgm, contrib.ExtHstore, contrib.ExtLtree, contrib.ExtCitext, contrib.ExtUnaccent} {
 		if s := d.schemaOf(ext); s != extSchema {
 			t.Logf("%s is already installed in schema %q; testing it there", ext, s)
 		}

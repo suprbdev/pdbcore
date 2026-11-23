@@ -148,6 +148,37 @@ func TestDerivedValues(t *testing.T) {
 	}
 }
 
+// TestGeographyMeasures pins the units of the measuring accessors on
+// geography: metres on the spheroid, never degrees from a geometry cast.
+func TestGeographyMeasures(t *testing.T) {
+	conn := testConn(t)
+	ctx := context.Background()
+	const square = "POLYGON((-0.130 51.507,-0.126 51.507,-0.126 51.509,-0.130 51.509,-0.130 51.507))"
+	for suffix, want := range map[string][2]float64{"Perimeter": {990, 1010}, "Length": {0, 0}, "Area": {61000, 62500}} {
+		d, _ := postgis.DerivedBySuffix(suffix)
+		q := "SELECT " + d.SQL("t.g", postgis.Geography) + " FROM (SELECT " + column(postgis.Geography) + " AS g) AS t"
+		var got float64
+		if err := conn.QueryRow(ctx, q, square).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", suffix, err)
+		}
+		if got < want[0] || got > want[1] {
+			t.Errorf("geography %s = %v, want within %v", suffix, got, want)
+		}
+	}
+	d, _ := postgis.DerivedBySuffix("Centroid")
+	q := "SELECT ST_AsText(ST_GeomFromGeoJSON(" + d.SQL("t.g", postgis.Geography) + "::text)) FROM (SELECT " + column(postgis.Geography) + " AS g) AS t"
+	for _, wkt := range []string{square, "GEOMETRYCOLLECTION(POINT(0 0),POINT(2 0))"} {
+		var got string
+		if err := conn.QueryRow(ctx, q, wkt).Scan(&got); err != nil {
+			t.Errorf("geography Centroid on %s: %v", wkt, err)
+			continue
+		}
+		if !strings.HasPrefix(got, "POINT(") {
+			t.Errorf("geography Centroid on %s = %s", wkt, got)
+		}
+	}
+}
+
 // predicate renders op over t.g the way pdbr does: geography columns are cast
 // to geometry, along with the operand, for operators without a geography
 // overload. The column WKT is $1; the operand parameters follow.
@@ -239,6 +270,8 @@ func TestOpValues(t *testing.T) {
 		{"bboxIntersectsND", "POINT Z (1 1 1)", "LINESTRING Z (1 0 0,1 2 2)", true},
 		{"bboxIntersectsND", "POINT Z (1 1 5)", "LINESTRING Z (1 0 0,1 2 2)", false},
 		{"intersects", "POINT Z (1 1 5)", "LINESTRING Z (1 0 0,1 2 2)", true},
+		{"bboxIntersects2D", "LINESTRING(0 0,2 2)", "LINESTRING(1 1,3 3)", true},
+		{"bboxIntersects2D", "POINT(5 5)", "LINESTRING(0 0,1 1)", false},
 	}
 	for _, f := range []postgis.Flavour{postgis.Geometry, postgis.Geography} {
 		for _, tc := range tests {
