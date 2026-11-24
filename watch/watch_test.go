@@ -14,7 +14,7 @@ import (
 )
 
 func TestNewRejectsInvalidConfig(t *testing.T) {
-	ok := Config{Pool: &pgxpool.Pool{}, Channel: "ok", OnChange: func(context.Context, *introspect.Catalog) {}}
+	ok := Config{Pool: &pgxpool.Pool{}, Channel: "ok", PollInterval: time.Second, OnChange: func(context.Context, *introspect.Catalog) {}}
 	cases := []struct {
 		edit func(*Config)
 		want string
@@ -24,6 +24,7 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 		{func(c *Config) { c.Channel = strings.Repeat("c", 64) }, "longer than 63 bytes"},
 		{func(c *Config) { c.TriggerName = strings.Repeat("t", 57) }, "is too long"},
 		{func(c *Config) { c.Channel = strings.Repeat("c", 51) }, "is too long"},
+		{func(c *Config) { c.PollInterval = 0 }, "poll interval 0s must be positive"},
 		{func(c *Config) { c.Pool = nil }, "Pool is required"},
 		{func(c *Config) { c.OnChange = nil }, "OnChange is required"},
 	}

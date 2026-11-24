@@ -288,7 +288,7 @@ func TestValidateRejects(t *testing.T) {
 			return ValidateIdentity(Auth{Mode: "none", JWT: JWT{SecretFile: "/nonexistent/secret"}}, Roles{}, Claims{})
 		}, "auth.jwt.secret_file: open /nonexistent/secret: no such file or directory"},
 		"jwks url": {func() []string {
-			return ValidateIdentity(Auth{Mode: "jwt", JWT: JWT{JWKSURL: "idp.example/jwks", RoleClaimPath: "role"}}, Roles{}, Claims{})
+			return ValidateIdentity(Auth{Mode: "jwt", JWT: JWT{JWKSURL: "idp.example/jwks", JWKSCacheTTL: time.Hour, RoleClaimPath: "role"}}, Roles{}, Claims{})
 		}, `auth.jwt.jwks_url: "idp.example/jwks" is not an http(s) URL`},
 		"leeway": {func() []string {
 			return ValidateIdentity(Auth{Mode: "none", JWT: JWT{Leeway: -time.Second}}, Roles{}, Claims{})
@@ -344,15 +344,21 @@ func TestValidateRejects(t *testing.T) {
 		"headers needs trusted proxies": {func() []string {
 			return ValidateIdentity(Auth{Mode: "headers", Headers: Headers{Prefix: "X-Pdbq-Claim-", RoleClaim: "role"}}, Roles{}, Claims{})
 		}, "auth.headers.trusted_proxies is required in auth mode headers: list the gateway addresses allowed to send claim headers"},
-		"watch channel length": {func() []string { return ValidateWatch(Watch{Enabled: true, Channel: strings.Repeat("c", 64)}, "") },
+		"watch channel length": {func() []string {
+			return ValidateWatch(Watch{Enabled: true, PollInterval: time.Second, Channel: strings.Repeat("c", 64)}, "")
+		},
 			`watch.channel: "` + strings.Repeat("c", 64) + `" is longer than 63 bytes`},
 		"isolation": {func() []string { return ValidateTX(TX{Isolation: "chaos"}) },
 			`transactions.isolation: "chaos" is not 'read_committed', 'repeatable_read' or 'serializable'`},
 		"max_retries": {func() []string { return ValidateTX(TX{Isolation: "serializable", MaxRetries: -1}) },
 			"transactions.max_retries must be >= 0"},
-		"watch+cache": {func() []string { return ValidateWatch(Watch{Enabled: true, Channel: "c"}, "x") },
+		"watch+cache": {func() []string {
+			return ValidateWatch(Watch{Enabled: true, PollInterval: time.Second, Channel: "c"}, "x")
+		},
 			"watch.enabled cannot be combined with schema.cache_path"},
-		"watch channel": {func() []string { return ValidateWatch(Watch{Enabled: true, Channel: "bad$$chan"}, "") },
+		"watch channel": {func() []string {
+			return ValidateWatch(Watch{Enabled: true, PollInterval: time.Second, Channel: "bad$$chan"}, "")
+		},
 			`watch.channel: "bad$$chan" invalid: only letters, digits and underscores are allowed`},
 		"no schemas": {func() []string { return ValidateSchema(Schema{}) },
 			"schema.schemas must list at least one schema"},

@@ -159,3 +159,15 @@ Go API changes:
   without `Run` writing back into the configuration, and `OnChange` is
   `func(ctx context.Context, cat *introspect.Catalog)` with `Run`'s
   context.
+
+### Stricter shared validation
+
+- `Catalog.Schemas` is in the order passed to `Introspect` (it used to be
+  sorted, and the caller's slice with it). Code that relied on the sorted
+  order must sort a copy.
+- `PDBQ_ROLES__ALLOWED`-style variables (a doubled underscore right after
+  the section) are errors with a did-you-mean hint; they used to be
+  ignored.
+- New `confx.ValidateDatabase`; `ValidateIdentity` checks
+  `auth.jwt.jwks_cache_ttl` when `auth.jwt.jwks_url` is set, and
+  `ValidateWatch` checks `watch.poll_interval` when the watch is enabled.
