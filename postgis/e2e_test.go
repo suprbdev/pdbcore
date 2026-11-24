@@ -78,8 +78,8 @@ func TestDerivedsExecute(t *testing.T) {
 			if f == postgis.Geography && !s.geography {
 				continue
 			}
-			for _, d := range postgis.Deriveds {
-				q := "SELECT " + d.SQL("t.g", f) + " FROM (SELECT " + column(f) + " AS g) AS t"
+			for _, d := range postgis.Deriveds() {
+				q := "SELECT " + d.SQL("t.g", f, postgis.Output{}) + " FROM (SELECT " + column(f) + " AS g) AS t"
 				var got any
 				if err := conn.QueryRow(ctx, q, s.wkt).Scan(&got); err != nil {
 					t.Errorf("%s %s on %s: %v\n%s", f, d.Suffix, s.wkt, err, q)
@@ -135,7 +135,7 @@ func TestDerivedValues(t *testing.T) {
 			if !ok {
 				t.Fatalf("derived %q not found", tc.suffix)
 			}
-			q := "SELECT " + d.SQL("t.g", f) + " FROM (SELECT " + column(f) + " AS g) AS t"
+			q := "SELECT " + d.SQL("t.g", f, postgis.Output{}) + " FROM (SELECT " + column(f) + " AS g) AS t"
 			var got any
 			if err := conn.QueryRow(ctx, q, tc.wkt).Scan(&got); err != nil {
 				t.Errorf("%s %s on %s: %v", f, tc.suffix, tc.wkt, err)
@@ -156,7 +156,7 @@ func TestGeographyMeasures(t *testing.T) {
 	const square = "POLYGON((-0.130 51.507,-0.126 51.507,-0.126 51.509,-0.130 51.509,-0.130 51.507))"
 	for suffix, want := range map[string][2]float64{"Perimeter": {990, 1010}, "Length": {0, 0}, "Area": {61000, 62500}} {
 		d, _ := postgis.DerivedBySuffix(suffix)
-		q := "SELECT " + d.SQL("t.g", postgis.Geography) + " FROM (SELECT " + column(postgis.Geography) + " AS g) AS t"
+		q := "SELECT " + d.SQL("t.g", postgis.Geography, postgis.Output{}) + " FROM (SELECT " + column(postgis.Geography) + " AS g) AS t"
 		var got float64
 		if err := conn.QueryRow(ctx, q, square).Scan(&got); err != nil {
 			t.Fatalf("%s: %v", suffix, err)
@@ -166,7 +166,7 @@ func TestGeographyMeasures(t *testing.T) {
 		}
 	}
 	d, _ := postgis.DerivedBySuffix("Centroid")
-	q := "SELECT ST_AsText(ST_GeomFromGeoJSON(" + d.SQL("t.g", postgis.Geography) + "::text)) FROM (SELECT " + column(postgis.Geography) + " AS g) AS t"
+	q := "SELECT ST_AsText(ST_GeomFromGeoJSON(" + d.SQL("t.g", postgis.Geography, postgis.Output{}) + "::text)) FROM (SELECT " + column(postgis.Geography) + " AS g) AS t"
 	for _, wkt := range []string{square, "GEOMETRYCOLLECTION(POINT(0 0),POINT(2 0))"} {
 		var got string
 		if err := conn.QueryRow(ctx, q, wkt).Scan(&got); err != nil {
@@ -216,7 +216,7 @@ func TestOpsExecute(t *testing.T) {
 		"coordinates": []any{[]any{[]any{0.0, 0.0}, []any{3.0, 0.0}, []any{3.0, 3.0}, []any{0.0, 0.0}}},
 	}
 	for _, f := range []postgis.Flavour{postgis.Geometry, postgis.Geography} {
-		for _, op := range postgis.Ops {
+		for _, op := range postgis.Ops() {
 			if op.Kind() == postgis.ArgBoolean {
 				continue
 			}
@@ -377,13 +377,13 @@ func TestJSONOutputMatchesJSONB(t *testing.T) {
 			if f == postgis.Geography && !s.geography {
 				continue
 			}
-			for _, d := range postgis.Deriveds {
+			for _, d := range postgis.Deriveds() {
 				from := " FROM (SELECT " + column(f) + " AS g) AS t"
 				var a, b any
-				if err := conn.QueryRow(ctx, "SELECT "+d.SQL("t.g", f)+from, s.wkt).Scan(&a); err != nil {
+				if err := conn.QueryRow(ctx, "SELECT "+d.SQL("t.g", f, postgis.Output{})+from, s.wkt).Scan(&a); err != nil {
 					t.Fatalf("%s %s on %s: %v", f, d.Suffix, s.wkt, err)
 				}
-				if err := conn.QueryRow(ctx, "SELECT "+d.JSONSQL("t.g", f)+from, s.wkt).Scan(&b); err != nil {
+				if err := conn.QueryRow(ctx, "SELECT "+d.SQL("t.g", f, postgis.Output{JSON: true})+from, s.wkt).Scan(&b); err != nil {
 					t.Fatalf("%s %s json on %s: %v", f, d.Suffix, s.wkt, err)
 				}
 				if fmt.Sprint(a) != fmt.Sprint(b) {
@@ -393,7 +393,7 @@ func TestJSONOutputMatchesJSONB(t *testing.T) {
 		}
 	}
 	var got any
-	if err := conn.QueryRow(ctx, "SELECT "+postgis.OutputJSONSQL("NULL::geometry")).Scan(&got); err != nil || got != nil {
+	if err := conn.QueryRow(ctx, "SELECT "+postgis.OutputSQL("NULL::geometry", postgis.Output{JSON: true})).Scan(&got); err != nil || got != nil {
 		t.Errorf("NULL geometry = %v, %v; want NULL", got, err)
 	}
 }
@@ -441,7 +441,7 @@ func TestPrecisionAndBufferLive(t *testing.T) {
 			{6, "[-0.128123,51.508123]"},
 		} {
 			var got string
-			q := "SELECT (" + postgis.OutputJSONPrecisionSQL(column(f), "$2") + "->'coordinates')::text"
+			q := "SELECT (" + postgis.OutputSQL(column(f), postgis.Output{JSON: true, Precision: "$2"}) + "->'coordinates')::text"
 			if err := conn.QueryRow(ctx, q, pt, tc.digits).Scan(&got); err != nil {
 				t.Fatalf("%s precision %d: %v\n%s", f, tc.digits, err, q)
 			}
@@ -449,7 +449,7 @@ func TestPrecisionAndBufferLive(t *testing.T) {
 				t.Errorf("%s precision %d = %s, want %s", f, tc.digits, got, tc.want)
 			}
 			var jb string
-			q = "SELECT (" + postgis.OutputPrecisionSQL(column(f), "$2") + "->'coordinates')::text"
+			q = "SELECT (" + postgis.OutputSQL(column(f), postgis.Output{Precision: "$2"}) + "->'coordinates')::text"
 			if err := conn.QueryRow(ctx, q, pt, tc.digits).Scan(&jb); err != nil {
 				t.Fatalf("%s jsonb precision %d: %v", f, tc.digits, err)
 			}

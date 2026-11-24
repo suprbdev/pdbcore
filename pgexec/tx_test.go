@@ -317,11 +317,16 @@ func TestIsSerializationFailure(t *testing.T) {
 func TestParseIsolation(t *testing.T) {
 	cases := map[string]pgx.TxIsoLevel{
 		"read_committed": pgx.ReadCommitted, "repeatable_read": pgx.RepeatableRead,
-		"serializable": pgx.Serializable, "": pgx.ReadCommitted, "chaos": pgx.ReadCommitted,
+		"serializable": pgx.Serializable,
 	}
 	for in, want := range cases {
-		if got := ParseIsolation(in); got != want {
-			t.Errorf("ParseIsolation(%q) = %v, want %v", in, got, want)
+		if got, err := ParseIsolation(in); err != nil || got != want {
+			t.Errorf("ParseIsolation(%q) = %v, %v, want %v", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "chaos", "SERIALIZABLE"} {
+		if _, err := ParseIsolation(in); err == nil {
+			t.Errorf("ParseIsolation(%q) accepted", in)
 		}
 	}
 }

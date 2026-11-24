@@ -26,11 +26,11 @@ func TestRasterAccessors(t *testing.T) {
 		"PixelHeight": "ST_PixelHeight(t.r)",
 		"Envelope":    "ST_AsGeoJSON(ST_Envelope(t.r))::jsonb",
 	}
-	if len(RasterAccessors) != len(want) {
-		t.Fatalf("%d accessors", len(RasterAccessors))
+	if len(RasterAccessors()) != len(want) {
+		t.Fatalf("%d accessors", len(RasterAccessors()))
 	}
-	for _, a := range RasterAccessors {
-		if got := a.SQL("t.r"); got != want[a.Suffix] {
+	for _, a := range RasterAccessors() {
+		if got := a.SQL("t.r", Output{}); got != want[a.Suffix] {
 			t.Errorf("%s = %s", a.Suffix, got)
 		}
 		if a.Description == "" || a.Type == "" || a.GeoJSON != (a.Type == TypeName) {
@@ -41,11 +41,11 @@ func TestRasterAccessors(t *testing.T) {
 		}
 	}
 	env, _ := RasterAccessorBySuffix("Envelope")
-	if got := env.JSONSQL("t.r"); got != "ST_AsGeoJSON(ST_Envelope(t.r))::json" {
+	if got := env.SQL("t.r", Output{JSON: true}); got != "ST_AsGeoJSON(ST_Envelope(t.r))::json" {
 		t.Errorf("Envelope json = %s", got)
 	}
 	w, _ := RasterAccessorBySuffix("Width")
-	if w.JSONSQL("t.r") != w.SQL("t.r") {
+	if w.SQL("t.r", Output{JSON: true}) != w.SQL("t.r", Output{}) {
 		t.Error("JSONSQL changes a scalar accessor")
 	}
 	if _, ok := RasterAccessorBySuffix("Pixels"); ok {

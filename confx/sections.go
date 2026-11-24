@@ -26,7 +26,7 @@ type Database struct {
 // Schema selects what is introspected and how.
 type Schema struct {
 	Schemas   []string `koanf:"schemas" doc:"PostgreSQL schemas to expose."`
-	CachePath string   `koanf:"cache_path" doc:"Boot from this schema cache file instead of introspecting (see pdbq schema dump)."`
+	CachePath string   `koanf:"cache_path" doc:"Boot from this schema cache file (written by the schema dump command) instead of introspecting."`
 	Functions bool     `koanf:"functions" doc:"Expose PostgreSQL functions as custom queries/mutations."`
 }
 
@@ -58,7 +58,7 @@ type JWT struct {
 
 // Headers is the auth.headers section.
 type Headers struct {
-	Prefix         string   `koanf:"prefix" doc:"Header prefix mapped to claims, e.g. X-Pdbq-Claim-. The rest of the name maps to one claim (User-Id is user_id); requests with a claim header containing an underscore or other punctuation, repeated, or folding onto another claim header are rejected. The gateway must strip every client-supplied header with this prefix, in any letter case."`
+	Prefix         string   `koanf:"prefix" doc:"Header prefix mapped to claims, e.g. X-Claim-. The rest of the name maps to one claim (User-Id is user_id); requests with a claim header containing an underscore or other punctuation, repeated, or folding onto another claim header are rejected. The gateway must strip every client-supplied header with this prefix, in any letter case."`
 	Claims         []string `koanf:"claims" doc:"Claim names (e.g. user_id) accepted from claim headers; role_claim is always accepted. Requests carrying any other claim header are rejected. Empty accepts any claim."`
 	RoleClaim      string   `koanf:"role_claim" doc:"Claim carrying the database role (role is sent as <prefix>Role). A missing claim falls back to roles.default."`
 	TrustedProxies []string `koanf:"trusted_proxies" doc:"CIDR blocks (or single IPs) allowed to send claim headers; required in headers mode. Requests from other peers that carry claim headers are rejected."`
@@ -106,10 +106,9 @@ func DefaultClaims() Claims {
 	return Claims{Prefix: DefaultClaimsPrefix}
 }
 
-// TX is the transaction policy shared by both products. pdbq adds
-// per_request in its own wrapper.
+// TX is the transaction policy shared by both products, which add their
+// own keys in their own sections.
 type TX struct {
-	Mutations  bool   `koanf:"mutations" doc:"Wrap every mutation in a transaction."`
 	Isolation  string `koanf:"isolation" doc:"Transaction isolation level: read_committed, repeatable_read, serializable."`
 	MaxRetries int    `koanf:"max_retries" doc:"Automatic retries of a transactional operation after a serialization failure or deadlock (SQLSTATE 40001/40P01). 0 disables; the whole operation re-runs, which is safe because the failed attempt rolled back."`
 }
@@ -123,7 +122,7 @@ type Watch struct {
 
 // Errors is the error-detail policy.
 type Errors struct {
-	Detail string `koanf:"detail" doc:"'dev' exposes full PostgreSQL error detail in GraphQL errors; 'prod' sanitizes but passes constraint-violation and bad-input messages through; 'strict' hides every database error message (constraint and column names never leak)."`
+	Detail string `koanf:"detail" doc:"'dev' exposes full PostgreSQL error detail in error responses; 'prod' sanitizes but passes constraint-violation and bad-input messages through; 'strict' hides every database error message (constraint and column names never leak)."`
 }
 
 // Plugins disables and configures plugins by name. S is the product's
@@ -165,9 +164,9 @@ func DefaultMetrics() Metrics {
 // Contract is one entry of the contracts list: a named, audience-specific
 // view of the API served under its own path (see package contract).
 type Contract struct {
-	Name    string `koanf:"name" doc:"Contract name, matched against @contract and @behavior ±contract:<name> smart tags: lower-case letters, digits, _ and -."`
-	Default string `koanf:"default" doc:"Policy for tables and functions without a tag for this contract: 'include' (the default: the contract is everything not tagged out) or 'exclude' (only what is tagged in)."`
-	Path    string `koanf:"path" doc:"URL path the contract is served under; defaults to its name."`
+	Name    string          `koanf:"name" doc:"Contract name, matched against @contract and @behavior ±contract:<name> smart tags: lower-case letters, digits, _ and -."`
+	Default contract.Policy `koanf:"default" doc:"Policy for tables and functions without a tag for this contract: 'include' (the default: the contract is everything not tagged out) or 'exclude' (only what is tagged in)."`
+	Path    string          `koanf:"path" doc:"URL path the contract is served under; defaults to its name."`
 }
 
 // UnmarshalText makes a bare string a contract of that name with the
@@ -190,7 +189,7 @@ func (c Contract) URLPath(base string) string {
 
 // Spec returns the catalog filter of the contract.
 func (c Contract) Spec() contract.Contract {
-	return contract.Contract{Name: c.Name, Default: contract.Policy(c.Default)}
+	return contract.Contract{Name: c.Name, Default: c.Default}
 }
 
 // FindContract returns the contract named name, or false.

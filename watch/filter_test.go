@@ -128,7 +128,7 @@ func TestNotifyFilter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	w := &Watcher{Pool: pool, Schemas: []string{schema}, Channel: name, TriggerName: name}
+	w := testWatcher(Config{Pool: pool, Schemas: []string{schema}, Channel: name, TriggerName: name})
 	if err := w.installTrigger(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestNotifyFilterHostileSchemaName(t *testing.T) {
 	if _, err := pool.Exec(ctx, "CREATE SCHEMA "+quoteIdent(schema)); err != nil {
 		t.Fatal(err)
 	}
-	w := &Watcher{Pool: pool, Schemas: []string{schema, "public"}, Channel: name, TriggerName: name}
+	w := testWatcher(Config{Pool: pool, Schemas: []string{schema, "public"}, Channel: name, TriggerName: name})
 	if err := w.installTrigger(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestInstallTriggerUpgradesOldInstall(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	w := &Watcher{Pool: pool, Schemas: []string{"public"}, Channel: name, TriggerName: name}
+	w := testWatcher(Config{Pool: pool, Schemas: []string{"public"}, Channel: name, TriggerName: name})
 	for range 2 {
 		if err := w.installTrigger(ctx); err != nil {
 			t.Fatal(err)
@@ -303,16 +303,16 @@ func TestWatcherSkipsUnchangedCatalog(t *testing.T) {
 	var mu sync.Mutex
 	var changes []*introspect.Catalog
 	changed := make(chan *introspect.Catalog, 8)
-	w := &Watcher{
+	w := mustNew(t, Config{
 		Pool: pool, Schemas: []string{schema}, Channel: name, TriggerName: name,
 		InitialHash: hash, Log: slog.New(logTap{logs}),
-		OnChange: func(c *introspect.Catalog) {
+		OnChange: func(_ context.Context, c *introspect.Catalog) {
 			mu.Lock()
 			changes = append(changes, c)
 			mu.Unlock()
 			changed <- c
 		},
-	}
+	})
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- w.Run(runCtx) }()
@@ -372,11 +372,11 @@ func TestRunDetectsChangeBeforeListening(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := make(chan *introspect.Catalog, 1)
-	w := &Watcher{
+	w := mustNew(t, Config{
 		Pool: pool, Schemas: []string{schema}, Channel: name, TriggerName: name, InitialHash: hash,
 		Log:      slog.New(logTap{make(chan string)}),
-		OnChange: func(c *introspect.Catalog) { changed <- c },
-	}
+		OnChange: func(_ context.Context, c *introspect.Catalog) { changed <- c },
+	})
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- w.Run(runCtx) }()
@@ -405,18 +405,18 @@ func TestPollComparesAgainstInitialHash(t *testing.T) {
 	}
 	hash, _ := boot.Hash()
 	changed := make(chan *introspect.Catalog, 4)
-	w := &Watcher{
+	w := testWatcher(Config{
 		Pool: pool, Schemas: []string{schema}, PollInterval: 50 * time.Millisecond,
 		Log:      slog.New(logTap{make(chan string)}),
-		OnChange: func(c *introspect.Catalog) { changed <- c },
-	}
-	w.lastHash = hash
+		OnChange: func(_ context.Context, c *introspect.Catalog) { changed <- c },
+	})
+	r := &run{Watcher: w, lastHash: hash}
 	if _, err := pool.Exec(ctx, "CREATE TABLE "+schema+".early (id int)"); err != nil {
 		t.Fatal(err)
 	}
 	pollCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- w.poll(pollCtx) }()
+	go func() { done <- r.poll(pollCtx) }()
 	c := waitFor(t, changed, "the first poll", func(*introspect.Catalog) bool { return true })
 	if c.Table(schema, "early") == nil {
 		t.Fatal("poll catalog lacks the table")

@@ -43,7 +43,7 @@ server:
 schema:
   # PostgreSQL schemas to expose.
   schemas: ["public"]
-  # Boot from this schema cache file instead of introspecting (see pdbq schema dump).
+  # Boot from this schema cache file (written by the schema dump command) instead of introspecting.
   cache_path: ""
   # Expose PostgreSQL functions as custom queries/mutations.
   functions: true
@@ -77,7 +77,7 @@ auth:
     role_claim_path: "role"
   # Gateway claim headers (headers mode).
   headers:
-    # Header prefix mapped to claims, e.g. X-Pdbq-Claim-. The rest of the name maps to one claim (User-Id is user_id); requests with a claim header containing an underscore or other punctuation, repeated, or folding onto another claim header are rejected. The gateway must strip every client-supplied header with this prefix, in any letter case.
+    # Header prefix mapped to claims, e.g. X-Claim-. The rest of the name maps to one claim (User-Id is user_id); requests with a claim header containing an underscore or other punctuation, repeated, or folding onto another claim header are rejected. The gateway must strip every client-supplied header with this prefix, in any letter case.
     prefix: "X-Pdbq-Claim-"
     # Claim names (e.g. user_id) accepted from claim headers; role_claim is always accepted. Requests carrying any other claim header are rejected. Empty accepts any claim.
     claims: []
@@ -105,8 +105,6 @@ claims:
   json_setting: ""
 
 transactions:
-  # Wrap every mutation in a transaction.
-  mutations: true
   # Use one transaction for the whole request instead of one per operation.
   per_request: false
   # Transaction isolation level: read_committed, repeatable_read, serializable.
@@ -123,7 +121,7 @@ watch:
   channel: "pdbq_ddl"
 
 errors:
-  # 'dev' exposes full PostgreSQL error detail in GraphQL errors; 'prod' sanitizes but passes constraint-violation and bad-input messages through; 'strict' hides every database error message (constraint and column names never leak).
+  # 'dev' exposes full PostgreSQL error detail in error responses; 'prod' sanitizes but passes constraint-violation and bad-input messages through; 'strict' hides every database error message (constraint and column names never leak).
   detail: "prod"
 
 plugins:

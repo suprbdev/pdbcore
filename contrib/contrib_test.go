@@ -120,7 +120,7 @@ func allVocabularies(t *testing.T) []contrib.Vocabulary {
 		m(contrib.Inet("inet")), m(contrib.Inet("cidr")), contrib.Unaccent("varchar"),
 		contrib.Fuzzy("bpchar"), contrib.Intarray(),
 	}
-	for _, typ := range contrib.VectorTypes {
+	for _, typ := range contrib.VectorTypes() {
 		vs = append(vs, m(contrib.Vector(typ)))
 	}
 	vs = append(vs, m(contrib.Bit("bit")), m(contrib.Bit("varbit")))

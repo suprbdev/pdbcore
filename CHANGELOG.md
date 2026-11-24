@@ -30,6 +30,30 @@ becomes the release notes of the next tag.
   `smarttags.Vocabulary`; `smartcomments/catalog.Check` runs it over every
   commented object of a catalog.
 
+### Breaking: API hygiene
+
+See [docs/upgrading.md](docs/upgrading.md#api-hygiene).
+
+- `confx.Load` takes `WithFlags(values)` instead of a pflag set;
+  `confx/cliflags.Changed` replaces `confx.ChangedFlags`. `WithRemoved`
+  names keys removed without a replacement. `MovedKeys`,
+  `ParseTrustedProxy`, `ValidChannelName` and `TX.Mutations` are gone, and
+  the shared doc tags no longer name a product.
+- `pgexec.SanitizeMessage` is gone (use `Classify`); `ParseIsolation` and
+  `ParseDetail` return an error instead of falling back.
+- `contract.ParsePolicy`; `confx.Contract.Default` is a `contract.Policy`;
+  `Contract.View` returns an error for an unknown policy; `Apply`,
+  `OmitAll` and `TransformCatalog` are gone.
+- `postgis.OutputSQL(ref, Output)`, `Derived.SQL(ref, f, Output)` and
+  `RasterAccessor.SQL(ref, Output)` replace the json/jsonb × precision
+  variants; `Ops()`, `Deriveds()`, `RasterAccessors()` and
+  `contrib.VectorTypes()` replace the mutable variables; `Op.Index` and
+  `Op.Arg` are `Op.Indexable` and `Op.OperandType`.
+- `jwtmint.Sign`, `postgis.OpsDoc`, `OpNames` and `DerivedSuffixes` are
+  gone.
+- `watch.New(Config)` validates up front; `OnChange(ctx, cat)`; `Run` no
+  longer writes into the watcher's configuration.
+
 ## [0.18.0] - 2026-11-23
 
 ### Breaking: identity and strict config

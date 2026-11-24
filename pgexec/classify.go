@@ -3,6 +3,7 @@ package pgexec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -67,16 +68,29 @@ const (
 	Strict
 )
 
-// ParseDetail maps the config strings "dev", "prod", "strict"; anything else
-// is Prod.
-func ParseDetail(s string) Detail {
+// ParseDetail maps the config strings "dev", "prod" and "strict" to their
+// Detail. Any other value is an error naming the accepted ones.
+func ParseDetail(s string) (Detail, error) {
 	switch s {
+	case "prod":
+		return Prod, nil
 	case "dev":
-		return Dev
+		return Dev, nil
 	case "strict":
-		return Strict
+		return Strict, nil
 	}
-	return Prod
+	return Prod, fmt.Errorf("%q is not 'dev', 'prod' or 'strict'", s)
+}
+
+// String returns the config spelling of d: "prod", "dev" or "strict".
+func (d Detail) String() string {
+	switch d {
+	case Dev:
+		return "dev"
+	case Strict:
+		return "strict"
+	}
+	return "prod"
 }
 
 // Classified is the result of Classify.
@@ -105,7 +119,7 @@ func Classify(err error, detail Detail) Classified {
 		if detail == Dev {
 			c.Message = pgErr.Message
 		} else {
-			c.Message = SanitizeMessage(pgErr, detail == Strict)
+			c.Message = sanitizeMessage(pgErr, detail == Strict)
 		}
 		return c
 	}
@@ -205,11 +219,11 @@ func classOf(code string) Class {
 	return Internal
 }
 
-// SanitizeMessage keeps actionable constraint-class errors and hides the
+// sanitizeMessage keeps actionable constraint-class errors and hides the
 // rest behind a generic message. strict hides those too: PG constraint
 // messages embed constraint/table/column names, which strict mode treats as
 // sensitive.
-func SanitizeMessage(pgErr *pgconn.PgError, strict bool) string {
+func sanitizeMessage(pgErr *pgconn.PgError, strict bool) string {
 	if isPostGISInputError(pgErr) {
 		if strict {
 			return "invalid input value"

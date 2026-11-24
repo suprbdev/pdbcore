@@ -8,14 +8,11 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	flag "github.com/spf13/pflag"
 )
 
 // pdbqServer mirrors pdbq's Server section so the reference-YAML golden
-// (testdata/pdbq.example.yaml, the body of pdbq's committed example) proves
-// ExampleYAML reproduces pdbq's output byte for byte over the shared
-// sections.
+// (testdata/pdbq.example.yaml, shaped like the body of pdbq's committed
+// example) pins what ExampleYAML renders over the shared sections.
 type pdbqServer struct {
 	Addr                 string        `koanf:"addr" doc:"Listen address for the HTTP server."`
 	GraphiQL             bool          `koanf:"graphiql" doc:"Serve the GraphiQL playground at / (off by default; enable for development)."`
@@ -34,10 +31,9 @@ type pdbqServer struct {
 	DisableIntrospection bool          `koanf:"disable_introspection" doc:"Reject __schema / __type introspection queries (off by default). Enable in production to hide the schema shape; __typename keeps working."`
 }
 
-// pdbqTX is pdbq's own 4-field TX (per_request sits second, which struct
+// pdbqTX is pdbq's own TX (per_request sits first, which struct
 // embedding cannot express — see TestSquashEmbedding).
 type pdbqTX struct {
-	Mutations  bool   `koanf:"mutations" doc:"Wrap every mutation in a transaction."`
 	PerRequest bool   `koanf:"per_request" doc:"Use one transaction for the whole request instead of one per operation."`
 	Isolation  string `koanf:"isolation" doc:"Transaction isolation level: read_committed, repeatable_read, serializable."`
 	MaxRetries int    `koanf:"max_retries" doc:"Automatic retries of a transactional operation after a serialization failure or deadlock (SQLSTATE 40001/40P01). 0 disables; the whole operation re-runs, which is safe because the failed attempt rolled back."`
@@ -80,7 +76,7 @@ func pdbqDefaults() pdbqConfig {
 		Auth:    DefaultAuth("X-Pdbq-Claim-"),
 		Roles:   DefaultRoles(),
 		Claims:  DefaultClaims(),
-		TX:      pdbqTX{Mutations: true, Isolation: "read_committed"},
+		TX:      pdbqTX{Isolation: "read_committed"},
 		Watch:   Watch{PollInterval: 5 * time.Second, Channel: "pdbq_ddl"},
 		Errors:  Errors{Detail: "prod"},
 		Plugins: Plugins[pdbqPlugins]{},
@@ -116,7 +112,7 @@ func TestExampleYAMLDocOverride(t *testing.T) {
 	if !strings.Contains(out, "# custom detail doc\n  detail: \"prod\"") {
 		t.Fatalf("override not applied:\n%s", out)
 	}
-	if strings.Contains(out, "GraphQL errors") {
+	if strings.Contains(out, "error detail in error responses") {
 		t.Fatal("original doc must be replaced")
 	}
 }
@@ -138,27 +134,19 @@ func TestSquashEmbedding(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PDBX_TRANSACTIONS_MAX__RETRIES", "3")
-	fs := flag.NewFlagSet("t", flag.ContinueOnError)
-	fs.Bool("transactions.mutations", true, "")
-	if err := fs.Parse([]string{"--transactions.mutations=false"}); err != nil {
+	cfg := squashConfig{TX: squashTX{TX: TX{Isolation: "read_committed"}}}
+	if err := Load("PDBX_", path, &cfg, WithFlags(map[string]any{"transactions.max_retries": "5"})); err != nil {
 		t.Fatal(err)
 	}
-	cfg := squashConfig{TX: squashTX{TX: TX{Mutations: true, Isolation: "read_committed"}}}
-	if err := Load("PDBX_", path, ChangedFlags(fs), &cfg); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.TX.Isolation != "serializable" || !cfg.TX.PerRequest || cfg.TX.MaxRetries != 3 || cfg.TX.Mutations {
+	if cfg.TX.Isolation != "serializable" || !cfg.TX.PerRequest || cfg.TX.MaxRetries != 5 {
 		t.Fatalf("squash load = %+v", cfg.TX)
 	}
 	// ExampleYAML inlines the embedded fields, but embedded fields can only
-	// come before or after the wrapper's own fields — pdbq's per_request
-	// sits between mutations and isolation, so byte-identical output needs
-	// pdbq to keep its own TX struct.
+	// come before or after the wrapper's own fields.
 	out := ExampleYAML(cfg)
 	want := "transactions:\n" +
-		"  # Wrap every mutation in a transaction.\n  mutations: false\n" +
 		"  # Transaction isolation level: read_committed, repeatable_read, serializable.\n  isolation: \"serializable\"\n" +
-		"  # Automatic retries of a transactional operation after a serialization failure or deadlock (SQLSTATE 40001/40P01). 0 disables; the whole operation re-runs, which is safe because the failed attempt rolled back.\n  max_retries: 3\n" +
+		"  # Automatic retries of a transactional operation after a serialization failure or deadlock (SQLSTATE 40001/40P01). 0 disables; the whole operation re-runs, which is safe because the failed attempt rolled back.\n  max_retries: 5\n" +
 		"  # Use one transaction for the whole request instead of one per operation.\n  per_request: true\n\n"
 	if out != want {
 		t.Fatalf("squash example:\n%s\nwant:\n%s", out, want)
@@ -181,15 +169,8 @@ roles:
 	}
 	t.Setenv("PDBQ_SERVER_ADDR", ":7777") // env overrides file
 	t.Setenv("PDBQ_LOG_LEVEL", "debug")
-	fs := flag.NewFlagSet("t", flag.ContinueOnError)
-	fs.String("log.level", "", "")
-	fs.String("errors.detail", "", "")
-	fs.String("config", "", "")
-	if err := fs.Parse([]string{"--log.level=warn", "--config=" + path}); err != nil {
-		t.Fatal(err)
-	}
 	cfg := pdbqDefaults()
-	if err := Load("PDBQ_", path, ChangedFlags(fs, "config"), &cfg); err != nil {
+	if err := Load("PDBQ_", path, &cfg, WithFlags(map[string]any{"log.level": "warn"})); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Database.URL != "postgres://file/db" {
@@ -214,7 +195,7 @@ roles:
 
 func TestLoadMissingFile(t *testing.T) {
 	cfg := pdbqDefaults()
-	err := Load("PDBQ_", filepath.Join(t.TempDir(), "nope.yaml"), nil, &cfg)
+	err := Load("PDBQ_", filepath.Join(t.TempDir(), "nope.yaml"), &cfg)
 	if err == nil || !strings.HasPrefix(err.Error(), "config: read ") {
 		t.Fatalf("err = %v", err)
 	}
@@ -253,14 +234,14 @@ func TestDiscover(t *testing.T) {
 
 func TestParseTrustedProxy(t *testing.T) {
 	for _, s := range []string{"10.0.0.0/8", "10.0.0.5", "::1", "fe80::/10"} {
-		if _, err := ParseTrustedProxy(s); err != nil {
+		if _, err := parseTrustedProxy(s); err != nil {
 			t.Errorf("%s rejected: %v", s, err)
 		}
 	}
-	if p, _ := ParseTrustedProxy("10.0.0.5"); p.Bits() != 32 {
+	if p, _ := parseTrustedProxy("10.0.0.5"); p.Bits() != 32 {
 		t.Errorf("single IP must be /32, got %v", p)
 	}
-	if _, err := ParseTrustedProxy("not-an-ip"); err == nil {
+	if _, err := parseTrustedProxy("not-an-ip"); err == nil {
 		t.Error("garbage accepted")
 	}
 }
@@ -366,7 +347,7 @@ func TestValidateRejects(t *testing.T) {
 		"watch channel length": {func() []string { return ValidateWatch(Watch{Enabled: true, Channel: strings.Repeat("c", 64)}, "") },
 			`watch.channel: "` + strings.Repeat("c", 64) + `" is longer than 63 bytes`},
 		"isolation": {func() []string { return ValidateTX(TX{Isolation: "chaos"}) },
-			`transactions.isolation: "chaos" invalid`},
+			`transactions.isolation: "chaos" is not 'read_committed', 'repeatable_read' or 'serializable'`},
 		"max_retries": {func() []string { return ValidateTX(TX{Isolation: "serializable", MaxRetries: -1}) },
 			"transactions.max_retries must be >= 0"},
 		"watch+cache": {func() []string { return ValidateWatch(Watch{Enabled: true, Channel: "c"}, "x") },
@@ -481,7 +462,7 @@ func TestLoadSplitsEnvLists(t *testing.T) {
 	t.Setenv("PDBX_SCHEMA_SCHEMAS", "public, audit")
 	t.Setenv("PDBX_DATABASE_URL", "postgres://a,b@h/db")
 	cfg := pdbqDefaults()
-	if err := Load("PDBX_", "", nil, &cfg); err != nil {
+	if err := Load("PDBX_", "", &cfg); err != nil {
 		t.Fatal(err)
 	}
 	if len(cfg.Schema.Schemas) != 2 || cfg.Schema.Schemas[0] != "public" || cfg.Schema.Schemas[1] != "audit" {
@@ -573,7 +554,7 @@ contracts:
 		t.Fatal(err)
 	}
 	var c cfg
-	if err := Load("PDBX_", path, nil, &c); err != nil {
+	if err := Load("PDBX_", path, &c); err != nil {
 		t.Fatal(err)
 	}
 	want := []Contract{{Name: "public"}, {Name: "partner", Default: "exclude", Path: "/partners"}, {Name: "internal"}}
@@ -583,7 +564,7 @@ contracts:
 
 	t.Setenv("PDBX_CONTRACTS", "public,partner")
 	c = cfg{}
-	if err := Load("PDBX_", "", nil, &c); err != nil {
+	if err := Load("PDBX_", "", &c); err != nil {
 		t.Fatal(err)
 	}
 	if want := []Contract{{Name: "public"}, {Name: "partner"}}; !slices.Equal(c.Contracts, want) {

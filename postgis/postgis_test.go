@@ -320,7 +320,7 @@ func TestOpsRender(t *testing.T) {
 			t.Errorf("%s rendered %q, want %q", tc.op, got, tc.want)
 		}
 	}
-	for _, name := range OpNames() {
+	for _, name := range opNames() {
 		if !covered[name] {
 			t.Errorf("operator %q has no rendering test", name)
 		}
@@ -340,8 +340,8 @@ func TestOpOrderIsAppendOnly(t *testing.T) {
 		"bboxOverlapsOrAbove", "bboxEquals", "exactlyEquals", "orderingEquals",
 		"intersects3D", "bboxIntersectsND", "bboxIntersects2D",
 	}
-	if got := OpNames(); strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("OpNames() = %v\nwant %v", got, want)
+	if got := opNames(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("opNames() = %v\nwant %v", got, want)
 	}
 }
 
@@ -383,8 +383,8 @@ func TestOpFlags(t *testing.T) {
 		if op.Geography != tc.geography {
 			t.Errorf("%s Geography = %v, want %v", tc.op, op.Geography, tc.geography)
 		}
-		if op.Index != tc.index {
-			t.Errorf("%s Index = %v, want %v", tc.op, op.Index, tc.index)
+		if op.Indexable != tc.index {
+			t.Errorf("%s Index = %v, want %v", tc.op, op.Indexable, tc.index)
 		}
 		if op.Description == "" {
 			t.Errorf("%s has no description", tc.op)
@@ -450,7 +450,7 @@ func TestOutputSQLEvaluatesRefOnce(t *testing.T) {
 	// needed — and ref may be a computed-column function call, so it must
 	// appear exactly once to avoid double evaluation.
 	ref := `"t"."geom"`
-	got := OutputSQL(ref)
+	got := OutputSQL(ref, Output{})
 	for _, want := range []string{"ST_AsGeoJSON", "::jsonb"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("OutputSQL missing %q: %s", want, got)
@@ -469,7 +469,7 @@ func TestDerivedGeographyCasts(t *testing.T) {
 		if !ok {
 			t.Fatalf("derived %q not found", suffix)
 		}
-		if got := d.SQL(`"t"."g"`, Geography); !strings.Contains(got, "::geometry") {
+		if got := d.SQL(`"t"."g"`, Geography, Output{}); !strings.Contains(got, "::geometry") {
 			t.Errorf("%s on geography is not cast: %s", suffix, got)
 		}
 	}
@@ -477,7 +477,7 @@ func TestDerivedGeographyCasts(t *testing.T) {
 	// there), so they must NOT be cast away.
 	for _, suffix := range []string{"Area", "Length", "Perimeter"} {
 		d, _ := DerivedBySuffix(suffix)
-		if got := d.SQL(`"t"."g"`, Geography); strings.Contains(got, "::geometry") {
+		if got := d.SQL(`"t"."g"`, Geography, Output{}); strings.Contains(got, "::geometry") {
 			t.Errorf("%s on geography should keep spheroidal units: %s", suffix, got)
 		}
 	}
@@ -542,14 +542,14 @@ func TestDerivedSQL(t *testing.T) {
 		if !ok {
 			t.Fatalf("derived %q not found", tc.suffix)
 		}
-		if got := d.SQL(ref, Geometry); got != tc.geometry {
+		if got := d.SQL(ref, Geometry, Output{}); got != tc.geometry {
 			t.Errorf("%s geometry SQL = %s\nwant %s", tc.suffix, got, tc.geometry)
 		}
-		if got := d.SQL(ref, Geography); got != tc.geo {
+		if got := d.SQL(ref, Geography, Output{}); got != tc.geo {
 			t.Errorf("%s geography SQL = %s\nwant %s", tc.suffix, got, tc.geo)
 		}
 	}
-	for _, s := range DerivedSuffixes() {
+	for _, s := range derivedSuffixes() {
 		if !covered[s] {
 			t.Errorf("derived %q has no rendering test", s)
 		}
@@ -564,8 +564,8 @@ func TestDerivedOrderIsAppendOnly(t *testing.T) {
 		"X", "Y", "Z", "M", "NumPoints", "NumGeometries", "StartPoint", "EndPoint",
 		"PointOnSurface", "Wkt", "Ewkt", "IsEmpty", "IsSimple", "Xmin", "Ymin", "Xmax", "Ymax",
 	}
-	if got := DerivedSuffixes(); strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("DerivedSuffixes() = %v\nwant %v", got, want)
+	if got := derivedSuffixes(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("derivedSuffixes() = %v\nwant %v", got, want)
 	}
 }
 
@@ -608,7 +608,7 @@ func TestDerivedApplies(t *testing.T) {
 		for _, s := range tc.want {
 			want[s] = true
 		}
-		for _, d := range Deriveds {
+		for _, d := range Deriveds() {
 			exp := !gated[d.Suffix] || want[d.Suffix]
 			if got := d.Applies(tc.subtype); got != exp {
 				t.Errorf("%s.Applies(%q) = %v, want %v", d.Suffix, tc.subtype, got, exp)
@@ -707,11 +707,11 @@ func TestParseDoesNotMutateInput(t *testing.T) {
 
 func TestOutputJSONSQL(t *testing.T) {
 	ref := `"t"."geom"`
-	if got, want := OutputJSONSQL(ref), `ST_AsGeoJSON("t"."geom")::json`; got != want {
+	if got, want := OutputSQL(ref, Output{JSON: true}), `ST_AsGeoJSON("t"."geom")::json`; got != want {
 		t.Errorf("OutputJSONSQL = %s, want %s", got, want)
 	}
-	for _, d := range Deriveds {
-		got, jsonb := d.JSONSQL(ref, Geometry), d.SQL(ref, Geometry)
+	for _, d := range Deriveds() {
+		got, jsonb := d.SQL(ref, Geometry, Output{JSON: true}), d.SQL(ref, Geometry, Output{})
 		want := strings.ReplaceAll(jsonb, "::jsonb", "::json")
 		if got != want {
 			t.Errorf("%s JSONSQL = %s, want %s", d.Suffix, got, want)
@@ -733,23 +733,23 @@ func TestDistanceRenders(t *testing.T) {
 
 func TestPrecisionAndBuffer(t *testing.T) {
 	const ref = `"t"."g"`
-	if got, want := OutputPrecisionSQL(ref, "$2"), `ST_AsGeoJSON("t"."g", $2::int4)::jsonb`; got != want {
+	if got, want := OutputSQL(ref, Output{Precision: "$2"}), `ST_AsGeoJSON("t"."g", $2::int4)::jsonb`; got != want {
 		t.Errorf("OutputPrecisionSQL = %s, want %s", got, want)
 	}
-	if got, want := OutputJSONPrecisionSQL(ref, "$2"), `ST_AsGeoJSON("t"."g", $2::int4)::json`; got != want {
+	if got, want := OutputSQL(ref, Output{JSON: true, Precision: "$2"}), `ST_AsGeoJSON("t"."g", $2::int4)::json`; got != want {
 		t.Errorf("OutputJSONPrecisionSQL = %s, want %s", got, want)
 	}
-	if got, want := OutputJSONPrecisionSQL(ref, "coalesce($2, 9)"), `ST_AsGeoJSON("t"."g", (coalesce($2, 9))::int4)::json`; got != want {
+	if got, want := OutputSQL(ref, Output{JSON: true, Precision: "coalesce($2, 9)"}), `ST_AsGeoJSON("t"."g", (coalesce($2, 9))::int4)::json`; got != want {
 		t.Errorf("OutputJSONPrecisionSQL = %s, want %s", got, want)
 	}
 	if got, want := BufferSQL(ref, "$1"), `ST_Buffer("t"."g", $1::float8)`; got != want {
 		t.Errorf("BufferSQL = %s, want %s", got, want)
 	}
-	for _, d := range Deriveds {
-		plain, prec := d.JSONSQL(ref, Geography), d.JSONPrecisionSQL(ref, Geography, "$1")
-		jsonbPrec := d.PrecisionSQL(ref, Geography, "$1")
+	for _, d := range Deriveds() {
+		plain, prec := d.SQL(ref, Geography, Output{JSON: true}), d.SQL(ref, Geography, Output{JSON: true, Precision: "$1"})
+		jsonbPrec := d.SQL(ref, Geography, Output{Precision: "$1"})
 		if !d.GeoJSON {
-			if prec != plain || jsonbPrec != d.SQL(ref, Geography) {
+			if prec != plain || jsonbPrec != d.SQL(ref, Geography, Output{}) {
 				t.Errorf("%s is not geometry valued but precision changed it: %s", d.Suffix, prec)
 			}
 			continue
@@ -780,5 +780,42 @@ func TestPrecisionAndBuffer(t *testing.T) {
 		if CheckBuffer(f) == nil {
 			t.Errorf("CheckBuffer(%v) accepted", f)
 		}
+	}
+}
+
+func opNames() []string {
+	var out []string
+	for _, op := range Ops() {
+		out = append(out, op.Name)
+	}
+	return out
+}
+
+func derivedSuffixes() []string {
+	var out []string
+	for _, d := range Deriveds() {
+		out = append(out, d.Suffix)
+	}
+	return out
+}
+
+func TestOutputSQLOptions(t *testing.T) {
+	cases := []struct {
+		o    Output
+		want string
+	}{
+		{Output{}, "ST_AsGeoJSON(t.g)::jsonb"},
+		{Output{JSON: true}, "ST_AsGeoJSON(t.g)::json"},
+		{Output{Precision: "$2"}, "ST_AsGeoJSON(t.g, $2::int4)::jsonb"},
+		{Output{JSON: true, Precision: "$2"}, "ST_AsGeoJSON(t.g, $2::int4)::json"},
+		{Output{Precision: "x.p"}, "ST_AsGeoJSON(t.g, (x.p)::int4)::jsonb"},
+	}
+	for _, tc := range cases {
+		if got := OutputSQL("t.g", tc.o); got != tc.want {
+			t.Errorf("OutputSQL(%+v) = %q, want %q", tc.o, got, tc.want)
+		}
+	}
+	if a, b := Ops(), Ops(); &a[0] == &b[0] {
+		t.Error("Ops shares its backing array")
 	}
 }
