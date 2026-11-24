@@ -3,6 +3,7 @@ package confx
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -194,5 +195,51 @@ legacy:
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q:\n%v", want, err)
 		}
+	}
+}
+
+func TestLoadRejectsDoubledUnderscoreAfterSection(t *testing.T) {
+	for env, want := range map[string]string{
+		"PDBX_ROLES__ALLOWED":         "unknown environment variable PDBX_ROLES__ALLOWED (roles_allowed): did you mean PDBX_ROLES_ALLOWED?",
+		"PDBX_AUTH__MODE":             "unknown environment variable PDBX_AUTH__MODE (auth_mode): did you mean PDBX_AUTH_MODE?",
+		"PDBX_FILTERS__INDEXED__ONLY": "unknown environment variable PDBX_FILTERS__INDEXED__ONLY (filters_indexed_only): did you mean PDBX_FILTERS_INDEXED__ONLY?",
+		"PDBX_AUTH__JWT_SECRET":       "unknown environment variable PDBX_AUTH__JWT_SECRET (auth_jwt.secret): did you mean PDBX_AUTH_JWT_SECRET?",
+		"PDBX_ROLES__NO__SUCH__THING": "unknown environment variable PDBX_ROLES__NO__SUCH__THING (roles_no_such_thing)",
+		"PDBX_RLS__ENABLED":           "unknown environment variable PDBX_RLS__ENABLED (rls_enabled): moved to PDBX_ROLES_SWITCH",
+	} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, "x")
+			cfg := pdbqDefaults()
+			err := Load("PDBX_", "", &cfg)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("err = %v, want %q", err, want)
+			}
+		})
+	}
+	t.Setenv("PDBX_UNRELATED__THING", "1")
+	t.Setenv("PDBX_TEST_DATABASE_URL", "postgres://test")
+	cfg := pdbqDefaults()
+	if err := Load("PDBX_", "", &cfg); err != nil {
+		t.Fatalf("variables outside every section must stay ignored: %v", err)
+	}
+}
+
+func TestValidateSharedDurations(t *testing.T) {
+	for want, errs := range map[string][]string{
+		"database.max_conns must be >= 0":         ValidateDatabase(Database{MaxConns: -1, ConnectTimeout: time.Second}),
+		"database.connect_timeout must be > 0":    ValidateDatabase(Database{MaxConns: 1}),
+		"database.statement_timeout must be >= 0": ValidateDatabase(Database{MaxConns: 1, ConnectTimeout: time.Second, StatementTimeout: -time.Second}),
+		"auth.jwt.jwks_cache_ttl must be > 0":     ValidateIdentity(Auth{Mode: "jwt", JWT: JWT{JWKSURL: "https://idp.example/jwks", RoleClaimPath: "role"}}, Roles{Switch: true}, Claims{}),
+		"watch.poll_interval must be > 0":         ValidateWatch(Watch{Enabled: true, Channel: "c"}, ""),
+	} {
+		if !slices.ContainsFunc(errs, func(e string) bool { return strings.HasPrefix(e, want) }) {
+			t.Errorf("want %q, got %q", want, errs)
+		}
+	}
+	if errs := ValidateDatabase(Database{ConnectTimeout: time.Second}); len(errs) != 0 {
+		t.Errorf("max_conns 0 or statement_timeout 0 rejected: %q", errs)
+	}
+	if errs := ValidateWatch(Watch{Channel: "c"}, ""); len(errs) != 0 {
+		t.Errorf("disabled watch checked: %q", errs)
 	}
 }

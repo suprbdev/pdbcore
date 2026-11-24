@@ -305,7 +305,7 @@ func TestWatcherSkipsUnchangedCatalog(t *testing.T) {
 	changed := make(chan *introspect.Catalog, 8)
 	w := mustNew(t, Config{
 		Pool: pool, Schemas: []string{schema}, Channel: name, TriggerName: name,
-		InitialHash: hash, Log: slog.New(logTap{logs}),
+		InitialHash: hash, Log: slog.New(logTap{logs}), PollInterval: time.Second,
 		OnChange: func(_ context.Context, c *introspect.Catalog) {
 			mu.Lock()
 			changes = append(changes, c)
@@ -374,8 +374,9 @@ func TestRunDetectsChangeBeforeListening(t *testing.T) {
 	changed := make(chan *introspect.Catalog, 1)
 	w := mustNew(t, Config{
 		Pool: pool, Schemas: []string{schema}, Channel: name, TriggerName: name, InitialHash: hash,
-		Log:      slog.New(logTap{make(chan string)}),
-		OnChange: func(_ context.Context, c *introspect.Catalog) { changed <- c },
+		PollInterval: time.Second,
+		Log:          slog.New(logTap{make(chan string)}),
+		OnChange:     func(_ context.Context, c *introspect.Catalog) { changed <- c },
 	})
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)

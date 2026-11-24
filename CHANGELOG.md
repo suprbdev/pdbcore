@@ -30,6 +30,22 @@ becomes the release notes of the next tag.
   `smarttags.Vocabulary`; `smartcomments/catalog.Check` runs it over every
   commented object of a catalog.
 
+### Fixed
+
+- `introspect.Introspect` no longer sorts the caller's schema slice in
+  place (a live boot alphabetised the products' `schema.schemas`, which a
+  cache boot did not); `Catalog.Schemas` keeps the configured order and
+  `Hash` ignores it.
+- Strict environment loading reports a variable that doubles the
+  underscore after its section (`PDBQ_ROLES__ALLOWED`) with a did-you-mean
+  hint instead of ignoring it.
+- `confx.ValidateDatabase` rejects a negative `database.max_conns`, a
+  non-positive `database.connect_timeout` and a negative
+  `database.statement_timeout`; `ValidateIdentity` rejects a non-positive
+  `auth.jwt.jwks_cache_ttl` with a JWKS URL (it silently became one hour);
+  `ValidateWatch` and `watch.New` reject a non-positive poll interval (the
+  polling fallback panicked).
+
 ### Breaking: API hygiene
 
 See [docs/upgrading.md](docs/upgrading.md#api-hygiene).

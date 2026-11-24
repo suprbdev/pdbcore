@@ -116,3 +116,16 @@ func TestFunctionOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestHashIgnoresSchemaOrder(t *testing.T) {
+	a, b := hashCatalog(), hashCatalog()
+	b.Schemas = []string{"a", "b"}
+	ha, _ := a.Hash()
+	hb, _ := b.Hash()
+	if ha != hb {
+		t.Fatalf("hash depends on schema order: %s != %s", ha, hb)
+	}
+	if !slices.Equal(a.Schemas, []string{"b", "a"}) {
+		t.Fatalf("Hash reordered Schemas: %v", a.Schemas)
+	}
+}

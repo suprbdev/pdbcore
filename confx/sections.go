@@ -18,8 +18,8 @@ import (
 // Database is the connection section.
 type Database struct {
 	URL              string        `koanf:"url" doc:"PostgreSQL connection URL, e.g. postgres://user:pass@host:5432/db. Also honours standard PG* env vars when empty."`
-	MaxConns         int32         `koanf:"max_conns" doc:"Maximum pooled connections."`
-	ConnectTimeout   time.Duration `koanf:"connect_timeout" doc:"Timeout for establishing a connection."`
+	MaxConns         int32         `koanf:"max_conns" doc:"Maximum pooled connections; 0 uses the pgx pool default (the larger of 4 and the number of CPUs)."`
+	ConnectTimeout   time.Duration `koanf:"connect_timeout" doc:"Timeout for establishing a connection (must be positive)."`
 	StatementTimeout time.Duration `koanf:"statement_timeout" doc:"Per-statement timeout applied to every request (0 disables). Keep it below the HTTP request timeout so a slow statement fails with SQLSTATE 57014 (a timeout error the client can act on) before the request is cut off."`
 }
 
@@ -116,7 +116,7 @@ type TX struct {
 // Watch is the DDL watch (dev mode) section.
 type Watch struct {
 	Enabled      bool          `koanf:"enabled" doc:"Re-introspect and hot-swap the schema on DDL changes (dev only; refuses to combine with schema.cache_path)."`
-	PollInterval time.Duration `koanf:"poll_interval" doc:"Poll interval used when event triggers cannot be installed."`
+	PollInterval time.Duration `koanf:"poll_interval" doc:"Poll interval used when event triggers cannot be installed (must be positive)."`
 	Channel      string        `koanf:"channel" doc:"NOTIFY channel used by the DDL event trigger."`
 }
 

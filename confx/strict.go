@@ -141,6 +141,38 @@ func (s keySchema) section(name string, h hints) bool {
 	return len(name) >= 4 && closest(name, tops) != ""
 }
 
+// underscoredSection reports whether key, an environment key without a
+// section of its own, starts with a section name of the schema (or of a
+// moved or removed key) followed by "_": the mapping of an environment
+// variable that doubled the underscore after the section
+// (PREFIX_ROLES__ALLOWED is roles_allowed). It returns key with that "_"
+// read as the section separator (roles.allowed), preferring the longest
+// section name.
+func (s keySchema) underscoredSection(key string, h hints) (string, bool) {
+	best := ""
+	consider := func(name string) {
+		if strings.HasPrefix(key, name+"_") && len(name) > len(best) {
+			best = name
+		}
+	}
+	for p, kind := range s {
+		if !strings.Contains(p, ".") && kind != leafKey {
+			consider(p)
+		}
+	}
+	for _, m := range []map[string]string{h.moved, h.removed} {
+		for old := range m {
+			if top, _, ok := strings.Cut(old, "."); ok {
+				consider(top)
+			}
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best + "." + key[len(best)+1:], true
+}
+
 // unknownKey describes an unknown key: where it moved to, why it was
 // removed, or the closest known or moved key; name renders a path for the
 // message.

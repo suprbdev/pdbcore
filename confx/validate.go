@@ -22,6 +22,24 @@ func InvalidConfig(errs []string) error {
 	return fmt.Errorf("invalid config:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
+// ValidateDatabase checks the database section's numbers: max_conns must
+// not be negative (0 uses the pgx pool default), connect_timeout must be
+// positive (0 would wait for a connection forever) and statement_timeout
+// not negative (0 disables it).
+func ValidateDatabase(d Database) []string {
+	var errs []string
+	if d.MaxConns < 0 {
+		errs = append(errs, "database.max_conns must be >= 0 (0 uses the pool default)")
+	}
+	if d.ConnectTimeout <= 0 {
+		errs = append(errs, "database.connect_timeout must be > 0")
+	}
+	if d.StatementTimeout < 0 {
+		errs = append(errs, "database.statement_timeout must be >= 0 (0 disables it)")
+	}
+	return errs
+}
+
 // ValidateErrors checks errors.detail (see [pgexec.ParseDetail]).
 func ValidateErrors(e Errors) []string {
 	if _, err := pgexec.ParseDetail(e.Detail); err != nil {
@@ -33,7 +51,7 @@ func ValidateErrors(e Errors) []string {
 // ValidateIdentity checks the auth, roles and claims sections together:
 // the auth mode; in jwt mode a secret, secret file or JWKS URL (a secret
 // file must be readable), the role claim path and a non-negative leeway;
-// in headers mode the prefix, the claim names (auth.ValidHeaderClaim) and
+// a positive JWKS cache TTL with a JWKS URL; in headers mode the prefix, the claim names (auth.ValidHeaderClaim) and
 // at least one trusted proxy; every trusted_proxies entry; mint_type's
 // shape and secret; the role names (pgexec.ValidRole), and an anonymous
 // role in mode none while roles switch; the claims prefix
@@ -61,6 +79,9 @@ func ValidateIdentity(a Auth, r Roles, c Claims) []string {
 	}
 	if j.Leeway < 0 {
 		add("auth.jwt.leeway must be >= 0")
+	}
+	if j.JWKSURL != "" && j.JWKSCacheTTL <= 0 {
+		add("auth.jwt.jwks_cache_ttl must be > 0")
 	}
 	if a.Mode == auth.ModeJWT {
 		if j.Secret == "" && j.SecretFile == "" && j.JWKSURL == "" {
@@ -136,10 +157,13 @@ func ValidateTX(t TX) []string {
 	return errs
 }
 
-// ValidateWatch checks the watch section against schema.cache_path and the
-// channel name.
+// ValidateWatch checks the enabled watch section: the poll interval, the
+// channel name, and that schema.cache_path is not set.
 func ValidateWatch(w Watch, cachePath string) []string {
 	var errs []string
+	if w.Enabled && w.PollInterval <= 0 {
+		errs = append(errs, "watch.poll_interval must be > 0")
+	}
 	if w.Enabled && cachePath != "" {
 		errs = append(errs, "watch.enabled cannot be combined with schema.cache_path")
 	}

@@ -28,7 +28,7 @@ type Config struct {
 	// digits and underscores, at most 63 bytes.
 	Channel string
 	// PollInterval is the hash-polling interval used when the event
-	// trigger cannot be installed.
+	// trigger cannot be installed; it must be positive.
 	PollInterval time.Duration
 	// OnChange receives every changed catalog, with the context Run was
 	// given; required. It runs on Run's goroutine.
@@ -75,8 +75,8 @@ const DefaultInstallWait = 30 * time.Second
 const installPollInterval = 50 * time.Millisecond
 
 // New validates cfg, fills in its defaults and returns the Watcher. It is
-// an error when Pool or OnChange is nil, or when Channel or TriggerName is
-// not a valid name or too long to install.
+// an error when Pool or OnChange is nil, PollInterval is not positive, or
+// Channel or TriggerName is not a valid name or too long to install.
 func New(cfg Config) (*Watcher, error) {
 	if !validChannel(cfg.Channel) {
 		return nil, fmt.Errorf("watch: invalid channel name %q: only letters, digits and underscores are allowed", cfg.Channel)
@@ -92,6 +92,9 @@ func New(cfg Config) (*Watcher, error) {
 	}
 	if len(cfg.TriggerName)+len(longestSuffix) > maxIdentLen {
 		return nil, fmt.Errorf("watch: trigger name %q is too long: with the %q suffix it must fit in %d bytes", cfg.TriggerName, longestSuffix, maxIdentLen)
+	}
+	if cfg.PollInterval <= 0 {
+		return nil, fmt.Errorf("watch: poll interval %s must be positive", cfg.PollInterval)
 	}
 	if cfg.Pool == nil {
 		return nil, errors.New("watch: Pool is required")

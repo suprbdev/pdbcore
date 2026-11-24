@@ -67,7 +67,9 @@ func WithFlags(values map[string]any) LoadOption {
 // naming the key it moved to (WithMoved), the reason it was removed
 // (WithRemoved) or the closest valid key. An environment variable with
 // the prefix is checked the same way when its first segment names a
-// section of dst (or of a moved or removed key), or nearly does; other
+// section of dst (or of a moved or removed key), or nearly does, or when
+// it starts with a section name and a doubled underscore
+// (PDBQ_ROLES__ALLOWED, a misspelt PDBQ_ROLES_ALLOWED); other
 // variables with the prefix (PDBQ_TEST_DATABASE_URL) are ignored. Values
 // are decoded with weak typing, so environment strings set booleans,
 // numbers, durations and lists. Validation is the caller's job.
@@ -115,13 +117,28 @@ func Load(envPrefix, path string, dst any, opts ...LoadOption) error {
 		if schema.known(key) {
 			continue
 		}
+		envPath := func(p string) string { return envName(envPrefix, p) }
 		top, _, _ := strings.Cut(key, ".")
+		hintKey := key
 		if !schema.section(top, o.hints) {
-			ek.Delete(key)
-			continue
+			fixed, ok := schema.underscoredSection(key, o.hints)
+			if !ok {
+				ek.Delete(key)
+				continue
+			}
+			hintKey = fixed
 		}
 		msg := fmt.Sprintf("unknown environment variable %s (%s)", envVars[key], key)
-		if hint := schema.unknownKey(key, o.hints, func(p string) string { return envName(envPrefix, p) }); hint != "" {
+		hint := ""
+		switch {
+		case hintKey != key && schema.known(hintKey):
+			hint = fmt.Sprintf("did you mean %s?", envPath(hintKey))
+		case hintKey != key:
+			hint = schema.unknownKey(hintKey, o.hints, envPath)
+		default:
+			hint = schema.unknownKey(key, o.hints, envPath)
+		}
+		if hint != "" {
 			msg += ": " + hint
 		}
 		errs = append(errs, msg)
