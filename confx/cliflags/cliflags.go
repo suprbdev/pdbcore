@@ -4,7 +4,13 @@
 package cliflags
 
 import (
+	"fmt"
+	"regexp"
+	"strings"
+
 	flag "github.com/spf13/pflag"
+
+	"github.com/suprbdev/pdbcore/confx"
 )
 
 // Changed returns the flags explicitly set on fs, minus any names in except
@@ -29,4 +35,27 @@ func Changed(fs *flag.FlagSet, except ...string) map[string]any {
 		out[f.Name] = f.Value.String()
 	})
 	return out
+}
+
+var unknownFlag = regexp.MustCompile(`^unknown flag: --([^\s=]+)$`)
+
+// Explain adds the moved-to, removed or closest-key hint of
+// [confx.FlagHint] to the error pflag returns for an unknown flag
+// (unknown flag: --rls.enabled becomes "unknown flag: --rls.enabled: moved
+// to --roles.switch"). Flags without a dot (--config, --output) are
+// command-local and left alone, as is any other error. dst and opts are the
+// defaults and the options the product passes to [confx.Load]. Install it
+// with cobra's SetFlagErrorFunc.
+func Explain(err error, dst any, opts ...confx.LoadOption) error {
+	if err == nil {
+		return nil
+	}
+	m := unknownFlag.FindStringSubmatch(err.Error())
+	if m == nil || !strings.Contains(m[1], ".") {
+		return err
+	}
+	if hint := confx.FlagHint(dst, m[1], opts...); hint != "" {
+		return fmt.Errorf("%w: %s", err, hint)
+	}
+	return err
 }
