@@ -8,8 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,19 +18,23 @@ import (
 	"github.com/suprbdev/pdbcore/introspect"
 )
 
-// Watcher triggers OnChange whenever the introspected catalog of Schemas
-// changes. The event trigger only notifies for DDL that can touch Schemas
-// (objects in them, objects without a schema such as grants and
-// extensions, and ALTERs that may move an object out of them); temp-schema
-// objects never notify. A notification or poll whose catalog hash equals
-// the last one applied does not call OnChange.
-type Watcher struct {
-	Pool         *pgxpool.Pool
-	Schemas      []string
-	Channel      string
+// Config configures a [Watcher].
+type Config struct {
+	// Pool is the database to watch; required.
+	Pool *pgxpool.Pool
+	// Schemas are the schemas introspected; empty means public.
+	Schemas []string
+	// Channel is the NOTIFY channel of the DDL event trigger: letters,
+	// digits and underscores, at most 63 bytes.
+	Channel string
+	// PollInterval is the hash-polling interval used when the event
+	// trigger cannot be installed.
 	PollInterval time.Duration
-	OnChange     func(cat *introspect.Catalog)
-	Log          *slog.Logger
+	// OnChange receives every changed catalog, with the context Run was
+	// given; required. It runs on Run's goroutine.
+	OnChange func(ctx context.Context, cat *introspect.Catalog)
+	// Log receives the watcher's messages; nil uses slog.Default().
+	Log *slog.Logger
 	// TriggerName names the ddl_command_end event trigger; the sql_drop
 	// trigger is TriggerName + "_drop" and the notify function they share
 	// is TriggerName + "_notify". Defaults to Channel + "_watch". Products
@@ -51,87 +55,113 @@ type Watcher struct {
 	// re-checks anyway; DDL in a still-open transaction that commits later
 	// is then not reported.
 	InstallWait time.Duration
-
-	lastHash  string
-	readyOnce sync.Once
-	ready     chan struct{}
 }
 
-func (w *Watcher) readyChan() chan struct{} {
-	w.readyOnce.Do(func() { w.ready = make(chan struct{}) })
-	return w.ready
+// Watcher calls [Config.OnChange] whenever the introspected catalog of the
+// configured schemas changes. The event trigger only notifies for DDL that
+// can touch them (objects in them, objects without a schema such as grants
+// and extensions, and ALTERs that may move an object out of them);
+// temp-schema objects never notify. A notification or poll whose catalog
+// hash equals the last one applied does not call OnChange. Create one with
+// [New].
+type Watcher struct {
+	cfg   Config
+	ready chan struct{}
 }
 
-// DefaultInstallWait is the default [Watcher.InstallWait].
+// DefaultInstallWait is the default [Config.InstallWait].
 const DefaultInstallWait = 30 * time.Second
 
 const installPollInterval = 50 * time.Millisecond
+
+// New validates cfg, fills in its defaults and returns the Watcher. It is
+// an error when Pool or OnChange is nil, or when Channel or TriggerName is
+// not a valid name or too long to install.
+func New(cfg Config) (*Watcher, error) {
+	if !validChannel(cfg.Channel) {
+		return nil, fmt.Errorf("watch: invalid channel name %q: only letters, digits and underscores are allowed", cfg.Channel)
+	}
+	if cfg.TriggerName == "" {
+		cfg.TriggerName = cfg.Channel + "_watch"
+	}
+	if !validChannel(cfg.TriggerName) {
+		return nil, fmt.Errorf("watch: invalid trigger name %q: only letters, digits and underscores are allowed", cfg.TriggerName)
+	}
+	if len(cfg.Channel) > maxIdentLen {
+		return nil, fmt.Errorf("watch: channel name %q is longer than %d bytes", cfg.Channel, maxIdentLen)
+	}
+	if len(cfg.TriggerName)+len(longestSuffix) > maxIdentLen {
+		return nil, fmt.Errorf("watch: trigger name %q is too long: with the %q suffix it must fit in %d bytes", cfg.TriggerName, longestSuffix, maxIdentLen)
+	}
+	if cfg.Pool == nil {
+		return nil, errors.New("watch: Pool is required")
+	}
+	if cfg.OnChange == nil {
+		return nil, errors.New("watch: OnChange is required")
+	}
+	if len(cfg.Schemas) == 0 {
+		cfg.Schemas = []string{"public"}
+	} else {
+		cfg.Schemas = slices.Clone(cfg.Schemas)
+	}
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
+	}
+	if cfg.InstallWait <= 0 {
+		cfg.InstallWait = DefaultInstallWait
+	}
+	return &Watcher{cfg: cfg, ready: make(chan struct{})}, nil
+}
 
 // Ready returns a channel that is closed once Run is listening for DDL
 // notifications, or, when the event trigger cannot be installed, once the
 // polling loop has started. Every change made after Ready is closed reaches
 // OnChange, as does any change made since InitialHash was taken. The channel
-// is never closed if Run returns an error before reaching that point. It may
-// be called before Run.
+// is never closed if Run returns an error before reaching that point.
 //
 // When InitialHash is set and the event trigger was installed, Ready is
 // closed only after every transaction that was open at install time has
 // ended and the catalog has been re-checked against InitialHash, because
 // DDL run in such a transaction before the trigger existed is neither
 // notified nor visible until it commits. A long-running transaction
-// therefore delays Ready, up to [Watcher.InstallWait].
+// therefore delays Ready, up to [Config.InstallWait].
 func (w *Watcher) Ready() <-chan struct{} {
-	return w.readyChan()
+	return w.ready
+}
+
+// run is the state of one Run: the hash of the catalog last applied.
+type run struct {
+	*Watcher
+	lastHash string
 }
 
 // Run blocks until ctx is cancelled. It tries to install the event trigger;
-// on permission failure it degrades to hash polling with a warning.
+// on permission failure it degrades to hash polling with a warning. Run
+// must be called at most once.
 func (w *Watcher) Run(ctx context.Context) error {
-	if w.Log == nil {
-		w.Log = slog.Default()
-	}
-	if !validChannel(w.Channel) {
-		return fmt.Errorf("watch: invalid channel name %q: only letters, digits and underscores are allowed", w.Channel)
-	}
-	if w.TriggerName == "" {
-		w.TriggerName = w.Channel + "_watch"
-	}
-	if !validChannel(w.TriggerName) {
-		return fmt.Errorf("watch: invalid trigger name %q: only letters, digits and underscores are allowed", w.TriggerName)
-	}
-	if len(w.Channel) > maxIdentLen {
-		return fmt.Errorf("watch: channel name %q is longer than %d bytes", w.Channel, maxIdentLen)
-	}
-	if len(w.TriggerName)+len(longestSuffix) > maxIdentLen {
-		return fmt.Errorf("watch: trigger name %q is too long: with the %q suffix it must fit in %d bytes", w.TriggerName, longestSuffix, maxIdentLen)
-	}
-	if len(w.Schemas) == 0 {
-		w.Schemas = []string{"public"}
-	}
-	w.lastHash = w.InitialHash
-	ready := w.readyChan()
-	conn, err := w.Pool.Acquire(ctx)
+	r := &run{Watcher: w, lastHash: w.cfg.InitialHash}
+	conn, err := w.cfg.Pool.Acquire(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Release()
-	if _, err := conn.Exec(ctx, "LISTEN "+quoteIdent(w.Channel)); err != nil {
+	if _, err := conn.Exec(ctx, "LISTEN "+quoteIdent(w.cfg.Channel)); err != nil {
 		return err
 	}
 	if err := w.installTrigger(ctx); err != nil {
-		w.Log.Warn("watch: cannot install DDL event trigger; falling back to polling",
-			"err", err, "interval", w.PollInterval)
-		return w.poll(ctx)
+		w.cfg.Log.Warn("watch: cannot install DDL event trigger; falling back to polling",
+			"err", err, "interval", w.cfg.PollInterval)
+		return r.poll(ctx)
 	}
-	w.Log.Info("watch: DDL event trigger installed", "channel", w.Channel)
-	if w.lastHash != "" {
+	w.cfg.Log.Info("watch: DDL event trigger installed", "channel", w.cfg.Channel)
+	if r.lastHash != "" {
 		if err := w.waitInstallTxns(ctx); err != nil {
 			return nil
 		}
-		w.reintrospect(ctx)
+		r.reintrospect(ctx)
 	}
-	close(ready)
-	return w.listen(ctx, conn.Conn())
+	close(w.ready)
+	return r.listen(ctx, conn.Conn())
 }
 
 // waitInstallTxns blocks until every transaction holding an xid below the
@@ -141,26 +171,23 @@ func (w *Watcher) Run(ctx context.Context) error {
 // trigger. It returns the context error if ctx is cancelled.
 func (w *Watcher) waitInstallTxns(ctx context.Context) error {
 	var xmax string
-	if err := w.Pool.QueryRow(ctx, `SELECT pg_snapshot_xmax(pg_current_snapshot())::text`).Scan(&xmax); err != nil {
-		w.Log.Warn("watch: cannot snapshot open transactions; re-checking immediately", "err", err)
+	if err := w.cfg.Pool.QueryRow(ctx, `SELECT pg_snapshot_xmax(pg_current_snapshot())::text`).Scan(&xmax); err != nil {
+		w.cfg.Log.Warn("watch: cannot snapshot open transactions; re-checking immediately", "err", err)
 		return nil
 	}
-	wait := w.InstallWait
-	if wait <= 0 {
-		wait = DefaultInstallWait
-	}
+	wait := w.cfg.InstallWait
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	tick := time.NewTicker(installPollInterval)
 	defer tick.Stop()
 	for {
 		var done bool
-		err := w.Pool.QueryRow(ctx, `SELECT pg_snapshot_xmin(pg_current_snapshot()) >= $1::xid8`, xmax).Scan(&done)
+		err := w.cfg.Pool.QueryRow(ctx, `SELECT pg_snapshot_xmin(pg_current_snapshot()) >= $1::xid8`, xmax).Scan(&done)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			w.Log.Warn("watch: cannot poll open transactions; re-checking immediately", "err", err)
+			w.cfg.Log.Warn("watch: cannot poll open transactions; re-checking immediately", "err", err)
 			return nil
 		}
 		if done {
@@ -170,7 +197,7 @@ func (w *Watcher) waitInstallTxns(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			w.Log.Warn("watch: transactions open at trigger install still running; re-checking anyway", "wait", wait)
+			w.cfg.Log.Warn("watch: transactions open at trigger install still running; re-checking anyway", "wait", wait)
 			return nil
 		case <-tick.C:
 		}
@@ -181,18 +208,18 @@ func (w *Watcher) waitInstallTxns(ctx context.Context) error {
 // ddl_command_end and sql_drop event triggers when missing. Installs from
 // older versions (one unfiltered trigger) are upgraded in place.
 func (w *Watcher) installTrigger(ctx context.Context) error {
-	fnName := w.TriggerName + "_notify"
+	fnName := w.cfg.TriggerName + "_notify"
 	fn := fmt.Sprintf(`
 		CREATE OR REPLACE FUNCTION %s() RETURNS event_trigger
-		LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS %s;`, quoteIdent(fnName), dollarQuote(notifyBody(w.Channel, w.Schemas)))
-	if _, err := w.Pool.Exec(ctx, fn); err != nil {
+		LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS %s;`, quoteIdent(fnName), dollarQuote(notifyBody(w.cfg.Channel, w.cfg.Schemas)))
+	if _, err := w.cfg.Pool.Exec(ctx, fn); err != nil {
 		return err
 	}
 	for _, t := range []struct{ name, event string }{
-		{w.TriggerName, "ddl_command_end"},
-		{w.TriggerName + "_drop", "sql_drop"},
+		{w.cfg.TriggerName, "ddl_command_end"},
+		{w.cfg.TriggerName + "_drop", "sql_drop"},
 	} {
-		_, err := w.Pool.Exec(ctx, fmt.Sprintf(`
+		_, err := w.cfg.Pool.Exec(ctx, fmt.Sprintf(`
 		DO $$ BEGIN
 			IF NOT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = %s) THEN
 				CREATE EVENT TRIGGER %s ON %s EXECUTE FUNCTION %s();
@@ -248,7 +275,7 @@ BEGIN
 END`, watched, quoteLit(channel))
 }
 
-func (w *Watcher) listen(ctx context.Context, conn *pgx.Conn) error {
+func (r *run) listen(ctx context.Context, conn *pgx.Conn) error {
 	for {
 		_, err := conn.WaitForNotification(ctx)
 		if err != nil {
@@ -260,7 +287,7 @@ func (w *Watcher) listen(ctx context.Context, conn *pgx.Conn) error {
 		// Debounce bursts of DDL (e.g. a migration) before re-introspecting.
 		time.Sleep(250 * time.Millisecond)
 		drainNotifications(ctx, conn)
-		w.reintrospect(ctx)
+		r.reintrospect(ctx)
 	}
 }
 
@@ -275,59 +302,60 @@ func drainNotifications(ctx context.Context, conn *pgx.Conn) {
 	}
 }
 
-func (w *Watcher) poll(ctx context.Context) error {
-	ticker := time.NewTicker(w.PollInterval)
+func (r *run) poll(ctx context.Context) error {
+	ticker := time.NewTicker(r.cfg.PollInterval)
 	defer ticker.Stop()
-	close(w.readyChan())
+	close(r.ready)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			cat, err := introspect.Introspect(ctx, w.Pool, w.Schemas)
+			cat, err := introspect.Introspect(ctx, r.cfg.Pool, r.cfg.Schemas)
 			if err != nil {
-				w.Log.Warn("watch: poll introspection failed", "err", err)
+				r.cfg.Log.Warn("watch: poll introspection failed", "err", err)
 				continue
 			}
 			hash, err := cat.Hash()
 			if err != nil {
 				continue
 			}
-			if w.lastHash == "" {
-				w.lastHash = hash
+			if r.lastHash == "" {
+				r.lastHash = hash
 				continue
 			}
-			if hash != w.lastHash {
-				w.lastHash = hash
-				w.Log.Info("watch: schema drift detected (poll)")
-				w.OnChange(cat)
+			if hash != r.lastHash {
+				r.lastHash = hash
+				r.cfg.Log.Info("watch: schema drift detected (poll)")
+				r.cfg.OnChange(ctx, cat)
 			}
 		}
 	}
 }
 
-func (w *Watcher) reintrospect(ctx context.Context) {
-	cat, err := introspect.Introspect(ctx, w.Pool, w.Schemas)
+func (r *run) reintrospect(ctx context.Context) {
+	cat, err := introspect.Introspect(ctx, r.cfg.Pool, r.cfg.Schemas)
 	if err != nil {
-		w.Log.Error("watch: re-introspection failed", "err", err)
+		r.cfg.Log.Error("watch: re-introspection failed", "err", err)
 		return
 	}
 	if hash, err := cat.Hash(); err == nil {
-		if hash == w.lastHash {
-			w.Log.Debug("watch: DDL left the catalog unchanged; not rebuilding")
+		if hash == r.lastHash {
+			r.cfg.Log.Debug("watch: DDL left the catalog unchanged; not rebuilding")
 			return
 		}
-		w.lastHash = hash
+		r.lastHash = hash
 	}
-	w.Log.Info("watch: schema changed, rebuilding")
-	w.OnChange(cat)
+	r.cfg.Log.Info("watch: schema changed, rebuilding")
+	r.cfg.OnChange(ctx, cat)
 }
 
 // maxIdentLen is PostgreSQL's identifier limit (NAMEDATALEN - 1); longer
 // names are silently truncated, which could make two triggers collide.
 const maxIdentLen = 63
 
-// longestSuffix is the longest suffix installTrigger appends to TriggerName.
+// longestSuffix is the longest suffix installTrigger appends to the
+// trigger name.
 const longestSuffix = "_notify"
 
 func quoteIdent(s string) string {

@@ -113,3 +113,49 @@ Go API changes:
   `CORSPolicy{Origins, AllowMethods, ExposeHeaders}`; CORS and gzip add to
   `Vary` instead of replacing it.
 - The test fixture's policies read `jwt.claims.user_id`.
+
+### API hygiene
+
+- **`confx.Load(envPrefix, path, dst, opts...)`** no longer takes a pflag
+  set. Pass command-line values with `confx.WithFlags(values)` (koanf path
+  to value); `confx/cliflags.Changed(fs, except...)` builds that map from
+  the flags set on a pflag set and replaces `confx.ChangedFlags`.
+- **`confx.WithRemoved(map[old]reason)`** names keys removed without a
+  replacement: `unknown key transactions.mutations: removed: <reason>`.
+  `confx.MovedKeys`, `ParseTrustedProxy` and `ValidChannelName` are no
+  longer exported; `TX.Mutations` is gone (no product read it).
+- **Neutral doc tags.** The `schema.cache_path`, `auth.headers.prefix` and
+  `errors.detail` docs no longer name a product; products that want their
+  own wording pass `confx.WithDoc`.
+- **One error-message API.** `pgexec.SanitizeMessage(pgErr, strict)` is
+  gone: `pgexec.Classify(err, detail).Message` renders the same text
+  (`Prod` for `strict=false`, `Strict` for `strict=true`).
+- **Rejecting parsers.** `pgexec.ParseIsolation` returns
+  `(pgx.TxIsoLevel, error)` and `pgexec.ParseDetail` returns
+  `(Detail, error)`; neither falls back to a default any more (`Detail`
+  gains `String`). `confx.ValidateTX` reports
+  `transactions.isolation: "x" is not 'read_committed', 'repeatable_read' or 'serializable'`.
+  `contract.ParsePolicy` accepts `""`, `include` and `exclude`;
+  `confx.Contract.Default` is a `contract.Policy`, and `Contract.View`
+  returns `(*Catalog, Summary, error)`, failing on an unknown policy.
+  `Contract.Apply`, `OmitAll` and the `CatalogHook` method
+  `TransformCatalog` are gone: use `View`.
+- **`postgis` output.** `OutputSQL(ref, Output{JSON, Precision})` replaces
+  `OutputSQL`, `OutputJSONSQL`, `OutputPrecisionSQL` and
+  `OutputJSONPrecisionSQL`; `Derived.SQL(ref, f, Output)` replaces
+  `SQL`, `JSONSQL`, `PrecisionSQL` and `JSONPrecisionSQL`;
+  `RasterAccessor.SQL(ref, Output)` replaces `SQL` and `JSONSQL`.
+- **Accessors instead of mutable variables.** `postgis.Ops()`,
+  `postgis.Deriveds()`, `postgis.RasterAccessors()` and
+  `contrib.VectorTypes()` return fresh copies.
+- **Renamed fields.** `postgis.Op.Index` is `Indexable` and `postgis.Op.Arg`
+  is `OperandType`, so they no longer clash with `contrib.Op.Index`
+  (`[]IndexHint`) and `contrib.Op.Arg` (`ArgKind`).
+- **Pruned exports.** `jwtmint.Sign`, `postgis.OpsDoc`, `postgis.OpNames`
+  and `postgis.DerivedSuffixes` are gone.
+- **`watch.New(watch.Config{...}) (*Watcher, error)`** replaces the
+  `Watcher` struct literal. It validates the channel and trigger names
+  (and requires `Pool` and `OnChange`) up front, fills in the defaults
+  without `Run` writing back into the configuration, and `OnChange` is
+  `func(ctx context.Context, cat *introspect.Catalog)` with `Run`'s
+  context.

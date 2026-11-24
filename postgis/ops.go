@@ -3,27 +3,30 @@ package postgis
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 )
 
-// Op describes one spatial filter operator: its field name (as exposed by
-// pdbq's GeometryFilterOps; pdbr maps it to its own grammar), the input shape
-// it takes, and how it renders as SQL.
+// Op describes one spatial filter operator: its name (products expose it
+// under their own grammar), the input shape it takes, and how it renders
+// as SQL.
 type Op struct {
-	// Name is the operator's field name (pdbq: inside GeometryFilterOps).
+	// Name is the operator's name, e.g. intersects or dwithin.
 	Name string
-	// Arg is the operand type name (pdbq SDL spelling).
-	Arg string
+	// OperandType names the operand's type: [TypeName] for a geometry,
+	// "BBoxInput" for an envelope, "DWithinInput" for a geometry and
+	// distance, "Boolean" for isNull. [Op.Kind] classifies the same shape.
+	OperandType string
 	// Description documents the operator in the generated schema.
 	Description string
-	// Index reports whether the operator can use a GiST index directly.
+	// Indexable reports whether the operator can use a GiST index directly.
 	// Index-usable operators are documented as such so users can tell the
 	// cheap ones from the exact-but-expensive ones. For an operator without
 	// a geography overload the flag describes geometry columns only: a
 	// geography column is cast to geometry, which a GiST index on the
 	// geography column cannot serve (an expression index on col::geometry
 	// can).
-	Index bool
+	Indexable bool
 	// Geography reports whether PostGIS provides a geography overload. The
 	// others (ST_Within, ST_Contains, ~, @, ...) exist for geometry only, so
 	// a compiler must cast a geography column and its operand to geometry
@@ -76,8 +79,7 @@ func fn(name string) func(string, string, []string) string {
 	}
 }
 
-// Ops is the spatial operator vocabulary exposed on every geometry and
-// geography column.
+// ops is the spatial operator vocabulary returned by [Ops].
 //
 // Ordering matters only for schema readability: the index-usable bounding-box
 // operators come first because they are the ones that stay fast on large
@@ -92,171 +94,178 @@ func fn(name string) func(string, string, []string) string {
 // bboxIntersectsND, bboxIntersects2D, ...), takes a geometry, as connection-filter-postgis does:
 // PostGIS compares against that geometry's bounding box, and a geometry can
 // carry the Z/M extent that &&& needs where an envelope cannot.
-var Ops = []Op{
+var ops = []Op{
 	{
-		Name: "bboxIntersects", Arg: "BBoxInput", Index: true, Geography: true,
+		Name: "bboxIntersects", OperandType: "BBoxInput", Indexable: true, Geography: true,
 		Description: "Bounding boxes overlap (&&). Index-usable; the cheap first pass for viewport queries.",
 		render:      binary("&&"),
 	},
 	{
-		Name: "bboxContains", Arg: "BBoxInput", Index: true,
+		Name: "bboxContains", OperandType: "BBoxInput", Indexable: true,
 		Description: "This column's bounding box contains the given box (~).",
 		render:      binary("~"),
 	},
 	{
-		Name: "bboxContainedBy", Arg: "BBoxInput", Index: true,
+		Name: "bboxContainedBy", OperandType: "BBoxInput", Indexable: true,
 		Description: "This column's bounding box is contained by the given box (@).",
 		render:      binary("@"),
 	},
 	{
-		Name: "intersects", Arg: TypeName, Index: true, Geography: true,
+		Name: "intersects", OperandType: TypeName, Indexable: true, Geography: true,
 		Description: "Geometries share any portion of space (ST_Intersects).",
 		render:      fn("ST_Intersects"),
 	},
 	{
-		Name: "disjoint", Arg: TypeName,
+		Name: "disjoint", OperandType: TypeName,
 		Description: "Geometries share no space (ST_Disjoint). Cannot use an index.",
 		render:      fn("ST_Disjoint"),
 	},
 	{
-		Name: "contains", Arg: TypeName, Index: true,
+		Name: "contains", OperandType: TypeName, Indexable: true,
 		Description: "This column's geometry contains the given geometry (ST_Contains).",
 		render:      fn("ST_Contains"),
 	},
 	{
-		Name: "containsProperly", Arg: TypeName, Index: true,
+		Name: "containsProperly", OperandType: TypeName, Indexable: true,
 		Description: "Contains with no boundary contact (ST_ContainsProperly).",
 		render:      fn("ST_ContainsProperly"),
 	},
 	{
-		Name: "within", Arg: TypeName, Index: true,
+		Name: "within", OperandType: TypeName, Indexable: true,
 		Description: "This column's geometry lies within the given geometry (ST_Within).",
 		render:      fn("ST_Within"),
 	},
 	{
-		Name: "covers", Arg: TypeName, Index: true, Geography: true,
+		Name: "covers", OperandType: TypeName, Indexable: true, Geography: true,
 		Description: "No point of the given geometry lies outside this column (ST_Covers).",
 		render:      fn("ST_Covers"),
 	},
 	{
-		Name: "coveredBy", Arg: TypeName, Index: true, Geography: true,
+		Name: "coveredBy", OperandType: TypeName, Indexable: true, Geography: true,
 		Description: "No point of this column lies outside the given geometry (ST_CoveredBy).",
 		render:      fn("ST_CoveredBy"),
 	},
 	{
-		Name: "crosses", Arg: TypeName, Index: true,
+		Name: "crosses", OperandType: TypeName, Indexable: true,
 		Description: "Geometries cross (ST_Crosses).",
 		render:      fn("ST_Crosses"),
 	},
 	{
-		Name: "overlaps", Arg: TypeName, Index: true,
+		Name: "overlaps", OperandType: TypeName, Indexable: true,
 		Description: "Geometries overlap at the same dimension (ST_Overlaps).",
 		render:      fn("ST_Overlaps"),
 	},
 	{
-		Name: "touches", Arg: TypeName, Index: true,
+		Name: "touches", OperandType: TypeName, Indexable: true,
 		Description: "Geometries touch at a boundary but interiors do not intersect (ST_Touches).",
 		render:      fn("ST_Touches"),
 	},
 	{
-		Name: "equals", Arg: TypeName, Index: true,
+		Name: "equals", OperandType: TypeName, Indexable: true,
 		Description: "Geometries are spatially equal, ignoring vertex order (ST_Equals).",
 		render:      fn("ST_Equals"),
 	},
 	{
-		Name: "dwithin", Arg: "DWithinInput", Index: true, Geography: true,
+		Name: "dwithin", OperandType: "DWithinInput", Indexable: true, Geography: true,
 		Description: "Within the given distance of the geometry (ST_DWithin). Distance is metres for geography, SRID units for geometry.",
 		render: func(col, geom string, extra []string) string {
 			return fmt.Sprintf("ST_DWithin(%s, %s, %s)", col, geom, extra[0])
 		},
 	},
 	{
-		Name: "beyond", Arg: "DWithinInput", Geography: true,
+		Name: "beyond", OperandType: "DWithinInput", Geography: true,
 		Description: "Further than the given distance from the geometry (ST_DWithin negated).",
 		render: func(col, geom string, extra []string) string {
 			return fmt.Sprintf("NOT ST_DWithin(%s, %s, %s)", col, geom, extra[0])
 		},
 	},
 	{
-		Name: "isNull", Arg: "Boolean",
+		Name: "isNull", OperandType: "Boolean",
 		Description: "Test whether the column is null.",
 		render:      nil, // handled structurally by the compiler
 	},
 	{
-		Name: "bboxLeftOf", Arg: TypeName, Index: true,
+		Name: "bboxLeftOf", OperandType: TypeName, Indexable: true,
 		Description: "This column's bounding box is strictly to the left of the given geometry's (<<).",
 		render:      binary("<<"),
 	},
 	{
-		Name: "bboxRightOf", Arg: TypeName, Index: true,
+		Name: "bboxRightOf", OperandType: TypeName, Indexable: true,
 		Description: "This column's bounding box is strictly to the right of the given geometry's (>>).",
 		render:      binary(">>"),
 	},
 	{
-		Name: "bboxBelow", Arg: TypeName, Index: true,
+		Name: "bboxBelow", OperandType: TypeName, Indexable: true,
 		Description: "This column's bounding box is strictly below the given geometry's (<<|).",
 		render:      binary("<<|"),
 	},
 	{
-		Name: "bboxAbove", Arg: TypeName, Index: true,
+		Name: "bboxAbove", OperandType: TypeName, Indexable: true,
 		Description: "This column's bounding box is strictly above the given geometry's (|>>).",
 		render:      binary("|>>"),
 	},
 	{
-		Name: "bboxOverlapsOrLeftOf", Arg: TypeName, Index: true,
+		Name: "bboxOverlapsOrLeftOf", OperandType: TypeName, Indexable: true,
 		Description: "This column's bounding box overlaps or is to the left of the given geometry's (&<).",
 		render:      binary("&<"),
 	},
 	{
-		Name: "bboxOverlapsOrRightOf", Arg: TypeName, Index: true,
+		Name: "bboxOverlapsOrRightOf", OperandType: TypeName, Indexable: true,
 		Description: "This column's bounding box overlaps or is to the right of the given geometry's (&>).",
 		render:      binary("&>"),
 	},
 	{
-		Name: "bboxOverlapsOrBelow", Arg: TypeName, Index: true,
+		Name: "bboxOverlapsOrBelow", OperandType: TypeName, Indexable: true,
 		Description: "This column's bounding box overlaps or is below the given geometry's (&<|).",
 		render:      binary("&<|"),
 	},
 	{
-		Name: "bboxOverlapsOrAbove", Arg: TypeName, Index: true,
+		Name: "bboxOverlapsOrAbove", OperandType: TypeName, Indexable: true,
 		Description: "This column's bounding box overlaps or is above the given geometry's (|&>).",
 		render:      binary("|&>"),
 	},
 	{
-		Name: "bboxEquals", Arg: TypeName, Index: true,
+		Name: "bboxEquals", OperandType: TypeName, Indexable: true,
 		Description: "This column's bounding box is the same as the given geometry's (~=).",
 		render:      binary("~="),
 	},
 	{
-		Name: "exactlyEquals", Arg: TypeName, Geography: true,
+		Name: "exactlyEquals", OperandType: TypeName, Geography: true,
 		Description: "Same coordinates in the same order and the same SRID (=). Uses a B-tree index, not a GiST one.",
 		render:      binary("="),
 	},
 	{
-		Name: "orderingEquals", Arg: TypeName, Index: true,
+		Name: "orderingEquals", OperandType: TypeName, Indexable: true,
 		Description: "Geometries are equal and their vertices are in the same order (ST_OrderingEquals).",
 		render:      fn("ST_OrderingEquals"),
 	},
 	{
-		Name: "intersects3D", Arg: TypeName, Index: true,
+		Name: "intersects3D", OperandType: TypeName, Indexable: true,
 		Description: "Geometries share any portion of 3D space (ST_3DIntersects). The default 2D GiST index prefilters on the 2D bounding box; an n-D GiST index (gist_geometry_ops_nd) also prunes on Z.",
 		render:      fn("ST_3DIntersects"),
 	},
 	{
-		Name: "bboxIntersectsND", Arg: TypeName, Index: true,
+		Name: "bboxIntersectsND", OperandType: TypeName, Indexable: true,
 		Description: "n-D bounding boxes (including Z and M) overlap (&&&). Uses an n-D GiST index (gist_geometry_ops_nd), not the default 2D one.",
 		render:      binary("&&&"),
 	},
 	{
-		Name: "bboxIntersects2D", Arg: TypeName, Index: true, Geography: true,
+		Name: "bboxIntersects2D", OperandType: TypeName, Indexable: true, Geography: true,
 		Description: "This column's 2D bounding box overlaps the given geometry's (&&).",
 		render:      binary("&&"),
 	},
 }
 
-// OpByName looks up an operator by field name.
+// Ops returns the spatial operator vocabulary exposed on every geometry
+// and geography column, in declaration order: the index-usable
+// bounding-box operators first, then the exact DE-9IM predicates. The list
+// is append-only, so generated schemas only grow at the end. The slice is
+// a fresh copy.
+func Ops() []Op { return slices.Clone(ops) }
+
+// OpByName looks up an operator by name.
 func OpByName(name string) (Op, bool) {
-	for _, op := range Ops {
+	for _, op := range ops {
 		if op.Name == name {
 			return op, true
 		}
@@ -287,24 +296,40 @@ func BBoxSQL(minX, minY, maxX, maxY string, srid int, f Flavour) string {
 	return expr
 }
 
-// OutputSQL renders a spatial column as the GeoJSON text the response carries.
-//
-// ST_AsGeoJSON returns text, so the result is re-parsed into jsonb to embed it
-// as a real JSON object rather than a JSON-encoded string. No NULL guard is
-// needed: ST_AsGeoJSON is STRICT (NULL in, NULL out) and NULL::jsonb is NULL —
-// and ref may be a computed-column function call, which a CASE guard would
-// evaluate twice.
-func OutputSQL(ref string) string {
-	return "ST_AsGeoJSON(" + ref + ")::jsonb"
+// Output selects how [OutputSQL] renders GeoJSON. The zero Output renders
+// jsonb with PostGIS's default precision.
+type Output struct {
+	// JSON renders json instead of jsonb. It skips the jsonb parse and
+	// re-serialisation, so it is the cheaper choice when the value is only
+	// embedded in a response (json_build_object, json_agg) and never
+	// compared, grouped or aggregated with jsonb functions.
+	JSON bool
+	// Precision rounds the coordinates to that many decimal places
+	// (ST_AsGeoJSON's maxdecimaldigits; PostGIS defaults to 9, 6 is about
+	// 10 cm on lon/lat data and shrinks payloads substantially). It is the
+	// placeholder of an integer parameter validated with
+	// [CheckPrecision], so the SQL text does not depend on its value; ""
+	// keeps the default.
+	Precision string
 }
 
-// OutputJSONSQL is [OutputSQL] producing json instead of jsonb. It skips the
-// jsonb parse and re-serialisation, so it is the cheaper choice when the value
-// is only embedded in a response (json_build_object, json_agg) and never
-// compared, grouped or aggregated with jsonb functions. Like [OutputSQL] it
-// evaluates ref once and yields NULL for NULL.
-func OutputJSONSQL(ref string) string {
-	return "ST_AsGeoJSON(" + ref + ")::json"
+// OutputSQL renders a spatial value as the GeoJSON a response carries.
+//
+// ST_AsGeoJSON returns text, so the result is re-parsed into jsonb (or json,
+// see [Output.JSON]) to embed it as a real JSON object rather than a
+// JSON-encoded string. No NULL guard is needed: ST_AsGeoJSON is STRICT (NULL
+// in, NULL out) and NULL::jsonb is NULL — and ref may be a computed-column
+// function call, which a CASE guard would evaluate twice.
+func OutputSQL(ref string, o Output) string {
+	args := ref
+	if o.Precision != "" {
+		args += ", " + cast(o.Precision, "int4")
+	}
+	typ := "jsonb"
+	if o.JSON {
+		typ = "json"
+	}
+	return "ST_AsGeoJSON(" + args + ")::" + typ
 }
 
 // MaxPrecision is the largest GeoJSON precision consumers accept: 15
@@ -319,21 +344,6 @@ func CheckPrecision(digits int64) error {
 		return fmt.Errorf("precision must be an integer between 0 and %d", MaxPrecision)
 	}
 	return nil
-}
-
-// OutputPrecisionSQL is [OutputSQL] with the coordinates rounded to digits
-// decimal places (ST_AsGeoJSON's maxdecimaldigits; PostGIS defaults to 9,
-// 6 is about 10 cm on lon/lat data and shrinks payloads substantially).
-// digits is the placeholder of an integer parameter validated with
-// [CheckPrecision], so the SQL text does not depend on its value.
-func OutputPrecisionSQL(ref, digits string) string {
-	return "ST_AsGeoJSON(" + ref + ", " + cast(digits, "int4") + ")::jsonb"
-}
-
-// OutputJSONPrecisionSQL is [OutputPrecisionSQL] producing json instead of
-// jsonb (see [OutputJSONSQL]).
-func OutputJSONPrecisionSQL(ref, digits string) string {
-	return "ST_AsGeoJSON(" + ref + ", " + cast(digits, "int4") + ")::json"
 }
 
 // BufferCost is the cost, in column reads per returned row, a consumer's cost
@@ -374,7 +384,8 @@ func cast(ph, typ string) string {
 type Derived struct {
 	// Suffix is appended to the column's field name.
 	Suffix string
-	// Type is the generated field's type name (pdbq SDL spelling).
+	// Type is the generated field's type name: Boolean, Int, Float, String
+	// or [TypeName].
 	Type string
 	// Description documents the field.
 	Description string
@@ -387,17 +398,8 @@ type Derived struct {
 	applies func(geomSubtype) bool
 }
 
-// Deriveds are the derived accessors generated for every spatial column.
-//
-// Each is a pure function of the column, so they compile into the same single
-// statement as an ordinary column read — no extra round trip. Accessors that
-// PostGIS only defines for one geometry type (X, Y, Z, M, StartPoint,
-// EndPoint) render a CASE guard on ST_GeometryType that yields NULL for every
-// other type instead of an error, so their SQL references the column twice.
-// [Derived.Applies] reports which accessors are worth exposing once a
-// column's typmod is known. The list is append-only so generated schemas
-// only grow at the end.
-var Deriveds = []Derived{
+// deriveds backs [Deriveds]. The list is append-only.
+var deriveds = []Derived{
 	{
 		Suffix: "Area", Type: "Float",
 		Description: "Area of the geometry (ST_Area): square metres for geography, SRID units for geometry.",
@@ -691,9 +693,20 @@ func (d Derived) AppliesTo(subtype string, hasZ, hasM bool) bool {
 	return d.applies(st)
 }
 
+// Deriveds returns the derived accessors generated for every spatial
+// column, in declaration order (append-only, so generated schemas only
+// grow at the end). Each is a pure function of the column, so it compiles
+// into the same single statement as an ordinary column read. Accessors
+// that PostGIS only defines for one geometry type (X, Y, Z, M, StartPoint,
+// EndPoint) render a CASE guard on ST_GeometryType that yields NULL for
+// every other type instead of an error, so their SQL references the
+// column twice. [Derived.AppliesTo] reports which accessors are worth
+// exposing once a column's typmod is known. The slice is a fresh copy.
+func Deriveds() []Derived { return slices.Clone(deriveds) }
+
 // DerivedBySuffix looks up a derived accessor.
 func DerivedBySuffix(suffix string) (Derived, bool) {
-	for _, d := range Deriveds {
+	for _, d := range deriveds {
 		if d.Suffix == suffix {
 			return d, true
 		}
@@ -701,43 +714,13 @@ func DerivedBySuffix(suffix string) (Derived, bool) {
 	return Derived{}, false
 }
 
-// SQL renders the derived accessor over a column reference, wrapping geometry
-// valued results as GeoJSON.
-func (d Derived) SQL(ref string, f Flavour) string {
+// SQL renders the derived accessor over a column reference, rendering a
+// geometry valued result as GeoJSON with o (see [OutputSQL]); accessors
+// that return no geometry ignore o.
+func (d Derived) SQL(ref string, f Flavour, o Output) string {
 	expr := d.sql(ref, f)
 	if d.GeoJSON {
-		return OutputSQL(expr)
-	}
-	return expr
-}
-
-// JSONSQL is [Derived.SQL] with geometry valued results rendered as json
-// rather than jsonb (see [OutputJSONSQL]); other accessors are unchanged.
-func (d Derived) JSONSQL(ref string, f Flavour) string {
-	expr := d.sql(ref, f)
-	if d.GeoJSON {
-		return OutputJSONSQL(expr)
-	}
-	return expr
-}
-
-// PrecisionSQL is [Derived.SQL] with a geometry valued result rendered by
-// [OutputPrecisionSQL]; accessors that return no geometry ignore digits.
-func (d Derived) PrecisionSQL(ref string, f Flavour, digits string) string {
-	expr := d.sql(ref, f)
-	if d.GeoJSON {
-		return OutputPrecisionSQL(expr, digits)
-	}
-	return expr
-}
-
-// JSONPrecisionSQL is [Derived.JSONSQL] with a geometry valued result
-// rendered by [OutputJSONPrecisionSQL]; accessors that return no geometry
-// ignore digits.
-func (d Derived) JSONPrecisionSQL(ref string, f Flavour, digits string) string {
-	expr := d.sql(ref, f)
-	if d.GeoJSON {
-		return OutputJSONPrecisionSQL(expr, digits)
+		return OutputSQL(expr, o)
 	}
 	return expr
 }
@@ -787,31 +770,4 @@ func SpheroidDistanceSQL(col, geom string) string {
 // operator PostGIS optimises for ORDER BY.
 func KNNSQL(col, geom string) string {
 	return fmt.Sprintf("%s <-> %s", col, geom)
-}
-
-// DerivedSuffixes returns the accessor suffixes in declaration order.
-func DerivedSuffixes() []string {
-	out := make([]string, len(Deriveds))
-	for i, d := range Deriveds {
-		out[i] = d.Suffix
-	}
-	return out
-}
-
-// OpNames returns the operator names in declaration order.
-func OpNames() []string {
-	out := make([]string, len(Ops))
-	for i, op := range Ops {
-		out[i] = op.Name
-	}
-	return out
-}
-
-// String renders the operator vocabulary for documentation/debugging.
-func OpsDoc() string {
-	var b strings.Builder
-	for _, op := range Ops {
-		fmt.Fprintf(&b, "%s(%s): %s\n", op.Name, op.Arg, op.Description)
-	}
-	return b.String()
 }

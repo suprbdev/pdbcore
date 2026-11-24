@@ -13,27 +13,54 @@ import (
 	"github.com/suprbdev/pdbcore/introspect"
 )
 
-func TestRunRejectsInvalidNames(t *testing.T) {
-	w := &Watcher{Channel: "bad$$chan"}
-	if err := w.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid channel name") {
-		t.Fatalf("err = %v", err)
+func TestNewRejectsInvalidConfig(t *testing.T) {
+	ok := Config{Pool: &pgxpool.Pool{}, Channel: "ok", OnChange: func(context.Context, *introspect.Catalog) {}}
+	cases := []struct {
+		edit func(*Config)
+		want string
+	}{
+		{func(c *Config) { c.Channel = "bad$$chan" }, "invalid channel name"},
+		{func(c *Config) { c.TriggerName = "no-dashes" }, "invalid trigger name"},
+		{func(c *Config) { c.Channel = strings.Repeat("c", 64) }, "longer than 63 bytes"},
+		{func(c *Config) { c.TriggerName = strings.Repeat("t", 57) }, "is too long"},
+		{func(c *Config) { c.Channel = strings.Repeat("c", 51) }, "is too long"},
+		{func(c *Config) { c.Pool = nil }, "Pool is required"},
+		{func(c *Config) { c.OnChange = nil }, "OnChange is required"},
 	}
-	w = &Watcher{Channel: "ok", TriggerName: "no-dashes"}
-	if err := w.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid trigger name") {
-		t.Fatalf("err = %v", err)
+	for _, tc := range cases {
+		cfg := ok
+		tc.edit(&cfg)
+		if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("want %q, err = %v", tc.want, err)
+		}
 	}
-	w = &Watcher{Channel: strings.Repeat("c", 64)}
-	if err := w.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "longer than 63 bytes") {
-		t.Fatalf("err = %v", err)
+	schemas := []string{"app"}
+	cfg := ok
+	cfg.Schemas = schemas
+	w, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
 	}
-	w = &Watcher{Channel: "ok", TriggerName: strings.Repeat("t", 57)}
-	if err := w.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "is too long") {
-		t.Fatalf("err = %v", err)
+	schemas[0] = "changed"
+	if w.cfg.TriggerName != "ok_watch" || w.cfg.Log == nil || w.cfg.InstallWait != DefaultInstallWait || w.cfg.Schemas[0] != "app" {
+		t.Errorf("defaults = %+v", w.cfg)
 	}
-	w = &Watcher{Channel: strings.Repeat("c", 51)}
-	if err := w.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "is too long") {
-		t.Fatalf("default trigger name from a long channel: err = %v", err)
+	if w, _ := New(ok); len(w.cfg.Schemas) != 1 || w.cfg.Schemas[0] != "public" {
+		t.Errorf("default schemas = %v", w.cfg.Schemas)
 	}
+}
+
+func mustNew(t *testing.T, cfg Config) *Watcher {
+	t.Helper()
+	w, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+func testWatcher(cfg Config) *Watcher {
+	return &Watcher{cfg: cfg, ready: make(chan struct{})}
 }
 
 func TestQuoting(t *testing.T) {
@@ -69,11 +96,11 @@ func TestWatchEndToEnd(t *testing.T) {
 	defer dropTriggers(pool, "pdbcore_test_ddl_watch")
 
 	changes := make(chan *introspect.Catalog, 4)
-	w := &Watcher{
+	w := mustNew(t, Config{
 		Pool: pool, Schemas: []string{"watch_test"}, Channel: "pdbcore_test_ddl",
 		PollInterval: time.Second,
-		OnChange:     func(c *introspect.Catalog) { changes <- c },
-	}
+		OnChange:     func(_ context.Context, c *introspect.Catalog) { changes <- c },
+	})
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- w.Run(runCtx) }()
@@ -177,11 +204,11 @@ func TestWatchDDLDuringStartup(t *testing.T) {
 	}
 
 	changes := make(chan *introspect.Catalog, 4)
-	w := &Watcher{
+	w := mustNew(t, Config{
 		Pool: pool, Schemas: []string{schema}, Channel: "pdbcore_startup",
 		PollInterval: time.Second, InitialHash: hash,
-		OnChange: func(c *introspect.Catalog) { changes <- c },
-	}
+		OnChange: func(_ context.Context, c *introspect.Catalog) { changes <- c },
+	})
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- w.Run(runCtx) }()
@@ -259,11 +286,11 @@ func TestWatchReadyPollFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	changes := make(chan *introspect.Catalog, 4)
-	w := &Watcher{
+	w := mustNew(t, Config{
 		Pool: pool, Schemas: []string{schema}, Channel: "pdbcore_poll",
 		PollInterval: 100 * time.Millisecond, InitialHash: hash,
-		OnChange: func(c *introspect.Catalog) { changes <- c },
-	}
+		OnChange: func(_ context.Context, c *introspect.Catalog) { changes <- c },
+	})
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- w.Run(runCtx) }()

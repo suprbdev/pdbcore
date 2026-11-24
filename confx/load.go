@@ -12,20 +12,20 @@ import (
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
-	"github.com/knadh/koanf/providers/posflag"
 	"github.com/knadh/koanf/v2"
-	flag "github.com/spf13/pflag"
 )
 
 // LoadOption customises Load.
 type LoadOption func(*loadOpts)
 
 type loadOpts struct {
-	moved map[string]string
+	hints
+	flags map[string]any
 }
 
-// WithMoved adds product keys to MovedKeys: old key (or old section, which
-// maps every key below it) to the key that replaced it.
+// WithMoved adds product keys to the keys Load knows were moved: old key
+// (or old section, which maps every key below it) to the key that
+// replaced it.
 func WithMoved(moved map[string]string) LoadOption {
 	return func(o *loadOpts) {
 		for k, v := range moved {
@@ -34,22 +34,46 @@ func WithMoved(moved map[string]string) LoadOption {
 	}
 }
 
+// WithRemoved names keys that were removed without a replacement: old key
+// (or old section, covering every key below it) to the reason, e.g.
+// "mutations always run in a transaction". Load reports such a key as
+// "unknown key <key>: removed: <reason>".
+func WithRemoved(removed map[string]string) LoadOption {
+	return func(o *loadOpts) {
+		for k, v := range removed {
+			o.removed[k] = v
+		}
+	}
+}
+
+// WithFlags layers command-line values over the file and the environment:
+// koanf path (e.g. server.addr) to value. Pass only the flags the user
+// actually set so unset flags cannot shadow YAML/env values. Values are
+// decoded like environment values: strings set booleans, numbers and
+// durations, and a []string sets a list.
+func WithFlags(values map[string]any) LoadOption {
+	return func(o *loadOpts) {
+		for k, v := range values {
+			o.flags[k] = v
+		}
+	}
+}
+
 // Load layers configuration into dst (which already holds the defaults):
 // optional YAML file, then envPrefix-prefixed environment variables, then
-// flags. Pass only the flags the user actually set (see ChangedFlags) so
-// unset flags cannot shadow YAML/env values; flag names are koanf paths.
+// command-line values (WithFlags).
 //
 // Loading is strict: a file key that dst has no field for is an error
-// naming the key it moved to (MovedKeys, WithMoved) or the closest valid
-// key. An environment variable with the prefix is checked the same way
-// when its first segment names a section of dst (or of a moved key), or
-// nearly does; other variables with the prefix (PDBQ_TEST_DATABASE_URL)
-// are ignored. Values are decoded with weak typing, so environment strings
-// set booleans, numbers, durations and lists. Validation is the caller's
-// job.
-func Load(envPrefix, path string, flags *flag.FlagSet, dst any, opts ...LoadOption) error {
-	o := loadOpts{moved: map[string]string{}}
-	for k, v := range MovedKeys {
+// naming the key it moved to (WithMoved), the reason it was removed
+// (WithRemoved) or the closest valid key. An environment variable with
+// the prefix is checked the same way when its first segment names a
+// section of dst (or of a moved or removed key), or nearly does; other
+// variables with the prefix (PDBQ_TEST_DATABASE_URL) are ignored. Values
+// are decoded with weak typing, so environment strings set booleans,
+// numbers, durations and lists. Validation is the caller's job.
+func Load(envPrefix, path string, dst any, opts ...LoadOption) error {
+	o := loadOpts{hints: hints{moved: map[string]string{}, removed: map[string]string{}}, flags: map[string]any{}}
+	for k, v := range movedKeys {
 		o.moved[k] = v
 	}
 	for _, opt := range opts {
@@ -68,7 +92,7 @@ func Load(envPrefix, path string, flags *flag.FlagSet, dst any, opts ...LoadOpti
 				continue
 			}
 			msg := "unknown key " + key
-			if hint := schema.unknownKey(key, o.moved, func(p string) string { return p }); hint != "" {
+			if hint := schema.unknownKey(key, o.hints, func(p string) string { return p }); hint != "" {
 				msg += ": " + hint
 			}
 			errs = append(errs, msg)
@@ -92,12 +116,12 @@ func Load(envPrefix, path string, flags *flag.FlagSet, dst any, opts ...LoadOpti
 			continue
 		}
 		top, _, _ := strings.Cut(key, ".")
-		if !schema.section(top, o.moved) {
+		if !schema.section(top, o.hints) {
 			ek.Delete(key)
 			continue
 		}
 		msg := fmt.Sprintf("unknown environment variable %s (%s)", envVars[key], key)
-		if hint := schema.unknownKey(key, o.moved, func(p string) string { return envName(envPrefix, p) }); hint != "" {
+		if hint := schema.unknownKey(key, o.hints, func(p string) string { return envName(envPrefix, p) }); hint != "" {
 			msg += ": " + hint
 		}
 		errs = append(errs, msg)
@@ -109,9 +133,9 @@ func Load(envPrefix, path string, flags *flag.FlagSet, dst any, opts ...LoadOpti
 	if err := k.Merge(ek); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	if flags != nil {
-		if err := k.Load(posflag.Provider(flags, ".", k), nil); err != nil {
-			return fmt.Errorf("config: flags: %w", err)
+	for key, v := range o.flags {
+		if err := k.Set(key, v); err != nil {
+			return fmt.Errorf("config: flag %s: %w", key, err)
 		}
 	}
 	err := k.UnmarshalWithConf("", dst, koanf.UnmarshalConf{DecoderConfig: &mapstructure.DecoderConfig{
@@ -125,23 +149,6 @@ func Load(envPrefix, path string, flags *flag.FlagSet, dst any, opts ...LoadOpti
 		return fmt.Errorf("config: %w", err)
 	}
 	return nil
-}
-
-// ChangedFlags returns a FlagSet holding only the flags explicitly set on
-// fs, minus any names in except (e.g. "config") — the only-changed-flags
-// bridge products hand to Load.
-func ChangedFlags(fs *flag.FlagSet, except ...string) *flag.FlagSet {
-	skip := map[string]bool{}
-	for _, n := range except {
-		skip[n] = true
-	}
-	changed := flag.NewFlagSet("changed", flag.ContinueOnError)
-	fs.Visit(func(f *flag.Flag) {
-		if !skip[f.Name] {
-			changed.AddFlag(f)
-		}
-	})
-	return changed
 }
 
 // EnvKeyMapper maps PREFIX_SERVER_MAX__DEPTH -> server.max_depth: the prefix
@@ -222,9 +229,9 @@ func Discover(names ...string) string {
 	return ""
 }
 
-// ParseTrustedProxy parses one rls.auth.trusted_proxies entry: either a CIDR
+// parseTrustedProxy parses one auth.headers.trusted_proxies entry: either a CIDR
 // block ("10.0.0.0/8") or a single IP ("10.0.0.1", treated as /32 or /128).
-func ParseTrustedProxy(s string) (netip.Prefix, error) {
+func parseTrustedProxy(s string) (netip.Prefix, error) {
 	if strings.Contains(s, "/") {
 		return netip.ParsePrefix(s)
 	}

@@ -79,8 +79,8 @@ func (f Flavour) Spatial() bool { return f == Geometry || f == Geography }
 // is in whatever unit its SRID uses.
 func (f Flavour) MetresNative() bool { return f == Geography }
 
-// TypeName is the scalar name every spatial column maps to (pdbq's GraphQL
-// scalar; pdbr's OpenAPI schema). Values are GeoJSON objects on the way out
+// TypeName is the type name every spatial value maps to (a GraphQL
+// scalar, an OpenAPI component schema). Values are GeoJSON objects on the way out
 // and GeoJSON-or-WKT on the way in.
 const TypeName = "GeoJSON"
 

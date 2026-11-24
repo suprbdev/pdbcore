@@ -1,19 +1,15 @@
 package contract_test
 
 import (
-	"context"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/suprbdev/pdbcore/contract"
 	"github.com/suprbdev/pdbcore/introspect"
-	"github.com/suprbdev/pdbcore/plugin"
 	"github.com/suprbdev/pdbcore/smarttags"
 	"github.com/suprbdev/pdbcore/testutil"
 )
-
-var _ plugin.CatalogHook = contract.Contract{}
 
 func col(name, comment string) *introspect.Column {
 	return &introspect.Column{Name: name, PGType: "text", TypeSchema: "pg_catalog", Comment: comment}
@@ -94,7 +90,7 @@ func eq(t *testing.T, what string, got, want []string) {
 
 func TestApplyIncludePolicy(t *testing.T) {
 	orig := catalog()
-	view, sum := contract.Contract{Name: "public"}.View(orig)
+	view, sum := mustView(t, contract.Contract{Name: "public"}, orig)
 
 	eq(t, "tables", tableNames(view), []string{"users", "posts", "events", "events_2026", "events_2026_q1"})
 	eq(t, "users omitted columns", omitted(view, "users"), []string{"email", "notes", "secret_row", "secret_rows"})
@@ -115,7 +111,7 @@ func TestApplyIncludePolicy(t *testing.T) {
 }
 
 func TestApplyExcludePolicy(t *testing.T) {
-	view, _ := contract.Contract{Name: "PARTNER", Default: contract.Exclude}.View(catalog())
+	view, _ := mustView(t, contract.Contract{Name: "PARTNER", Default: contract.Exclude}, catalog())
 
 	eq(t, "tables", tableNames(view), []string{"posts"})
 	eq(t, "posts foreign keys", fkNames(view, "posts"), nil)
@@ -124,7 +120,7 @@ func TestApplyExcludePolicy(t *testing.T) {
 }
 
 func TestApplyInternal(t *testing.T) {
-	view, sum := contract.Contract{Name: "internal", Default: contract.Include}.View(catalog())
+	view, sum := mustView(t, contract.Contract{Name: "internal", Default: contract.Include}, catalog())
 
 	eq(t, "tables", tableNames(view), []string{"users", "posts", "secrets", "events", "events_2026", "events_2026_q1"})
 	eq(t, "users omitted columns", omitted(view, "users"), nil)
@@ -137,40 +133,37 @@ func TestApplyInternal(t *testing.T) {
 func TestPartitionsFollowTheirParent(t *testing.T) {
 	c := catalog()
 	c.Table("app", "events").Comment = "@behavior -contract:public"
-	view, _ := contract.Contract{Name: "public"}.View(c)
+	view, _ := mustView(t, contract.Contract{Name: "public"}, c)
 	eq(t, "tables", tableNames(view), []string{"users", "posts"})
 
 	c = catalog()
 	c.Table("app", "events").Comment = "@behavior +contract:partner"
 	c.Table("app", "events_2026_q1").Comment = "@behavior -contract:partner"
-	view, _ = contract.Contract{Name: "partner", Default: contract.Exclude}.View(c)
+	view, _ = mustView(t, contract.Contract{Name: "partner", Default: contract.Exclude}, c)
 	eq(t, "tables", tableNames(view), []string{"posts", "events", "events_2026"})
 
 	c = catalog()
 	c.Table("app", "events").PartitionOf = "app.events_2026_q1"
-	view, _ = contract.Contract{Name: "public"}.View(c)
+	view, _ = mustView(t, contract.Contract{Name: "public"}, c)
 	eq(t, "tables (partition cycle)", tableNames(view), []string{"users", "posts"})
 }
 
-func TestTransformCatalog(t *testing.T) {
-	c := catalog()
-	if err := (contract.Contract{Name: "public"}).TransformCatalog(context.Background(), c); err != nil {
-		t.Fatal(err)
-	}
-	if c.Table("app", "secrets") != nil {
-		t.Error("TransformCatalog left the hidden table")
+func TestViewRejectsUnknownPolicy(t *testing.T) {
+	_, _, err := contract.Contract{Name: "public", Default: "exlude"}.View(catalog())
+	if err == nil || !strings.Contains(err.Error(), `"exlude" is not 'include' or 'exclude'`) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestOmitAll(t *testing.T) {
-	for _, comment := range []string{"", "A description.", "@name people\nPeople.", "@omit read"} {
-		tags, desc := smarttags.Parse(contract.OmitAll(comment))
-		if _, all := tags.Omits(); !all {
-			t.Errorf("OmitAll(%q) does not omit everything", comment)
+func TestParsePolicy(t *testing.T) {
+	for in, want := range map[string]contract.Policy{"": contract.Include, "include": contract.Include, "exclude": contract.Exclude} {
+		if got, err := contract.ParsePolicy(in); err != nil || got != want {
+			t.Errorf("ParsePolicy(%q) = %q, %v, want %q", in, got, err, want)
 		}
-		_, wantDesc := smarttags.Parse(comment)
-		if desc != wantDesc {
-			t.Errorf("OmitAll(%q) description = %q, want %q", comment, desc, wantDesc)
+	}
+	for _, in := range []string{"Include", "none", " exclude"} {
+		if _, err := contract.ParsePolicy(in); err == nil {
+			t.Errorf("ParsePolicy(%q) accepted", in)
 		}
 	}
 }
@@ -198,7 +191,7 @@ func TestApplyOnlyRemoves(t *testing.T) {
 			f.Comment = next()
 		}
 		for _, ct := range []contract.Contract{{Name: "a"}, {Name: "b", Default: contract.Exclude}, {Name: "c"}} {
-			view, _ := ct.View(c)
+			view, _ := mustView(t, ct, c)
 			for _, vt := range view.Tables {
 				ot := c.Table(vt.Schema, vt.Name)
 				if ot == nil {
@@ -208,7 +201,7 @@ func TestApplyOnlyRemoves(t *testing.T) {
 					t.Fatalf("%s: %s columns changed", ct.Name, vt.Name)
 				}
 				for k, vc := range vt.Columns {
-					if oc := ot.Columns[k]; vc.Name != oc.Name || (vc.Comment != oc.Comment && vc.Comment != contract.OmitAll(oc.Comment)) {
+					if oc := ot.Columns[k]; vc.Name != oc.Name || (vc.Comment != oc.Comment && vc.Comment != omittedComment(oc.Comment)) {
 						t.Fatalf("%s: %s.%s comment %q from %q", ct.Name, vt.Name, vc.Name, vc.Comment, oc.Comment)
 					}
 				}
@@ -247,11 +240,27 @@ func TestCloneOfFixtureHashesTheSame(t *testing.T) {
 	if got != want {
 		t.Fatalf("clone hash %s, want %s", got, want)
 	}
-	view, _ := contract.Contract{Name: "nobody", Default: contract.Exclude}.View(c)
+	view, _ := mustView(t, contract.Contract{Name: "nobody", Default: contract.Exclude}, c)
 	if len(view.Tables) != 0 || len(view.Functions) != 0 {
 		t.Fatalf("exclude-all view kept %d tables, %d functions", len(view.Tables), len(view.Functions))
 	}
 	if after, _ := c.Hash(); after != want {
 		t.Fatal("View changed its input")
 	}
+}
+
+func mustView(t *testing.T, ct contract.Contract, c *introspect.Catalog) (*introspect.Catalog, contract.Summary) {
+	t.Helper()
+	view, sum, err := ct.View(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return view, sum
+}
+
+func omittedComment(comment string) string {
+	if comment == "" {
+		return "@omit"
+	}
+	return "@omit\n" + comment
 }

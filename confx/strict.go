@@ -9,10 +9,10 @@ import (
 	"time"
 )
 
-// MovedKeys maps configuration keys removed before 1.0 to the key that
+// movedKeys maps configuration keys removed before 1.0 to the key that
 // replaced them. Load names the replacement when a file or environment
 // variable still uses an old key; products add their own with WithMoved.
-var MovedKeys = map[string]string{
+var movedKeys = map[string]string{
 	"rls.enabled":              "roles.switch",
 	"rls.anonymous_role":       "roles.anonymous",
 	"rls.default_role":         "roles.default",
@@ -112,9 +112,16 @@ func (s keySchema) known(key string) bool {
 	return false
 }
 
-// section reports whether name is a top-level key of the schema or of a
-// moved key, or a near miss of one.
-func (s keySchema) section(name string, moved map[string]string) bool {
+// hints holds the keys an unknown key is explained by: moved maps an old
+// key (or section) to its replacement, removed maps one to the reason it
+// is gone.
+type hints struct {
+	moved, removed map[string]string
+}
+
+// section reports whether name is a top-level key of the schema, of a
+// moved key or of a removed key, or a near miss of one.
+func (s keySchema) section(name string, h hints) bool {
 	tops := []string{}
 	for p := range s {
 		if !strings.Contains(p, ".") {
@@ -124,32 +131,38 @@ func (s keySchema) section(name string, moved map[string]string) bool {
 			tops = append(tops, p)
 		}
 	}
-	for old := range moved {
-		if top, _, _ := strings.Cut(old, "."); top == name {
-			return true
+	for _, m := range []map[string]string{h.moved, h.removed} {
+		for old := range m {
+			if top, _, _ := strings.Cut(old, "."); top == name {
+				return true
+			}
 		}
 	}
 	return len(name) >= 4 && closest(name, tops) != ""
 }
 
-// unknownKey describes an unknown key: where it moved to, or the closest
-// known or moved key; name renders a path for the message.
-func (s keySchema) unknownKey(key string, moved map[string]string, name func(string) string) string {
-	if to, ok := movedTo(key, moved); ok {
+// unknownKey describes an unknown key: where it moved to, why it was
+// removed, or the closest known or moved key; name renders a path for the
+// message.
+func (s keySchema) unknownKey(key string, h hints, name func(string) string) string {
+	if to, ok := movedTo(key, h.moved); ok {
 		return fmt.Sprintf("moved to %s", name(to))
 	}
-	cands := make([]string, 0, len(s)+len(moved))
+	if why, ok := removedAt(key, h.removed); ok {
+		return "removed: " + why
+	}
+	cands := make([]string, 0, len(s)+len(h.moved))
 	for p := range s {
 		cands = append(cands, p)
 	}
-	for old := range moved {
+	for old := range h.moved {
 		cands = append(cands, old)
 	}
 	best := closest(key, cands)
 	if best == "" {
 		return ""
 	}
-	if to, ok := movedTo(best, moved); ok {
+	if to, ok := movedTo(best, h.moved); ok {
 		return fmt.Sprintf("did you mean %s (formerly %s)?", name(to), best)
 	}
 	return fmt.Sprintf("did you mean %s?", name(best))
@@ -171,6 +184,20 @@ func movedTo(key string, moved map[string]string) (string, bool) {
 		return "", false
 	}
 	return moved[best] + key[len(best):], true
+}
+
+// removedAt reports why key, or the section it lies in, was removed.
+func removedAt(key string, removed map[string]string) (string, bool) {
+	for k := key; ; {
+		if why, ok := removed[k]; ok {
+			return why, true
+		}
+		i := strings.LastIndexByte(k, '.')
+		if i < 0 {
+			return "", false
+		}
+		k = k[:i]
+	}
 }
 
 // closest returns the candidate nearest to s by edit distance, or "" when

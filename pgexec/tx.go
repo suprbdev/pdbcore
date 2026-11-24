@@ -219,14 +219,16 @@ func IsSerializationFailure(err error) bool {
 }
 
 // ParseIsolation maps the config spelling ("read_committed",
-// "repeatable_read", "serializable") to pgx's level; anything else is
-// ReadCommitted.
-func ParseIsolation(s string) pgx.TxIsoLevel {
+// "repeatable_read", "serializable") to pgx's level. Any other value is an
+// error naming the accepted ones.
+func ParseIsolation(s string) (pgx.TxIsoLevel, error) {
 	switch s {
+	case "read_committed":
+		return pgx.ReadCommitted, nil
 	case "repeatable_read":
-		return pgx.RepeatableRead
+		return pgx.RepeatableRead, nil
 	case "serializable":
-		return pgx.Serializable
+		return pgx.Serializable, nil
 	}
-	return pgx.ReadCommitted
+	return "", fmt.Errorf("%q is not 'read_committed', 'repeatable_read' or 'serializable'", s)
 }

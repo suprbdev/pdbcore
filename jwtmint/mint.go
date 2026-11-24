@@ -56,16 +56,16 @@ func Mint(o Options, raw json.RawMessage, set bool) (json.RawMessage, error) {
 	if claims == nil {
 		return json.RawMessage("null"), nil
 	}
-	token, err := Sign(o, claims)
+	token, err := sign(o, claims)
 	if err != nil {
 		return raw, fmt.Errorf("mint: sign: %w", err)
 	}
 	return json.Marshal(token)
 }
 
-// Sign builds the HS256 token for one claims map: nil-valued claims are
+// sign builds the HS256 token for one claims map: nil-valued claims are
 // dropped and Issuer/Audience are added when set.
-func Sign(o Options, claims map[string]any) (string, error) {
+func sign(o Options, claims map[string]any) (string, error) {
 	mc := jwt.MapClaims{}
 	for k, v := range claims {
 		if v != nil {
