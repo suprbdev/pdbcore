@@ -65,8 +65,8 @@ func rasterTx(t *testing.T) (pgx.Tx, context.Context) {
 func TestRasterAccessorsLive(t *testing.T) {
 	tx, ctx := rasterTx(t)
 	var cols []string
-	for _, a := range postgis.RasterAccessors {
-		cols = append(cols, "'"+a.Suffix+"', "+a.JSONSQL("r.rast"))
+	for _, a := range postgis.RasterAccessors() {
+		cols = append(cols, "'"+a.Suffix+"', "+a.SQL("r.rast", postgis.Output{JSON: true}))
 	}
 	var out []map[string]any
 	if err := tx.QueryRow(ctx, "SELECT json_agg(json_build_object("+strings.Join(cols, ", ")+") ORDER BY id) FROM rasters AS r").Scan(&out); err != nil {

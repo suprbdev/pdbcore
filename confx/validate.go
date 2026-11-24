@@ -12,7 +12,8 @@ import (
 	"github.com/suprbdev/pdbcore/pgexec"
 )
 
-// InvalidConfig joins validation messages into pdbq's error shape, or nil
+// InvalidConfig joins validation messages into one error, "invalid
+// config:" followed by one indented "- message" line each, or returns nil
 // when there are none.
 func InvalidConfig(errs []string) error {
 	if len(errs) == 0 {
@@ -21,13 +22,12 @@ func InvalidConfig(errs []string) error {
 	return fmt.Errorf("invalid config:\n  - %s", strings.Join(errs, "\n  - "))
 }
 
-// ValidateErrors checks errors.detail.
+// ValidateErrors checks errors.detail (see [pgexec.ParseDetail]).
 func ValidateErrors(e Errors) []string {
-	switch e.Detail {
-	case "dev", "prod", "strict":
-		return nil
+	if _, err := pgexec.ParseDetail(e.Detail); err != nil {
+		return []string{"errors.detail: " + err.Error()}
 	}
-	return []string{fmt.Sprintf("errors.detail: %q is not 'dev', 'prod' or 'strict'", e.Detail)}
+	return nil
 }
 
 // ValidateIdentity checks the auth, roles and claims sections together:
@@ -71,7 +71,7 @@ func ValidateIdentity(a Auth, r Roles, c Claims) []string {
 		}
 	}
 	for _, p := range a.Headers.TrustedProxies {
-		if _, err := ParseTrustedProxy(p); err != nil {
+		if _, err := parseTrustedProxy(p); err != nil {
 			add("auth.headers.trusted_proxies: %q is not a valid IP or CIDR block", p)
 		}
 	}
@@ -123,13 +123,12 @@ func IdentityWarnings(a Auth, r Roles) []string {
 	return out
 }
 
-// ValidateTX checks transactions.isolation and transactions.max_retries.
+// ValidateTX checks transactions.isolation (see [pgexec.ParseIsolation])
+// and transactions.max_retries.
 func ValidateTX(t TX) []string {
 	var errs []string
-	switch t.Isolation {
-	case "read_committed", "repeatable_read", "serializable":
-	default:
-		errs = append(errs, fmt.Sprintf("transactions.isolation: %q invalid", t.Isolation))
+	if _, err := pgexec.ParseIsolation(t.Isolation); err != nil {
+		errs = append(errs, "transactions.isolation: "+err.Error())
 	}
 	if t.MaxRetries < 0 {
 		errs = append(errs, "transactions.max_retries must be >= 0")
@@ -144,7 +143,7 @@ func ValidateWatch(w Watch, cachePath string) []string {
 	if w.Enabled && cachePath != "" {
 		errs = append(errs, "watch.enabled cannot be combined with schema.cache_path")
 	}
-	if w.Enabled && !ValidChannelName(w.Channel) {
+	if w.Enabled && !validChannelName(w.Channel) {
 		errs = append(errs, fmt.Sprintf("watch.channel: %q invalid: only letters, digits and underscores are allowed", w.Channel))
 	}
 	if w.Enabled && len(w.Channel) > 63 {
@@ -196,10 +195,8 @@ func ValidateContracts(cs []Contract, base string, rootShared bool) []string {
 			errs = append(errs, fmt.Sprintf("%s.name: %q is used by another contract", key, c.Name))
 		}
 		names[c.Name] = true
-		switch contract.Policy(c.Default) {
-		case "", contract.Include, contract.Exclude:
-		default:
-			errs = append(errs, fmt.Sprintf("%s.default: %q is not 'include' or 'exclude'", key, c.Default))
+		if _, err := contract.ParsePolicy(string(c.Default)); err != nil {
+			errs = append(errs, fmt.Sprintf("%s.default: %v", key, err))
 		}
 		p := c.URLPath(base)
 		if !validContractPath(p) {
@@ -335,10 +332,10 @@ func validHeaderPrefix(p string) bool {
 	return true
 }
 
-// ValidChannelName restricts the watch NOTIFY channel to [a-zA-Z0-9_]; the
+// validChannelName restricts the watch NOTIFY channel to [a-zA-Z0-9_]; the
 // value is interpolated into trigger DDL (see package watch) where broader
 // characters cannot be safely escaped.
-func ValidChannelName(s string) bool {
+func validChannelName(s string) bool {
 	for _, r := range s {
 		ok := r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 		if !ok {
@@ -393,7 +390,7 @@ func AuthConfig(a Auth, r Roles) (auth.Config, error) {
 		SkipRoleSwitch:  !r.Switch,
 	}
 	for _, p := range a.Headers.TrustedProxies {
-		if pfx, err := ParseTrustedProxy(p); err == nil {
+		if pfx, err := parseTrustedProxy(p); err == nil {
 			cfg.TrustedProxies = append(cfg.TrustedProxies, pfx)
 		}
 	}

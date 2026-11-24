@@ -1,6 +1,9 @@
 package postgis
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // RasterTypeName is the pg type name of a postgis_raster column.
 const RasterTypeName = "raster"
@@ -38,8 +41,7 @@ const (
 type RasterAccessor struct {
 	// Suffix is appended to the column's field name.
 	Suffix string
-	// Type is the generated field's type name (pdbq SDL spelling): Int,
-	// Float or GeoJSON.
+	// Type is the generated field's type name: Int, Float or [TypeName].
 	Type string
 	// Description documents the field.
 	Description string
@@ -49,20 +51,12 @@ type RasterAccessor struct {
 	sql func(ref string) string
 }
 
-// SQL renders the accessor over a raster reference, wrapping geometry
-// valued results as GeoJSON ([OutputSQL]). It is NULL for a NULL raster.
-func (a RasterAccessor) SQL(ref string) string {
+// SQL renders the accessor over a raster reference, rendering a geometry
+// valued result as GeoJSON with o (see [OutputSQL]); accessors that return
+// no geometry ignore o. It is NULL for a NULL raster.
+func (a RasterAccessor) SQL(ref string, o Output) string {
 	if a.GeoJSON {
-		return OutputSQL(a.sql(ref))
-	}
-	return a.sql(ref)
-}
-
-// JSONSQL is [RasterAccessor.SQL] with geometry valued results rendered as
-// json rather than jsonb ([OutputJSONSQL]).
-func (a RasterAccessor) JSONSQL(ref string) string {
-	if a.GeoJSON {
-		return OutputJSONSQL(a.sql(ref))
+		return OutputSQL(a.sql(ref), o)
 	}
 	return a.sql(ref)
 }
@@ -71,10 +65,13 @@ func rasterFn(name string) func(string) string {
 	return func(ref string) string { return name + "(" + ref + ")" }
 }
 
-// RasterAccessors are the metadata accessors of a raster column. They read
-// only the raster header, so they are cheap whatever the raster's size. The
-// list is append-only so generated schemas only grow at the end.
-var RasterAccessors = []RasterAccessor{
+// RasterAccessors returns the metadata accessors of a raster column. They
+// read only the raster header, so they are cheap whatever the raster's
+// size. The list is append-only so generated schemas only grow at the end.
+// The slice is a fresh copy.
+func RasterAccessors() []RasterAccessor { return slices.Clone(rasterAccessors) }
+
+var rasterAccessors = []RasterAccessor{
 	{Suffix: "Width", Type: "Int", Description: "Width of the raster in pixels (ST_Width).", sql: rasterFn("ST_Width")},
 	{Suffix: "Height", Type: "Int", Description: "Height of the raster in pixels (ST_Height).", sql: rasterFn("ST_Height")},
 	{Suffix: "NumBands", Type: "Int", Description: "Number of bands of the raster (ST_NumBands).", sql: rasterFn("ST_NumBands")},
@@ -86,7 +83,7 @@ var RasterAccessors = []RasterAccessor{
 
 // RasterAccessorBySuffix looks up a raster metadata accessor.
 func RasterAccessorBySuffix(suffix string) (RasterAccessor, bool) {
-	for _, a := range RasterAccessors {
+	for _, a := range rasterAccessors {
 		if a.Suffix == suffix {
 			return a, true
 		}

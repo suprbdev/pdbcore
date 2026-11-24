@@ -3,6 +3,7 @@ package pgexec
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -77,8 +78,7 @@ func TestClassifyMessagePolicy(t *testing.T) {
 	}
 }
 
-// SanitizeMessage must stay byte-identical to pdbq's sanitizePGMessage.
-func TestSanitizeMessageMatchesPdbq(t *testing.T) {
+func TestClassifyMessages(t *testing.T) {
 	cases := []struct {
 		code, msg string
 		strict    bool
@@ -94,8 +94,12 @@ func TestSanitizeMessageMatchesPdbq(t *testing.T) {
 		{"P0001", "raise", true, "database error"},
 	}
 	for _, tc := range cases {
-		if got := SanitizeMessage(pgErr(tc.code, tc.msg), tc.strict); got != tc.want {
-			t.Errorf("SanitizeMessage(%s, strict=%v) = %q, want %q", tc.code, tc.strict, got, tc.want)
+		detail := Prod
+		if tc.strict {
+			detail = Strict
+		}
+		if got := Classify(pgErr(tc.code, tc.msg), detail).Message; got != tc.want {
+			t.Errorf("Classify(%s, %v).Message = %q, want %q", tc.code, detail, got, tc.want)
 		}
 	}
 }
@@ -124,9 +128,18 @@ func TestClassifyNonPG(t *testing.T) {
 }
 
 func TestParseDetail(t *testing.T) {
-	for in, want := range map[string]Detail{"dev": Dev, "prod": Prod, "strict": Strict, "": Prod, "x": Prod} {
-		if got := ParseDetail(in); got != want {
-			t.Errorf("ParseDetail(%q) = %v, want %v", in, got, want)
+	for in, want := range map[string]Detail{"dev": Dev, "prod": Prod, "strict": Strict} {
+		got, err := ParseDetail(in)
+		if err != nil || got != want {
+			t.Errorf("ParseDetail(%q) = %v, %v, want %v", in, got, err, want)
+		}
+		if got.String() != in {
+			t.Errorf("%v.String() = %q, want %q", got, got.String(), in)
+		}
+	}
+	for _, in := range []string{"", "x", "Dev"} {
+		if _, err := ParseDetail(in); err == nil || !strings.Contains(err.Error(), "is not 'dev', 'prod' or 'strict'") {
+			t.Errorf("ParseDetail(%q) error = %v", in, err)
 		}
 	}
 }

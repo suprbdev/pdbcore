@@ -7,7 +7,7 @@
 //	COMMENT ON COLUMN app.users.email IS '@behavior -contract:public';
 //	COMMENT ON FUNCTION app.search(text) IS '@behavior +contract:partner';
 //
-// A contract only ever removes surface. [Contract.Apply] drops the tables,
+// A contract only ever removes surface. [Contract.View] drops the tables,
 // functions and foreign keys the contract hides from the catalog and marks
 // hidden columns with a bare @omit, so the products' own @omit handling
 // (which already covers every surface a column reaches: output, filters,
@@ -33,7 +33,7 @@
 package contract
 
 import (
-	"context"
+	"fmt"
 	"strings"
 
 	"github.com/suprbdev/pdbcore/introspect"
@@ -54,6 +54,19 @@ const (
 	Exclude Policy = "exclude"
 )
 
+// ParsePolicy maps the config spelling of a policy ("include", "exclude",
+// or "" for [Include]) to its Policy. Any other value is an error naming
+// the accepted ones.
+func ParsePolicy(s string) (Policy, error) {
+	switch Policy(s) {
+	case "", Include:
+		return Include, nil
+	case Exclude:
+		return Exclude, nil
+	}
+	return "", fmt.Errorf("%q is not 'include' or 'exclude'", s)
+}
+
 // Contract is one named view of the catalog.
 type Contract struct {
 	// Name is matched case-insensitively against the names in @contract
@@ -64,35 +77,31 @@ type Contract struct {
 	Default Policy
 }
 
-// Summary counts what [Contract.Apply] hid.
+// Summary counts what [Contract.View] hid.
 type Summary struct {
 	Tables, Columns, Functions, ForeignKeys int
 }
 
-// View returns a deep copy of c with the contract applied; c is not
-// modified.
-func (ct Contract) View(c *introspect.Catalog) (*introspect.Catalog, Summary) {
+// View returns a deep copy of c without everything the contract hides
+// (see the package documentation), and what it hid; c is not modified.
+// Columns are not removed, since keys, indexes and foreign keys keep
+// naming them: a hidden column's comment gets a leading bare @omit tag
+// line instead. A Default other than "", [Include] or [Exclude] is an
+// error.
+func (ct Contract) View(c *introspect.Catalog) (*introspect.Catalog, Summary, error) {
+	policy, err := ParsePolicy(string(ct.Default))
+	if err != nil {
+		return nil, Summary{}, fmt.Errorf("contract %s: default: %w", ct.Name, err)
+	}
 	cp := c.Clone()
-	return cp, ct.Apply(cp)
+	return cp, apply(cp, strings.ToLower(ct.Name), policy == Include), nil
 }
 
-// TransformCatalog applies the contract; it makes a Contract a
-// plugin.CatalogHook. Products apply contracts before the plugin catalog
-// hooks rather than registering them, so plugins.disabled cannot turn a
-// contract off.
-func (ct Contract) TransformCatalog(_ context.Context, c *introspect.Catalog) error {
-	ct.Apply(c)
-	return nil
-}
-
-// Apply removes from c, in place, everything the contract hides (see the
-// package documentation) and reindexes c. Columns are not removed, since
-// keys, indexes and foreign keys keep naming them: a hidden column's
-// comment gets a leading bare @omit tag line instead.
-func (ct Contract) Apply(c *introspect.Catalog) Summary {
+// apply removes from c, in place, everything contract name hides, given
+// def, whether untagged tables and functions are in the contract, and
+// reindexes c.
+func apply(c *introspect.Catalog, name string, def bool) Summary {
 	var sum Summary
-	name := strings.ToLower(ct.Name)
-	def := ct.Default != Exclude
 	in := func(comment string, def bool) bool {
 		if !strings.Contains(comment, "@") {
 			return def
@@ -140,7 +149,7 @@ func (ct Contract) Apply(c *introspect.Catalog) Summary {
 	for _, t := range c.Tables {
 		for _, col := range t.Columns {
 			if !in(col.Comment, true) || rowOfHidden(col.TypeSchema, col.PGType) {
-				col.Comment = OmitAll(col.Comment)
+				col.Comment = omitAll(col.Comment)
 				sum.Columns++
 			}
 		}
@@ -186,10 +195,10 @@ func functionUsesHidden(f *introspect.Function, rowOfHidden func(schema, typ str
 	return false
 }
 
-// OmitAll returns comment with a bare @omit tag line in front: the object
+// omitAll returns comment with a bare @omit tag line in front: the object
 // is hidden from every surface, and its other tags and description stay
 // as they were.
-func OmitAll(comment string) string {
+func omitAll(comment string) string {
 	if comment == "" {
 		return "@omit"
 	}

@@ -38,7 +38,7 @@ plugins:
 totally_unrelated: 1
 `)
 	cfg := pdbqDefaults()
-	err := Load("PDBX_", path, nil, &cfg, WithMoved(map[string]string{"plugins.settings.advanced-filters": "plugins.settings.advanced_filters"}))
+	err := Load("PDBX_", path, &cfg, WithMoved(map[string]string{"plugins.settings.advanced-filters": "plugins.settings.advanced_filters"}))
 	if err == nil {
 		t.Fatal("unknown keys accepted")
 	}
@@ -71,7 +71,7 @@ func TestLoadRejectsUnknownEnvKeysInKnownSections(t *testing.T) {
 	t.Setenv("PDBX_TEST_DATABASE_URL", "postgres://test")
 	t.Setenv("PDBX_PRINT_SDL_DIGEST", "1")
 	cfg := pdbqDefaults()
-	err := Load("PDBX_", "", nil, &cfg)
+	err := Load("PDBX_", "", &cfg)
 	if err == nil {
 		t.Fatal("unknown env keys accepted")
 	}
@@ -95,7 +95,7 @@ func TestLoadIgnoresUnrelatedPrefixedEnv(t *testing.T) {
 	t.Setenv("PDBX_TEST_DATABASE_URL", "postgres://test")
 	t.Setenv("PDBX_TEST_PDBQ_DIR", "/x")
 	cfg := pdbqDefaults()
-	if err := Load("PDBX_", "", nil, &cfg); err != nil {
+	if err := Load("PDBX_", "", &cfg); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -107,7 +107,7 @@ func TestLoadDecodesEnvIntoTypedSettings(t *testing.T) {
 	t.Setenv("PDBX_AUTH_JWT_LEEWAY", "30s")
 	t.Setenv("PDBX_ROLES_ALLOWED", "app_user, app_admin")
 	cfg := pdbqDefaults()
-	if err := Load("PDBX_", "", nil, &cfg); err != nil {
+	if err := Load("PDBX_", "", &cfg); err != nil {
 		t.Fatal(err)
 	}
 	s := cfg.Plugins.Settings.AdvancedFilters
@@ -117,7 +117,7 @@ func TestLoadDecodesEnvIntoTypedSettings(t *testing.T) {
 	}
 	t.Setenv("PDBX_PLUGINS_SETTINGS_ADVANCED__FILTERS_MAX__DEPTH", "deep")
 	cfg = pdbqDefaults()
-	if err := Load("PDBX_", "", nil, &cfg); err == nil || !strings.Contains(err.Error(), "max_depth") {
+	if err := Load("PDBX_", "", &cfg); err == nil || !strings.Contains(err.Error(), "max_depth") {
 		t.Fatalf("bad int accepted: %v", err)
 	}
 }
@@ -127,7 +127,7 @@ func TestLoadRejectsUnknownKeysInListEntries(t *testing.T) {
 	var c struct {
 		Contracts []Contract `koanf:"contracts"`
 	}
-	err := Load("PDBX_", path, nil, &c)
+	err := Load("PDBX_", path, &c)
 	if err == nil || !strings.Contains(err.Error(), "default_policy") {
 		t.Fatalf("err = %v", err)
 	}
@@ -136,7 +136,7 @@ func TestLoadRejectsUnknownKeysInListEntries(t *testing.T) {
 func TestLoadAcceptsMapKeys(t *testing.T) {
 	path := writeYAML(t, "filters:\n  allow_columns:\n    public.users: [email]\n")
 	cfg := pdbqDefaults()
-	if err := Load("PDBX_", path, nil, &cfg); err != nil {
+	if err := Load("PDBX_", path, &cfg); err != nil {
 		t.Fatal(err)
 	}
 	if len(cfg.Filters.AllowColumns) == 0 {
@@ -164,6 +164,35 @@ func TestEditDistance(t *testing.T) {
 	}{{"", "", 0}, {"a", "", 1}, {"kitten", "sitting", 3}, {"enabeld", "enabled", 2}, {"test", "auth", 4}} {
 		if got := editDistance(tc.a, tc.b); got != tc.d {
 			t.Errorf("editDistance(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.d)
+		}
+	}
+}
+
+func TestLoadNamesRemovedKeys(t *testing.T) {
+	path := writeYAML(t, `
+transactions:
+  mutations: true
+legacy:
+  thing: 1
+`)
+	t.Setenv("PDBX_TRANSACTIONS_MUTATIONS", "false")
+	t.Setenv("PDBX_LEGACY_OTHER", "x")
+	cfg := pdbqDefaults()
+	err := Load("PDBX_", path, &cfg, WithRemoved(map[string]string{
+		"transactions.mutations": "mutations always run in a transaction",
+		"legacy":                 "the legacy section is gone",
+	}))
+	if err == nil {
+		t.Fatal("removed keys accepted")
+	}
+	for _, want := range []string{
+		"unknown key transactions.mutations: removed: mutations always run in a transaction",
+		"unknown key legacy.thing: removed: the legacy section is gone",
+		"unknown environment variable PDBX_TRANSACTIONS_MUTATIONS (transactions.mutations): removed: mutations always run in a transaction",
+		"unknown environment variable PDBX_LEGACY_OTHER (legacy.other): removed: the legacy section is gone",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q:\n%v", want, err)
 		}
 	}
 }

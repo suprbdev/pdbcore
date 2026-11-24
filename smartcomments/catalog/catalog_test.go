@@ -330,21 +330,14 @@ func TestPolymorphicNeverResolvesToHiddenTable(t *testing.T) {
 		})
 		check(t, cat, true)
 	})
-	t.Run("contract applied first", func(t *testing.T) {
-		cat := testutil.FixtureCatalog()
-		prep(cat)
-		cat.Table("public", "metrics").Comment = "@behavior -contract:public"
-		contract.Contract{Name: "public"}.Apply(cat)
-		if err := plugin.NewRegistry(catalog.New()).TransformCatalog(context.Background(), nil, cat); err != nil {
-			t.Fatal(err)
-		}
-		check(t, cat, true)
-	})
 	t.Run("contract view clone", func(t *testing.T) {
 		base := testutil.FixtureCatalog()
 		prep(base)
 		base.Table("public", "metrics").Comment = "@behavior -contract:public"
-		cat, _ := contract.Contract{Name: "public"}.View(base)
+		cat, _, err := contract.Contract{Name: "public"}.View(base)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := plugin.NewRegistry(catalog.New()).TransformCatalog(context.Background(), nil, cat); err != nil {
 			t.Fatal(err)
 		}

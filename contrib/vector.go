@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -13,8 +14,11 @@ import (
 // the non-zero elements of a sparsevec.
 const MaxVectorDims = 16000
 
-// VectorTypes lists the pgvector column types the vector vocabulary covers.
-var VectorTypes = []string{"vector", "halfvec", "sparsevec"}
+// VectorTypes returns the pgvector column types the vector vocabulary
+// covers. The slice is a fresh copy.
+func VectorTypes() []string { return slices.Clone(vectorTypes) }
+
+var vectorTypes = []string{"vector", "halfvec", "sparsevec"}
 
 // IsVector reports whether a pg type name (as Column.PGType spells it) is
 // one of [VectorTypes], ignoring a schema qualifier; arrays are not.
@@ -23,7 +27,7 @@ func IsVector(pgType string) bool {
 	if arr {
 		return false
 	}
-	for _, t := range VectorTypes {
+	for _, t := range vectorTypes {
 		if base == t {
 			return true
 		}
