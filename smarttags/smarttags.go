@@ -75,8 +75,9 @@ func (t Tags) All(name string) []string { return t[name] }
 //
 // PostGraphile-V5-style @behavior tags contribute too: their negative tokens
 // map onto omit actions (-insert -> create, -update -> update, -delete ->
-// delete, -select -> read, -filter -> filter, -order -> order); other tokens
-// are ignored.
+// delete, -select -> read, -filterBy -> filter, -orderBy -> order, matched
+// case-insensitively). The deprecated -filter and -order still map to
+// filter and order (see [Tags.Check]); other tokens are ignored.
 func (t Tags) Omits() (actions map[string]bool, everything bool) {
 	actions = map[string]bool{}
 	for _, v := range t["omit"] {
@@ -98,14 +99,156 @@ func (t Tags) Omits() (actions map[string]bool, everything bool) {
 	return actions, everything
 }
 
-// behaviorOmits maps negative @behavior tokens to @omit actions.
+// behaviorOmits maps negative @behavior tokens, lowercased, to @omit
+// actions.
 var behaviorOmits = map[string]string{
-	"-insert": "create",
-	"-update": "update",
-	"-delete": "delete",
-	"-select": "read",
-	"-filter": "filter",
-	"-order":  "order",
+	"-insert":   "create",
+	"-update":   "update",
+	"-delete":   "delete",
+	"-select":   "read",
+	"-filterby": "filter",
+	"-orderby":  "order",
+	"-filter":   "filter",
+	"-order":    "order",
+}
+
+// deprecatedBehaviors maps deprecated @behavior tokens, lowercased, to the
+// PostGraphile V5 token replacing them.
+var deprecatedBehaviors = map[string]string{
+	"-filter": "-filterBy",
+	"-order":  "-orderBy",
+}
+
+// Vocabulary is the set of @omit actions and @behavior tokens a product
+// honours, against which [Tags.Check] reports unknown ones. The omit
+// tokens of @behavior (see [Tags.Omits]) and the contract tokens (see
+// [Tags.Contracts]) are always known.
+type Vocabulary struct {
+	// OmitActions lists the @omit actions honoured, matched
+	// case-insensitively.
+	OmitActions []string
+	// Behavior reports whether a product-specific @behavior token is
+	// honoured; it receives the token as written, sign included. Nil knows
+	// no product-specific tokens.
+	Behavior func(token string) bool
+}
+
+// IssueKind classifies an [Issue].
+type IssueKind int
+
+// The issue kinds.
+const (
+	// UnknownOmit is an @omit action outside [Vocabulary.OmitActions].
+	UnknownOmit IssueKind = iota + 1
+	// UnknownBehavior is an @behavior token nothing honours.
+	UnknownBehavior
+	// DeprecatedBehavior is an @behavior token still honoured under an old
+	// spelling; [Issue.Use] names the replacement.
+	DeprecatedBehavior
+)
+
+// Issue is a token [Tags.Check] reports.
+type Issue struct {
+	Kind IssueKind
+	// Token is the @omit action or @behavior token as written.
+	Token string
+	// Use is the replacement of a [DeprecatedBehavior] token, "" otherwise.
+	Use string
+}
+
+// Message is a short description of the issue for a log line:
+// "unknown @omit action ignored", "unknown @behavior token ignored" or
+// "deprecated @behavior token".
+func (i Issue) Message() string {
+	switch i.Kind {
+	case UnknownOmit:
+		return "unknown @omit action ignored"
+	case UnknownBehavior:
+		return "unknown @behavior token ignored"
+	case DeprecatedBehavior:
+		return "deprecated @behavior token"
+	}
+	return "smart tag issue"
+}
+
+// Attrs returns the issue's details as slog key-value pairs: "action" for
+// an @omit action, "token" (and "use" for a deprecated one) for an
+// @behavior token.
+func (i Issue) Attrs() []any {
+	switch i.Kind {
+	case UnknownOmit:
+		return []any{"action", i.Token}
+	case DeprecatedBehavior:
+		return []any{"token", i.Token, "use", i.Use}
+	}
+	return []any{"token", i.Token}
+}
+
+// Check reports the unknown @omit actions, unknown @behavior tokens and
+// deprecated @behavior tokens of t against v, in tag order and once per
+// distinct token.
+func (t Tags) Check(v Vocabulary) []Issue {
+	var issues []Issue
+	seen := map[string]bool{}
+	add := func(key string, i Issue) {
+		if !seen[key] {
+			seen[key] = true
+			issues = append(issues, i)
+		}
+	}
+	for _, val := range t["omit"] {
+		for _, a := range SplitList(val) {
+			if !containsFold(v.OmitActions, a) {
+				add("omit "+a, Issue{Kind: UnknownOmit, Token: a})
+			}
+		}
+	}
+	for _, val := range t["behavior"] {
+		for _, tok := range SplitList(val) {
+			if use := deprecatedBehaviors[strings.ToLower(tok)]; use != "" {
+				add("behavior "+tok, Issue{Kind: DeprecatedBehavior, Token: tok, Use: use})
+			} else if !v.knows(tok) {
+				add("behavior "+tok, Issue{Kind: UnknownBehavior, Token: tok})
+			}
+		}
+	}
+	return issues
+}
+
+// knows reports whether the @behavior token tok is honoured: an omit or
+// contract token, or one v.Behavior accepts.
+func (v Vocabulary) knows(tok string) bool {
+	if _, ok := behaviorOmits[strings.ToLower(tok)]; ok || isContractToken(tok) {
+		return true
+	}
+	return v.Behavior != nil && v.Behavior(tok)
+}
+
+func containsFold(list []string, s string) bool {
+	for _, v := range list {
+		if strings.EqualFold(v, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// isContractToken reports whether tok is +contract:<name>,
+// -contract:<name> or contract:<name>.
+func isContractToken(tok string) bool {
+	_, name, ok := contractToken(tok)
+	return ok && name != ""
+}
+
+// contractToken splits a contract @behavior token into its sign ('+', '-'
+// or 0) and lowercased contract name.
+func contractToken(tok string) (sign byte, name string, ok bool) {
+	rest := tok
+	if rest != "" && (rest[0] == '+' || rest[0] == '-') {
+		sign, rest = rest[0], rest[1:]
+	}
+	name, ok = strings.CutPrefix(strings.ToLower(rest), "contract:")
+	return sign, name, ok
 }
 
 // Membership is an object's schema-contract membership, read by
@@ -145,11 +288,7 @@ func (t Tags) Contracts() Membership {
 	}
 	for _, v := range t["behavior"] {
 		for _, tok := range SplitList(v) {
-			sign, rest := tok[0], tok
-			if sign == '+' || sign == '-' {
-				rest = tok[1:]
-			}
-			name, ok := strings.CutPrefix(strings.ToLower(rest), "contract:")
+			sign, name, ok := contractToken(tok)
 			if !ok || name == "" {
 				continue
 			}

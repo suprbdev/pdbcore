@@ -97,6 +97,17 @@ func TestOmits(t *testing.T) {
 		t.Error("+select must not omit read")
 	}
 
+	tags, _ = Parse("@behavior -filterBy -ORDERBY")
+	actions, _ = tags.Omits()
+	if want := map[string]bool{"filter": true, "order": true}; !reflect.DeepEqual(actions, want) {
+		t.Errorf("v5 spellings: actions = %v, want %v", actions, want)
+	}
+	tags, _ = Parse("@behavior -filter -order")
+	actions, _ = tags.Omits()
+	if want := map[string]bool{"filter": true, "order": true}; !reflect.DeepEqual(actions, want) {
+		t.Errorf("deprecated spellings: actions = %v, want %v", actions, want)
+	}
+
 	var nilTags Tags
 	if actions, everything := nilTags.Omits(); everything || len(actions) != 0 {
 		t.Error("nil Tags must omit nothing")
@@ -151,5 +162,57 @@ func TestContracts(t *testing.T) {
 	tags, _ := Parse("@behavior -contract:partner")
 	if actions, everything := tags.Omits(); everything || len(actions) != 0 {
 		t.Errorf("contract tokens must not count as omits: %v %v", actions, everything)
+	}
+}
+
+func TestCheck(t *testing.T) {
+	vocab := Vocabulary{
+		OmitActions: []string{"read", "create", "filter", "order"},
+		Behavior:    func(tok string) bool { return tok == "+aggregates" },
+	}
+	tags, _ := Parse("@omit reed, CREATE\n@omit reed, fliter\n" +
+		"@behavior -filterBy -orderby -select -insert -update -delete +aggregates\n" +
+		"@behavior +contract:public -contract:partner contract:internal\n" +
+		"@behavior -filter -Order -filter -aggregates -contract: +nothing")
+	got := tags.Check(vocab)
+	want := []Issue{
+		{Kind: UnknownOmit, Token: "reed"},
+		{Kind: UnknownOmit, Token: "fliter"},
+		{Kind: DeprecatedBehavior, Token: "-filter", Use: "-filterBy"},
+		{Kind: DeprecatedBehavior, Token: "-Order", Use: "-orderBy"},
+		{Kind: UnknownBehavior, Token: "-aggregates"},
+		{Kind: UnknownBehavior, Token: "-contract:"},
+		{Kind: UnknownBehavior, Token: "+nothing"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Check = %+v\nwant    %+v", got, want)
+	}
+	if issues := Tags(nil).Check(Vocabulary{}); issues != nil {
+		t.Errorf("nil Tags: %v", issues)
+	}
+	tags, _ = Parse("@omit read\n@behavior +aggregates")
+	if issues := tags.Check(Vocabulary{}); len(issues) != 2 {
+		t.Errorf("empty vocabulary: %v", issues)
+	}
+}
+
+func TestIssueMessage(t *testing.T) {
+	cases := []struct {
+		issue Issue
+		msg   string
+		attrs []any
+	}{
+		{Issue{Kind: UnknownOmit, Token: "reed"}, "unknown @omit action ignored", []any{"action", "reed"}},
+		{Issue{Kind: UnknownBehavior, Token: "-x"}, "unknown @behavior token ignored", []any{"token", "-x"}},
+		{Issue{Kind: DeprecatedBehavior, Token: "-order", Use: "-orderBy"}, "deprecated @behavior token",
+			[]any{"token", "-order", "use", "-orderBy"}},
+	}
+	for _, tc := range cases {
+		if got := tc.issue.Message(); got != tc.msg {
+			t.Errorf("%+v: Message = %q, want %q", tc.issue, got, tc.msg)
+		}
+		if got := tc.issue.Attrs(); !reflect.DeepEqual(got, tc.attrs) {
+			t.Errorf("%+v: Attrs = %v, want %v", tc.issue, got, tc.attrs)
+		}
 	}
 }

@@ -22,6 +22,13 @@ becomes the release notes of the next tag.
   pdbr, with no external compatibility promise.
 - A CI job builds and tests pdbq and pdbr at their `main` against the pull
   request.
+- `smarttags`: `Omits` maps the PostGraphile V5 `@behavior` spellings
+  `-filterBy` and `-orderBy` onto the `filter` and `order` actions; the old
+  `-filter` and `-order` stay as deprecated aliases.
+- `smarttags.Tags.Check` reports unknown `@omit` actions, unknown `@behavior`
+  tokens and deprecated `@behavior` tokens against a product's
+  `smarttags.Vocabulary`; `smartcomments/catalog.Check` runs it over every
+  commented object of a catalog.
 
 ## [0.18.0] - 2026-11-23
 
