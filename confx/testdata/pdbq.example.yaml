@@ -1,7 +1,7 @@
 database:
   # PostgreSQL connection URL, e.g. postgres://user:pass@host:5432/db. Also honours standard PG* env vars when empty.
   url: ""
-  # Maximum pooled connections (at least 1).
+  # Maximum pooled connections; 0 uses the pgx pool default (the larger of 4 and the number of CPUs).
   max_conns: 10
   # Timeout for establishing a connection (must be positive).
   connect_timeout: "10s"

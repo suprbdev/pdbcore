@@ -39,7 +39,7 @@ becomes the release notes of the next tag.
 - Strict environment loading reports a variable that doubles the
   underscore after its section (`PDBQ_ROLES__ALLOWED`) with a did-you-mean
   hint instead of ignoring it.
-- `confx.ValidateDatabase` rejects `database.max_conns` below 1, a
+- `confx.ValidateDatabase` rejects a negative `database.max_conns`, a
   non-positive `database.connect_timeout` and a negative
   `database.statement_timeout`; `ValidateIdentity` rejects a non-positive
   `auth.jwt.jwks_cache_ttl` with a JWKS URL (it silently became one hour);

@@ -226,7 +226,7 @@ func TestLoadRejectsDoubledUnderscoreAfterSection(t *testing.T) {
 
 func TestValidateSharedDurations(t *testing.T) {
 	for want, errs := range map[string][]string{
-		"database.max_conns must be >= 1":         ValidateDatabase(Database{ConnectTimeout: time.Second}),
+		"database.max_conns must be >= 0":         ValidateDatabase(Database{MaxConns: -1, ConnectTimeout: time.Second}),
 		"database.connect_timeout must be > 0":    ValidateDatabase(Database{MaxConns: 1}),
 		"database.statement_timeout must be >= 0": ValidateDatabase(Database{MaxConns: 1, ConnectTimeout: time.Second, StatementTimeout: -time.Second}),
 		"auth.jwt.jwks_cache_ttl must be > 0":     ValidateIdentity(Auth{Mode: "jwt", JWT: JWT{JWKSURL: "https://idp.example/jwks", RoleClaimPath: "role"}}, Roles{Switch: true}, Claims{}),
@@ -236,8 +236,8 @@ func TestValidateSharedDurations(t *testing.T) {
 			t.Errorf("want %q, got %q", want, errs)
 		}
 	}
-	if errs := ValidateDatabase(Database{MaxConns: 1, ConnectTimeout: time.Second}); len(errs) != 0 {
-		t.Errorf("statement_timeout 0 rejected: %q", errs)
+	if errs := ValidateDatabase(Database{ConnectTimeout: time.Second}); len(errs) != 0 {
+		t.Errorf("max_conns 0 or statement_timeout 0 rejected: %q", errs)
 	}
 	if errs := ValidateWatch(Watch{Channel: "c"}, ""); len(errs) != 0 {
 		t.Errorf("disabled watch checked: %q", errs)

@@ -23,12 +23,13 @@ func InvalidConfig(errs []string) error {
 }
 
 // ValidateDatabase checks the database section's numbers: max_conns must
-// be at least 1, connect_timeout positive (0 would wait for a connection
-// forever) and statement_timeout not negative (0 disables it).
+// not be negative (0 uses the pgx pool default), connect_timeout must be
+// positive (0 would wait for a connection forever) and statement_timeout
+// not negative (0 disables it).
 func ValidateDatabase(d Database) []string {
 	var errs []string
-	if d.MaxConns < 1 {
-		errs = append(errs, "database.max_conns must be >= 1")
+	if d.MaxConns < 0 {
+		errs = append(errs, "database.max_conns must be >= 0 (0 uses the pool default)")
 	}
 	if d.ConnectTimeout <= 0 {
 		errs = append(errs, "database.connect_timeout must be > 0")
