@@ -29,11 +29,14 @@ type Catalog struct {
 	// ServerVersionNum is current_setting('server_version_num'), e.g.
 	// 180001 for 18.1. Gate version-dependent SQL on it rather than parsing
 	// ServerVersion. [Catalog.Hash] covers its major part only.
-	ServerVersionNum int          `json:"server_version_num"`
-	Schemas          []string     `json:"schemas"`
-	Tables           []*Table     `json:"tables"`
-	Enums            []*Enum      `json:"enums"`
-	Composites       []*Composite `json:"composites"`
+	ServerVersionNum int `json:"server_version_num"`
+	// Schemas are the introspected schemas in the order given to
+	// [Introspect], which products treat as a priority order (the first
+	// schema is the primary one). [Catalog.Hash] ignores their order.
+	Schemas    []string     `json:"schemas"`
+	Tables     []*Table     `json:"tables"`
+	Enums      []*Enum      `json:"enums"`
+	Composites []*Composite `json:"composites"`
 	// [Introspect] orders Functions by schema, then name, then input parameters
 	// (Args): fewer parameters first, then parameter by parameter by type
 	// schema and type name. PostgreSQL identifies a function by exactly
@@ -736,6 +739,7 @@ func (c *Catalog) Hash() (string, error) {
 		Domains:          slices.Clone(c.Domains),
 	}
 	v.sortStable()
+	slices.Sort(v.Schemas)
 	b, err := json.Marshal(v)
 	if err != nil {
 		return "", err
@@ -744,12 +748,11 @@ func (c *Catalog) Hash() (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// sortStable puts the catalog's top-level slices in the canonical order
-// [Introspect] returns: schemas by name; tables, enums, composites, ranges
+// sortStable puts the catalog's top-level slices other than Schemas in the
+// canonical order [Introspect] returns: tables, enums, composites, ranges
 // and domains by schema then name; extensions by name; and functions by
 // [compareFunctions].
 func (c *Catalog) sortStable() {
-	slices.Sort(c.Schemas)
 	byName := func(as, an, bs, bn string) int {
 		return cmp.Or(strings.Compare(as, bs), strings.Compare(an, bn))
 	}

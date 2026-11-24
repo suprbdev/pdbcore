@@ -38,7 +38,7 @@ func Introspect(ctx context.Context, db Querier, schemas []string) (*Catalog, er
 	if len(schemas) == 0 {
 		schemas = []string{"public"}
 	}
-	cat := &Catalog{FormatVersion: CatalogFormatVersion, Schemas: schemas}
+	cat := &Catalog{FormatVersion: CatalogFormatVersion, Schemas: slices.Clone(schemas)}
 
 	if err := db.QueryRow(ctx, `SELECT current_setting('server_version'), current_setting('server_version_num')::int`).
 		Scan(&cat.ServerVersion, &cat.ServerVersionNum); err != nil {

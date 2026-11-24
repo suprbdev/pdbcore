@@ -1096,3 +1096,32 @@ func TestIntrospectIndexOpClassesLive(t *testing.T) {
 		}
 	}
 }
+
+func TestIntrospectKeepsSchemaOrderLive(t *testing.T) {
+	url := os.Getenv("PDBCORE_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("PDBCORE_TEST_DATABASE_URL not set; run `make test-e2e`")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	schemas := []string{"public", "app", "audit"}
+	cat, err := Introspect(ctx, conn, schemas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"public", "app", "audit"}
+	if !reflect.DeepEqual(schemas, want) {
+		t.Fatalf("Introspect reordered its argument: %v", schemas)
+	}
+	if !reflect.DeepEqual(cat.Schemas, want) {
+		t.Fatalf("Catalog.Schemas = %v, want the configured order %v", cat.Schemas, want)
+	}
+	cat.Schemas[0] = "changed"
+	if schemas[0] != "public" {
+		t.Fatal("Catalog.Schemas shares the caller's slice")
+	}
+}
