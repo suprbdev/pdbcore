@@ -12,6 +12,13 @@ becomes the release notes of the next tag.
 
 ## [Unreleased]
 
+### Added
+
+- `confx.FlagHint` and `cliflags.Explain`: an unknown command-line flag that
+  was a moved or removed config key is reported with the same "moved to" or
+  "removed" hint as the key in a file (`unknown flag: --rls.enabled: moved to
+  --roles.switch`). Install `Explain` with cobra's `SetFlagErrorFunc`.
+
 ## [0.19.0] - 2026-11-24
 
 ### Added

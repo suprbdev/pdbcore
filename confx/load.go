@@ -59,6 +59,28 @@ func WithFlags(values map[string]any) LoadOption {
 	}
 }
 
+// FlagHint explains an unknown command-line flag name (without the dashes;
+// flags are named after koanf paths) the way Load explains an unknown file
+// key: "moved to --<key>", "removed: <reason>" or "did you mean --<key>?".
+// dst is the defaults struct the flags configure and opts the same
+// WithMoved and WithRemoved options the product passes to Load. It returns
+// "" when nothing is close.
+func FlagHint(dst any, name string, opts ...LoadOption) string {
+	o := newLoadOpts()
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return schemaOf(dst).unknownKey(name, o.hints, func(p string) string { return "--" + p })
+}
+
+func newLoadOpts() loadOpts {
+	o := loadOpts{hints: hints{moved: map[string]string{}, removed: map[string]string{}}, flags: map[string]any{}}
+	for k, v := range movedKeys {
+		o.moved[k] = v
+	}
+	return o
+}
+
 // Load layers configuration into dst (which already holds the defaults):
 // optional YAML file, then envPrefix-prefixed environment variables, then
 // command-line values (WithFlags).
@@ -74,10 +96,7 @@ func WithFlags(values map[string]any) LoadOption {
 // are decoded with weak typing, so environment strings set booleans,
 // numbers, durations and lists. Validation is the caller's job.
 func Load(envPrefix, path string, dst any, opts ...LoadOption) error {
-	o := loadOpts{hints: hints{moved: map[string]string{}, removed: map[string]string{}}, flags: map[string]any{}}
-	for k, v := range movedKeys {
-		o.moved[k] = v
-	}
+	o := newLoadOpts()
 	for _, opt := range opts {
 		opt(&o)
 	}
